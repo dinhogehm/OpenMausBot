@@ -64,7 +64,7 @@ export interface DesktopDriver {
 export type DesktopStep = { ok: true; suggestion?: string; note?: string } | DesktopStop;
 /** `draft`: text nobody sent sits in the field (never typed over);
  * `leftProbe`: the probe "." stayed at its end (the person came back first). */
-export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown"; trustNeeded?: string };
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown"; trustNeeded?: string; trusted?: boolean };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -76,8 +76,12 @@ const HUMAN_SLACK_MS = 500;
  * line ("Responder…", never "Responder ao cliente…"), and only where the
  * field is (see findComposer) — a line of the conversation is not it. */
 const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder|Reply)(?:\s*(?:…|\.{3}))?$/i;
-/** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
-const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
+/** The field of a new, empty session. The app (2.26454.0, ion-dist i18n)
+ * draws one of two: "Descreva uma tarefa ou faça uma pergunta" (RLloCeiLx7,
+ * the only one OCR read so far, up to 06/10 14:52Z) or, behind a flag of its
+ * own, "Descreva algo para criar, alterar ou corrigir" (sIl97ARhWm) — both
+ * taken, in pt-BR and English, until a live screen shows which (R13-dispatch). */
+const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task|Descreva algo para criar|Describe something to build)\b/i;
 const BACKSPACE = 51;
 /** The one character typed to tell an app suggestion from a draft. */
 const SUGGESTION_PROBE = ".";
@@ -412,7 +416,9 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       return { ok: false, reason: `the app asks to trust the workspace of the new session (${input.repoName}); nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.repoName, seen: seenText(bottom.slice(-8)) };
     }
     if (!showsFolder(bottom, input.repoName)) {
-      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // no new session at all (no empty field, no chips) is not "another folder": a session opened by hand would not change it (R13-dispatch R13-2c)
+      if (!newSessionScreen(bottom, input.repoName)) return { ok: false, reason: `New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      return { ok: false, reason: `the new session did not open in ${input.repoName} (it shows another folder in its chips: the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     }
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
@@ -463,6 +469,8 @@ export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null 
 // Whole lines only, never a sentence that starts so ("Confiar no workspace
 // do cliente é arriscado", "Confiar?") — INSP-R12a X3-3.
 const TRUST_BUTTON = /^(?:Confiar|Trust)$/i;
+/** A scratch folder the app makes on its own ("scratch-2026-10-06-c55113"). */
+const SCRATCH_FOLDER = /\bscratch-\d{4}-\d{2}-\d{2}\b|scratch-workspaces/i;
 const TRUST_LINE = /^(?:[•·]\s*)?(?:Confiar (?:no|neste|nesse) (?:workspace|espaço de trabalho)|Trust (?:this |the )?(?:workspace|folder))(?:\s+[\w.…-]+)?$/i;
 /** Callers pass only the new session's own band (the composer's, y > 55%), never a conversation above it. */
 export function trustPrompt(lines: OcrLine[]): OcrLine | null {
@@ -523,10 +531,12 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
       if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
       if (!showsFolderName(lines, input.folderName)) return { ok: false, reason: `the new session does not show the folder ${input.folderName} in its chips; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+      // a scratch folder of the app's on screen too (where a "trust" sent b23900b6 on 06/10): never ours
+      if (lines.some((line) => SCRATCH_FOLDER.test(line.text))) return { ok: false, reason: `the new session shows a scratch folder of the app's, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
       return { field };
     };
     let bottom = await band();
-    let seen = ours(bottom);
+    const seen = ours(bottom);
     if ("ok" in seen) return seen;
     // The app asks to trust a folder it has not seen ("Confiar no workspace",
     // 05/10 #9378). Clicked only now that the screen shows our folder, and
@@ -542,9 +552,13 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       await driver.sleep(1_000);
       bottom = await band();
       if (trustPrompt(bottom)) return { ok: false, reason: `the app still asks to trust the workspace ${input.folderName} after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-      // and still our folder's new session after it
-      seen = ours(bottom);
-      if ("ok" in seen) return seen;
+      // Never pasted on the screen of the click: both times the server
+      // clicked it (06/10 11:06 and 12:01 BRT) the app saved the trust and
+      // then started the session in a scratch folder of its own, a second
+      // later, with our chip still read. The link is opened again on the
+      // next try, the folder now trusted, and checked from the start
+      // (R13-dispatch R13-3).
+      return { ok: false, reason: `trusted the workspace ${input.folderName}; nothing was typed — the app's link is opened again and the folder checked before the brief goes in`, retry: true, touched: true, trusted: true, seen: seenText(bottom.slice(-8)) };
     }
     const { field } = seen;
     // the folder IS the worktree: with the app's worktree option on, the app

@@ -135,6 +135,15 @@ export interface OwnWorktreeDeps {
   wrongFolder?: (session: CcSession, folder: string) => void;
   /** A create through the server's worktree given up because the new session's worktree option read ON or unreadable (the breaker counts it). */
   chipRefused?: (session: CcSession, option: "on" | "unknown", seen?: string) => void;
+  /** A create through the server's worktree given up for any other miss —
+   * the link opened no new session, its chips showed another folder — with
+   * the last reason and what the screen showed: the breaker counts it too
+   * (R13-dispatch R13-2: 13 such give-ups on 06/10, none counted). */
+  abandoned?: (session: CcSession, reason: string, seen?: string) => void;
+  /** Both ways of the app failed for this create (its own worktree, then
+   * New Session): the same brief goes to the cli, as one start with the
+   * failure on record. The cli session's id, its queue entry, or why not. */
+  toCli?: (session: CcSession, why: string) => { sessionId: string } | { queueId: string } | { refusal: string };
   /** A create was adopted in a worktree of its own (either way): the breaker rearms. */
   adopted?: (session: CcSession) => void;
 }
@@ -306,7 +315,10 @@ function fallBackToNewSession(deps: DesktopWorkDeps, session: CcSession, why: st
   const own = desktop.own!;
   const blocked = deps.own?.classicBlocked(session) ?? null;
   if (blocked) {
-    failDesktopSession(deps, session, `${why}; and New Session, the old way, would land in a wrong folder now — ${blocked}`);
+    const reason = `${why}; and New Session, the old way, would land in a wrong folder now — ${blocked}`;
+    // the app would not open in the worktree, and New Session is barred: both ways of the app failed (a worktree never made is not one)
+    if (own.state === "abandoned") appWaysFailed(deps, session, reason);
+    else failDesktopSession(deps, session, reason);
     return;
   }
   desktop.pending = { kind: "create", text: own.classicText, since: desktop.pending?.since ?? deps.now(), attempts: 0 };
@@ -366,7 +378,9 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
   const desktop = session.desktop!;
   const pending = desktop.pending;
   if (!pending || pending.kind === "create") {
-    failDesktopSession(deps, session, reason);
+    // New Session failing after the server's own worktree did: both ways of the app failed
+    if (pending && desktop.own?.state === "abandoned") appWaysFailed(deps, session, `${desktop.own.reason ? `the app did not open the session in the worktree the server made (${desktop.own.reason.slice(0, 200)}), and then ` : ""}New Session failed too: ${reason}`);
+    else failDesktopSession(deps, session, reason);
     return;
   }
   delete desktop.pending;
@@ -414,7 +428,7 @@ export function takeFreshQueued(deps: Pick<DesktopWorkDeps, "ledger" | "now" | "
   return next;
 }
 
-export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
+export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, reason: string, then?: (session: CcSession) => string | null): void {
   if (session.desktop) {
     delete session.desktop.pending;
     delete session.desktop.sent;
@@ -422,9 +436,33 @@ export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, re
   session.status = "failed";
   session.lastError = reason;
   session.failedAt = deps.now();
+  // what was done about it once the failure is on record (it frees the cli: R13-1), said in the same report
+  const after = then?.(session);
+  if (after) session.lastError = `${reason}. ${after}`;
   deps.ledger.save();
   deps.chip(session, `parou com um problema — ${sessionErrorPt(reason).slice(0, 120)}`, false);
   deps.report(session, reportFor(deps, session));
+}
+
+/** Both ways of the app failed for a create (the server's worktree, then
+ * New Session, or New Session barred): the session fails — on record, which
+ * frees the cli — and the same brief is started there at once, the reason
+ * recorded, instead of a bot finding out and asking (R13-dispatch R13-2). */
+function appWaysFailed(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
+  failDesktopSession(deps, session, reason, (failed) => {
+    if (!deps.own?.toCli) return null;
+    let started: ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>>;
+    try {
+      started = deps.own.toCli(failed, reason);
+    } catch (error) {
+      started = { refusal: error instanceof Error ? error.message.slice(0, 200) : String(error) };
+    }
+    failed.desktop!.cliFallback = { at: deps.now(), ...started };
+    deps.log?.(`create: session ${failed.id} failed both ways of the app — ${"sessionId" in started ? `started in the cli as ${started.sessionId}` : "queueId" in started ? `queued for the cli (${started.queueId})` : `the cli refused: ${started.refusal}`}`);
+    if ("sessionId" in started) return `Both ways of the Claude app failed, so the server started the same brief in the CLI as session ${started.sessionId}; its report comes here. Do not start it again`;
+    if ("queueId" in started) return `Both ways of the Claude app failed, so the server put the same brief in the session queue for the CLI (${started.queueId}); it opens by itself. Do not start it again`;
+    return `Both ways of the Claude app failed, and the server could not start the same brief in the CLI: ${started.refusal}`;
+  });
 }
 
 const actionLabel = (kind: CcDesktopPending["kind"]) =>
@@ -869,6 +907,12 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       giveUpPending(deps, next, step.reason);
       return;
     }
+    // after a "trust" click the link is opened again (R13-3); a second click is a miss, so a prompt that keeps coming back ends
+    if (step.trusted && own) {
+      pending.trustClicks = (pending.trustClicks ?? 0) + 1;
+      if (pending.trustClicks > 1) step.miss = true;
+      deps.chip(next, `confiei no workspace ${basename(own.path)} no app Claude; reabrindo o link e conferindo a pasta antes de colar`, false);
+    }
     if (step.miss && own) {
       pending.misses = (pending.misses ?? 0) + 1;
       // the last miss says why: a chip reading from an earlier miss never sticks to one of another cause (INSP-R12a X3-5)
@@ -883,8 +927,10 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       if (pending.misses >= OWN_OPEN_MAX_MISSES) {
         own.state = "abandoned";
         own.reason = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`.slice(0, 600);
-        // the worktree option ON (or unreadable) counts in the breaker like a wrong folder, with its own diagnosis (R12-1)
+        // the worktree option ON (or unreadable) counts in the breaker like a wrong folder, with its own diagnosis (R12-1);
+        // so does any other give-up: no new session from the link, another folder's chips (R13-2)
         if (pending.worktreeOption) deps.own?.chipRefused?.(next, pending.worktreeOption, pending.worktreeSeen);
+        else deps.own?.abandoned?.(next, step.reason, step.seen);
         fallBackToNewSession(deps, next, `o app não abriu a sessão na worktree criada pelo OMB em ${pending.misses} tentativas (${step.reason.slice(0, 160)})`);
         return;
       }

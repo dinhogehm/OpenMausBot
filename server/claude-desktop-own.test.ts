@@ -244,14 +244,53 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
     return { worktree, alias };
   };
 
-  it("trusts the workspace only once the screen shows our folder's new session, and the folder is a worktree git lists, then pastes", async () => {
+  it("trusts the workspace only once the screen shows our folder's new session, and the folder is a worktree git lists — and pastes nothing on that screen: the link is opened again first (R13-3)", async () => {
     const { worktree, alias } = ownFolder();
     const app = fakeApp([screen9378(true), screen9378(false), SENT]);
     const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "9378 Supervisor\n[OMBX]\n\nPasso 0…", expected: worktree, registered: () => ["/elsewhere", worktree] });
-    expect(step).toEqual({ ok: true });
-    // the prompt (1st line, y 700) clicked, then the field, then the paste
+    expect(step).toMatchObject({ ok: false, retry: true, touched: true, trusted: true });
+    expect((step as { miss?: boolean }).miss).toBeUndefined();
+    expect(!step.ok && step.reason).toContain("the app's link is opened again and the folder checked before the brief goes in");
+    // the prompt (1st line, y 700) clicked, and nothing else
     expect(app.actions[1]).toBe("click 700,708");
-    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(true);
+    expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("type") || action.startsWith("key"))).toBe(false);
+  });
+
+  // ~/Library/Logs/Claude/main.log, 06/10 (BRT): both clicks the server made.
+  //   11:06:05 saveTrust …/9378-supervisor-papel-base-gerente-b23900 → 11:06:15 createScratchWorkspace,
+  //            Starting local session local_8279164e… in …/scratch-2026-10-06-c55113 (b23900b6: the brief in a scratch)
+  //   12:01:25 saveTrust …/9384-hook-v2-7-c2b-append-atendimento-b7fcd0 → 12:01:28 prewarmLocal in …/scratch-2026-10-06-f4fcb5
+  // server.log has the chips still ours a second after the click, and the brief pasted there.
+  it("the 11:06 and 12:01 sequences of 06/10: click, then the link opened again with the folder trusted, checked, and only then the paste", async () => {
+    for (const folder of ["9378-supervisor-papel-base-gerente-b23900", "9384-hook-v2-7-c2b-append-atendimento-b7fcd0"]) {
+      const root = mkdtempSync(join(tmpdir(), "omb-trust-"));
+      dirs.push(root);
+      const worktree = join(root, "nuria-platform", ".claude", "worktrees", folder);
+      mkdirSync(worktree, { recursive: true });
+      const alias = join(root, ".omb-worktree-links", "nuria-platform", folder);
+      mkdirSync(join(alias, ".."), { recursive: true });
+      symlinkSync(worktree, alias);
+      const cut = `${folder.slice(0, 22)}…`;
+      const prompt = ["Confiar no workspace", "• Local", `• ${cut}`, `2º omb/${folder.slice(0, 20)}... 1O worktree`, "Descreva uma tarefa ou faça uma pergunta", "+ O v Automático"];
+      const after = prompt.slice(1);
+      const input = { folder: alias, folderName: folder, text: `${folder.slice(0, 4)} brief\n[OMBX]`, expected: worktree, registered: () => [worktree] };
+      // the try with the prompt: the click, our chip a second later — and no paste (the app was about to move it to a scratch)
+      const first = fakeApp([prompt, after]);
+      expect(await openDesktopSessionIn(first.driver, input)).toMatchObject({ ok: false, trusted: true });
+      expect(first.actions.some((action) => action.startsWith("paste"))).toBe(false);
+      // the next try: the link again, no prompt now, our folder checked from the start, then the brief
+      const second = fakeApp([after, SENT]);
+      expect(await openDesktopSessionIn(second.driver, input)).toEqual({ ok: true });
+      expect(second.actions[0]).toBe(`open claude://code/new?folder=${encodeURIComponent(alias)}`);
+      expect(second.actions.some((action) => action.startsWith("paste"))).toBe(true);
+      // and should the reopened link show the scratch the app made, nothing goes in
+      const scratch = fakeApp([[...after.slice(0, 2), "scratch-2026-10-06-c55113", ...after.slice(2)]]);
+      const refused = await openDesktopSessionIn(scratch.driver, input);
+      expect(refused).toMatchObject({ ok: false, miss: true });
+      expect(!refused.ok && refused.reason).toContain("scratch folder");
+      expect(scratch.actions.some((action) => action.startsWith("paste") || action.startsWith("click"))).toBe(false);
+    }
   });
 
   it("clicks nothing when the folder is not a worktree git lists for the repository, or is not ours: the person is asked (trustNeeded)", async () => {
@@ -324,6 +363,16 @@ describe("a new session in the server's own folder", () => {
     expect(app.actions.filter((action) => action.startsWith("open "))).toHaveLength(1);
     expect(app.actions).toContain(`type  ${DESKTOP_BRIEF_NOTE}`);
     expect(app.actions.at(-1)).toBe("key 36");
+  });
+
+  it("takes the new-session field the app draws today in either of its two texts (2.26454.0, ion-dist i18n) — R13-dispatch", async () => {
+    for (const field of ["Descreva uma tarefa ou faça uma pergunta", "Descreva algo para criar, alterar ou corrigir", "Describe a task or ask a question", "Describe something to build, change, or fix"]) {
+      const app = fakeApp([NEW_IN_FOLDER.map((line) => (line.startsWith("Descreva uma tarefa") ? field : line)), SENT]);
+      expect({ field, step: await openDesktopSessionIn(app.driver, { folder: LINK, folderName: FOLDER, text: "brief" }) }).toEqual({ field, step: { ok: true } });
+    }
+    // the composer of a session already open is no new session's field
+    const open = fakeApp([NEW_IN_FOLDER.map((line) => (line.startsWith("Descreva uma tarefa") ? "Digite / para comandos" : line))]);
+    expect(await openDesktopSessionIn(open.driver, { folder: LINK, folderName: FOLDER, text: "brief" })).toMatchObject({ ok: false, miss: true });
   });
 
   it("types nothing when the link did not open a new session (no empty task field): a miss", async () => {

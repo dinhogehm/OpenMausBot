@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
+  appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
 } from "./own-worktrees.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -465,8 +465,45 @@ describe("the breaker (R11-1)", () => {
     const item = ownBreakerItem(REPO, [failure("a", `${W}/.claude/worktrees/app-1`), failure("b", REPO)]);
     expect(item.title).toBe("O app Claude abriu 2 sessões de nuria-platform fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas");
     expect(item.why).toContain('- "a título": o app criou uma worktree própria');
-    expect(item.why).toContain("as sessões novas vão pelo jeito antigo (Nova sessão), com o 409 e o gesto de sempre");
+    expect(item.why).toContain("as sessões novas deste repositório vão direto para a CLI (no terminal, fora do app Claude), sem tentar o app de novo");
     expect(item.steps.map((step) => step.text).join(" ")).toContain("Deixe-o DESLIGADO");
+  });
+});
+
+// R13-dispatch R13-2: 13 creates given up on 06/10, none counted, no item;
+// the last two (#9032, 0e2ba7eb and 7d8a26ca) as the ledger has them.
+describe("the breaker counts every give-up of the path, and sends the next sessions to the cli (R13-2)", () => {
+  const SEEN = "Never skip, bypass or fake the gate; never push to main, never force. | Order of a batch: hotfix/PO/P1 first, ahead of any Cl or infrastructure PR";
+  const missed = (id: string, folder: string, at: number, reason: string): OwnFailure => ({ at, sessionId: id, title: "9032 Equipe em massa tickets N1", folder: "", expected: `${REPO}/.claude/worktrees/${folder}`, missed: reason, seen: SEEN });
+  const first = missed("0e2ba7eb-dd8d-4a71-9b83-67d65551cf8f", "9032-equipe-em-massa-tickets-n1", 1791325667722, "the app's link did not open a new session for 9032-equipe-em-massa-tickets-n1 (no empty task field); nothing was clicked or typed");
+  const second = missed("7d8a26ca-ad00-4b4b-9e6f-7ad337084ab6", "9032-equipe-em-massa-tickets-n1-7d8a26", 1791327408569, "the app's link did not open a new session for 9032-equipe-em-massa-tickets-n1-7d8a26 (no empty task field); nothing was clicked or typed");
+
+  it("trips on the 2nd give-up in a row in the repository, and the owner's item says what the screen showed", () => {
+    let out = noteOwnFailure({ repos: {} }, REPO, first);
+    expect(out.tripped).toBe(false);
+    out = noteOwnFailure(out.state, REPO, second);
+    expect(out.tripped).toBe(true);
+    const item = ownBreakerItem(REPO, out.state.repos[REPO]!.failures);
+    expect(item.title).toBe("O app Claude não abriu 2 sessões seguidas de nuria-platform na worktree que o servidor criou: as próximas vão direto para a CLI até você conferir o app");
+    expect(item.why).toContain('- "9032 Equipe em massa tickets N1": o link do app não abriu uma sessão nova (a tela mostrou uma conversa, sem o campo vazio de tarefa) (a tela mostrou: Never skip, bypass');
+    expect(item.why).toContain("vão direto para a CLI");
+    expect(item.steps.map((step) => step.text).join(" ")).toContain("Descreva algo para criar");
+    // the chips of the folder before (b3a17a95, 06/10 14:36Z) said as such
+    expect(ownFailureCause({ folder: "", expected: "x", missed: "the new session does not show the folder 9384-hook-v2-7-c2b-append-atendimento-b7fcd0 in its chips; nothing was clicked or typed" }, REPO)).toContain("a sessão nova mostrou outra pasta nos chips (a da sessão anterior)");
+  });
+
+  it("sends new sessions to the cli only while tripped with the owner asked, until the item is resolved (rearmed)", () => {
+    let out = noteOwnFailure({ repos: {} }, REPO, first);
+    expect(ownBreakerCli(out.state, REPO)).toBeNull();
+    out = noteOwnFailure(out.state, REPO, second);
+    // tripped, nobody asked yet (no conversation held the item): the old way still runs, so a create that works rearms it
+    expect(ownBreakerCli(out.state, REPO)).toBeNull();
+    const asked: OwnBreakerState = { repos: { [REPO]: { ...out.state.repos[REPO]!, itemId: "o40" } } };
+    const said = ownBreakerCli(asked, REPO);
+    expect(said).toContain("o app Claude não abriu as últimas 2 sessões de nuria-platform na worktree que o servidor cria (disjuntor desde 06/10");
+    expect(said).toContain("as sessões novas vão direto para a CLI até o dono resolver o item");
+    expect(ownBreakerCli(asked, "/other")).toBeNull();
+    expect(ownBreakerCli(rearmOwnBreaker(asked, REPO), REPO)).toBeNull();
   });
 });
 

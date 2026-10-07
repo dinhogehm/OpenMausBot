@@ -11,16 +11,17 @@ import { waitForExit } from "./testing/cleanup.ts";
 // the server's worktree land in a worktree the app made INSIDE it (its
 // worktree option on): both fail at adoption, the 2nd trips the breaker, the
 // owner gets one item with the diagnosis, and the disk report lists the two
-// worktrees "da sessão falhada". Then a start from the queue goes the OLD
-// way: the app's records show a reused folder, so it meets the 409 — the
-// server's own path is not taken. Resolving the owner's item rearms it.
-// No create ever reaches the screen: the sessions were already sent, and the
-// one start meets the 409 before anything is queued for the Mac.
+// worktrees "da sessão falhada". Then a start from the queue goes straight
+// to the cli (R13-dispatch R13-2: on 06/10 the old way failed along with the
+// app's link every time) — no app, no worktree of the server's, no 409.
+// Resolving the owner's item rearms it. No create ever reaches the screen:
+// the sessions were already sent, and the one start runs headless (a stand-in
+// cli that does nothing).
 
 const GIT_DIR = ["/usr/bin", "/bin"].find((dir) => existsSync(join(dir, "git"))) ?? "";
 
-it.runIf(process.platform === "darwin")("two sessions in the app's own worktree trip the breaker: one owner item, the old way with its 409, worktrees told; the item resolved rearms it", async () => {
-  const env = { ...process.env, OMB_AUTONOMY_TICK_MS: "200", OMB_AUTONOMY_MINUTE_MS: "200", OMB_TEST_GRANT_PATH: GIT_DIR };
+it.runIf(process.platform === "darwin")("two sessions in the app's own worktree trip the breaker: one owner item, the next start straight to the cli, worktrees told; the item resolved rearms it", async () => {
+  const env = { ...process.env, OMB_AUTONOMY_TICK_MS: "200", OMB_AUTONOMY_MINUTE_MS: "200", OMB_TEST_GRANT_PATH: GIT_DIR, OMB_CC_BIN: "/usr/bin/true" };
   const fixture = await launchVerificationServer(env);
   const { url, dataDir, logPath } = fixture.info;
   // the repository under the fixture's HOME (a start takes only repositories of the home): ~/Projetos/nuria-platform
@@ -79,14 +80,14 @@ it.runIf(process.platform === "darwin")("two sessions in the app's own worktree 
     expect(mine).toHaveLength(1);
     expect(mine[0].title).toContain("deixe a opção worktree DESLIGADA");
     expect(mine[0].why).toContain("o app criou uma worktree própria dentro da pasta do OMB");
-    expect(mine[0].why).toContain("pelo jeito antigo (Nova sessão), com o 409");
-    expect(readFileSync(logPath, "utf8")).toContain("breaker tripped, new sessions go the old way");
+    expect(mine[0].why).toContain("vão direto para a CLI (no terminal, fora do app Claude), sem tentar o app de novo");
+    expect(readFileSync(logPath, "utf8")).toContain("breaker tripped, new sessions go straight to the cli until the owner resolves the item");
     // the worktrees of the failed sessions: told, nothing removed
     const left = (await own()).left as any[];
     expect(left.map((each) => [each.sessionId, each.why])).toEqual([["s9353", "failed"], ["s9354", "failed"]]);
     for (const session of sessions) expect(existsSync(session.desktop.own.path)).toBe(true);
 
-    // the next start (from the queue) goes the old way: the app's records show a reused folder → its 409
+    // the next start (from the queue) goes straight to the cli — even with the app's records showing a reused folder (the old way's 409)
     await stop();
     // (the start names the repository as the person does: the home's spelling, not /private/…)
     const reused = join(made, ".claude", "worktrees", "reab-496989");
@@ -96,13 +97,14 @@ it.runIf(process.platform === "darwin")("two sessions in the app's own worktree 
     await boot();
     const queue = () => JSON.parse(readFileSync(join(dataDir, "cc-start-queue.json"), "utf8")).items as any[];
     try {
-      await expect.poll(() => queue()[0]?.lastReason ?? "", { timeout: 20_000, interval: 200 }).toContain("não abri: a sessão mais recente do app Claude");
+      await expect.poll(() => ledger().filter((each) => each.title === "9355 Outra").map((each) => each.surface), { timeout: 20_000, interval: 200 }).toEqual(["cli"]);
     } catch (error) {
       const said = ((await request(`/api/threads/${thread}/messages`, { method: "GET" }, url) as any).messages ?? []).filter((message: any) => /Fila/.test(JSON.stringify(message))).slice(-4).map((message: any) => JSON.stringify(message).slice(0, 600));
       const reports = JSON.stringify(JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")).reports ?? []).match(/Fila de sess[^"]{0,600}/g);
       throw new Error(`${String(error)}\nqueue: ${JSON.stringify(queue())}\nreports: ${reports?.join("\n")}\nthread: ${said.join("\n")}\nlog:\n${readFileSync(logPath, "utf8").split("\n").filter((line) => /queue|own-worktrees|claude-desktop|cc-session/i.test(line)).slice(-25).join("\n")}`);
     }
-    expect(ledger().map((each) => each.id).sort()).toEqual(["s9353", "s9354"]); // nothing opened, the server's path not taken
+    expect(queue()).toEqual([]);
+    expect(ledger().filter((each) => each.surface === "app").map((each) => each.id).sort()).toEqual(["s9353", "s9354"]); // nothing opened in the app, the server's path not taken
     expect(existsSync(join(repo, ".claude", "worktrees", "9355-outra"))).toBe(false);
     expect(readFileSync(logPath, "utf8")).not.toMatch(/\[claude-desktop\] create start/);
 

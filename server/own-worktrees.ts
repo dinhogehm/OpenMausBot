@@ -782,15 +782,18 @@ export class OwnWorktreeStore {
 // (one it made itself with its worktree option on, the root, another
 // worktree) stops at its folder check and fails. Two in a row in the same
 // repository and the server stops using this path there: the owner gets
-// one item with the diagnosis, and the starts go the old way (New Session,
-// its 409 and gesture) until a create works or the owner resolves the item
-// (R11-dispatch R11-1).
+// one item with the diagnosis, and the starts go straight to the cli — no
+// app at all, the old way failed with it every time on 06/10 — until the
+// owner resolves the item (R11-dispatch R11-1, R13-dispatch R13-2). Every
+// give-up of this path counts: a wrong folder, the worktree option on, and
+// a link that opened no new session or showed another folder's chips.
 
 export const OWN_BREAKER_FAILURES = 2;
 
 /** `chip`: the session never opened — its worktree option read ON or
- * unreadable, so nothing was typed (R12-1); `folder` is then empty. */
-export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string; chip?: "on" | "unknown"; seen?: string }
+ * unreadable, so nothing was typed (R12-1); `missed`: it never opened for
+ * another reason, the last one of its misses (R13-2). `folder` is then empty. */
+export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string; chip?: "on" | "unknown"; missed?: string; seen?: string }
 export interface OwnBreakerRepo { failures: OwnFailure[]; trippedAt?: number; itemId?: string }
 export interface OwnBreakerState { repos: Record<string, OwnBreakerRepo> }
 
@@ -811,6 +814,16 @@ export function breakerRepo(repo: string, realpath: (path: string) => string = r
   try { return realpath(repo); } catch { return repo; }
 }
 
+/** Why a new session of `repo` goes straight to the cli: its breaker tripped
+ * and the owner was asked (an item open), until they resolve it — or null.
+ * Tripped with nobody asked, the old way still runs, so a create that works
+ * can rearm it (R13-dispatch R13-2). */
+export function ownBreakerCli(state: OwnBreakerState, repo: string): string | null {
+  const entry = state.repos[repo];
+  if (entry?.trippedAt === undefined || !entry.itemId) return null;
+  return `o app Claude não abriu as últimas ${entry.failures.length} sessões de ${basename(repo)} na worktree que o servidor cria (disjuntor desde ${new Date(entry.trippedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}); as sessões novas vão direto para a CLI até o dono resolver o item`;
+}
+
 /** Rearmed: a create that worked, or the owner's item resolved. */
 export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreakerState {
   if (!state.repos[repo]) return state;
@@ -820,7 +833,8 @@ export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreake
 }
 
 /** What happened to one failure, in words: the app's own worktree inside or beside ours means its worktree option was on. */
-export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected" | "chip" | "seen">, repo: string): string {
+export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected" | "chip" | "missed" | "seen">, repo: string): string {
+  if (failure.missed) return `${missedCause(failure.missed)}${failure.seen ? ` (a tela mostrou: ${failure.seen.slice(0, 120)})` : ""}; nada foi colado`;
   if (failure.chip) return `a opção worktree estava ${failure.chip === "on" ? "LIGADA" : "ilegível"} na sessão nova${failure.seen ? ` (a tela mostrou: ${failure.seen.slice(0, 120)})` : ""}; nada foi colado — desligue-a antes de abrir sessão`;
   if (failure.folder.startsWith(`${failure.expected}/`)) return `o app criou uma worktree própria dentro da pasta do OMB (${failure.folder}): a opção worktree estava LIGADA`;
   if (failure.folder === repo) return "o app abriu na raiz do repositório, não na pasta do OMB";
@@ -828,26 +842,46 @@ export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected" 
   return `o app abriu em ${failure.folder}, não na pasta do OMB`;
 }
 
+/** A miss of the screen (desktop-work's reason, in English) said in pt-BR. */
+function missedCause(reason: string): string {
+  if (/no empty task field/i.test(reason)) return "o link do app não abriu uma sessão nova (a tela mostrou uma conversa, sem o campo vazio de tarefa)";
+  if (/does not show the folder/i.test(reason)) return "a sessão nova mostrou outra pasta nos chips (a da sessão anterior), não a worktree do OMB";
+  if (/scratch folder/i.test(reason)) return "a sessão nova mostrou uma pasta de rascunho (scratch) do app";
+  if (/still asks to trust/i.test(reason)) return "o app continuou pedindo para confiar no workspace depois do clique";
+  return `o app não abriu a sessão na worktree do OMB (${reason.slice(0, 120)})`;
+}
+
 /** The owner's item when the breaker trips. */
 export function ownBreakerItem(repo: string, failures: readonly OwnFailure[]): { title: string; why: string; steps: Array<{ text: string }> } {
   const name = basename(repo);
   const chipOnly = failures.every((each) => each.chip);
+  const missedOnly = failures.every((each) => each.missed);
   return {
     title: chipOnly
       ? `O app Claude abriu ${failures.length} sessões de ${name} com a opção worktree LIGADA ou ilegível: desligue-a antes de abrir sessão (o servidor já cria a pasta)`
-      : `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
+      : missedOnly
+        ? `O app Claude não abriu ${failures.length} sessões seguidas de ${name} na worktree que o servidor criou: as próximas vão direto para a CLI até você conferir o app`
+        : `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
     why: [
       chipOnly
         ? `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app, e só com a opção worktree desligada. Nas últimas ${failures.length}, a opção estava ligada ou não deu para lê-la, e nada foi colado:`
-        : `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela (ou nem abriram, com a opção worktree ligada), sem mexer em nada:`,
+        : missedOnly
+          ? `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. Nas últimas ${failures.length}, a tela não mostrou a sessão nova nessa pasta, e nada foi colado:`
+          : `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela (ou nem abriram), sem mexer em nada:`,
       ...failures.map((each) => `- "${each.title.slice(0, 60)}": ${ownFailureCause(each, repo)}`),
-      "Até você resolver este item, as sessões novas vão pelo jeito antigo (Nova sessão), com o 409 e o gesto de sempre. As worktrees criadas ficam como estão (o servidor nunca remove) e aparecem no relatório de disco.",
+      "Até você resolver este item, as sessões novas deste repositório vão direto para a CLI (no terminal, fora do app Claude), sem tentar o app de novo; elas não aparecem na lista do app. As worktrees criadas ficam como estão (o servidor nunca remove) e aparecem no relatório de disco.",
     ].join("\n"),
-    steps: [
-      { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e veja o chip “worktree” ao lado da pasta." },
-      { text: "Deixe-o DESLIGADO e feche sem enviar nada: a pasta das sessões do servidor já é a worktree." },
-      { text: "Resolva este item: o servidor volta a criar a worktree e abrir o app nela. Se falhar de novo duas vezes, este item volta com o que a tela mostrou." },
-    ],
+    steps: missedOnly
+      ? [
+        { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e confira que aparece o campo vazio (“Descreva uma tarefa…” ou “Descreva algo para criar…”) com a pasta e o chip “worktree” logo acima." },
+        { text: "Se aparecer uma conversa em vez da sessão nova, ou outra pasta nos chips, feche e abra o app Claude de novo (ele pode ter atualizado) e confira outra vez; feche sem enviar nada." },
+        { text: "Resolva este item: o servidor volta a abrir as sessões no app. Se falhar de novo duas vezes seguidas, este item volta com o que a tela mostrou." },
+      ]
+      : [
+        { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e veja o chip “worktree” ao lado da pasta." },
+        { text: "Deixe-o DESLIGADO e feche sem enviar nada: a pasta das sessões do servidor já é a worktree." },
+        { text: "Resolva este item: o servidor volta a criar a worktree e abrir o app nela. Se falhar de novo duas vezes, este item volta com o que a tela mostrou." },
+      ],
   };
 }
 
