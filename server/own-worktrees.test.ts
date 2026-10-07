@@ -771,7 +771,7 @@ describe("the seeded headless starts: in order, each with a deadline (R2-1)", ()
       expect(left).toEqual([expect.objectContaining({ path: WT, sessionId: "s9905", why: "interrupted", command: interruptedCommand(REPO, WT, null) })]);
       // the report says what each case needs (INSP-R4-2): a half-made checkout, or a folder git never registered, and the branch
       const said = leftWorktreesReport(left)!;
-      expect(said).toContain(`- ${WT}: preparação interrompida (prazo de 180 s) da sessão de CLI "9905 x" (s9905), que seguiu em outra worktree — para remover: confira com git -C ${REPO} worktree list; se ela estiver na lista: git -C ${REPO} worktree remove --force ${WT}; se não estiver: git -C ${REPO} worktree prune, e mova a pasta para o Lixo (mv ${WT} ~/.Trash/); depois, git -C ${REPO} branch -D worktree-w (a branch que o OMB criou para ela). O --force vale SÓ para esta pasta: o OMB a abandonou no meio da preparação (checkout incompleto) e nenhuma sessão a usa`);
+      expect(said).toContain(`- ${WT}: preparação interrompida (prazo de 180 s) da sessão de CLI "9905 x" (s9905), que seguiu em outra worktree — para remover, depois de conferir com git -C ${REPO} worktree list: confira com git -C ${REPO} worktree list; se ela estiver na lista: git -C ${REPO} worktree remove --force ${WT}; se não estiver: git -C ${REPO} worktree prune, e mova a pasta para o Lixo (mv ${WT} ~/.Trash/); depois, git -C ${REPO} branch -D worktree-w (a branch que o OMB criou para ela). O --force vale SÓ para esta pasta: o OMB a abandonou no meio da preparação (checkout incompleto) e nenhuma sessão a usa`);
     });
 
     it("the clone stuck in its 2nd folder: the cp killed, its temporary copy taken back (no *.omb-clone left), the session the old way under a new name", async () => {
@@ -828,34 +828,42 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
   const dirs: string[] = [];
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
   const temp = () => { const dir = realpathSync(mkdtempSync(join(tmpdir(), "omb-group-"))); dirs.push(dir); return dir; };
-  const ms = () => performance.now();
+  // No clock in these (INSP-R5-2: time-based tests stopped production at #9391): each child prints
+  // "ready" once its trap is armed, the abort comes only after that line, and what is checked is
+  // ORDER — the child's own last write exists when the promise settles.
+  /** groupExec that aborts `controller` once the program printed "ready". */
+  const abortOnReady = (controller: AbortController, killAfterMs?: number) => groupExec(process.env, killAfterMs, { output: (text) => { if (text.includes("ready")) controller.abort(); } });
 
-  it("settles on close: a child that takes 0.6 s to leave after SIGTERM is waited for", async () => {
-    const controller = new AbortController();
-    const started = ms();
-    const run = groupExec()("/bin/sh", ["-c", "trap 'sleep 0.6; exit 1' TERM; while :; do sleep 0.05; done"], { signal: controller.signal });
-    setTimeout(() => controller.abort(), 150);
-    await expect(run).rejects.toMatchObject({ name: "AbortError" });
-    expect(ms() - started).toBeGreaterThanOrEqual(650);
-  });
-
-  it("waits for a grandchild that ignores the TERM and still holds the output (a git hook), and kills the group with SIGKILL past the grace", async () => {
+  it("settles on close: a child still working after the SIGTERM is waited for — its last write is there when the promise settles", async () => {
     const dir = temp();
     const controller = new AbortController();
-    const started = ms();
-    const run = groupExec()("/bin/sh", ["-c", `(trap '' TERM; sleep 0.8; touch '${dir}/hook-done') & wait`], { signal: controller.signal });
-    setTimeout(() => controller.abort(), 100);
+    const run = abortOnReady(controller)("/bin/sh", ["-c", `trap 'sleep 0.3; touch "${dir}/child-exited"; exit 1' TERM; echo ready; while :; do sleep 0.05; done`], { signal: controller.signal });
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(existsSync(join(dir, "child-exited"))).toBe(true);
+  });
+
+  it("waits for a grandchild that ignores the TERM and still holds the output (a git hook); a group deaf to TERM is killed (SIGKILL) before its end", async () => {
+    const dir = temp();
+    const controller = new AbortController();
+    const run = abortOnReady(controller)("/bin/sh", ["-c", `(trap '' TERM; echo ready; sleep 0.3; touch '${dir}/hook-done') & wait`], { signal: controller.signal });
     await expect(run).rejects.toMatchObject({ name: "AbortError" });
     // settled only once the grandchild had finished
     expect(existsSync(join(dir, "hook-done"))).toBe(true);
-    expect(ms() - started).toBeGreaterThanOrEqual(750);
-    // a group that ignores the TERM altogether: SIGKILL after killAfterMs
+    // deaf to the TERM: the SIGKILL ends it — it never reaches its last line
     const deaf = new AbortController();
-    const at = ms();
-    const stuck = groupExec(process.env, 300)("/bin/sh", ["-c", "trap '' TERM; sleep 5"], { signal: deaf.signal });
-    setTimeout(() => deaf.abort(), 50);
+    const stuck = abortOnReady(deaf, 100)("/bin/sh", ["-c", `trap '' TERM; echo ready; sleep 30; touch '${dir}/deaf-finished'`], { signal: deaf.signal });
     await expect(stuck).rejects.toMatchObject({ name: "AbortError" });
-    expect(ms() - at).toBeLessThan(3_000);
+    expect(existsSync(join(dir, "deaf-finished"))).toBe(false);
+  });
+
+  it("keeps a UTF-8 character split between two chunks whole (INSP-R5-1), and says when the output passes its cap", async () => {
+    // "ç" is C3 A7: its two bytes in two writes, apart
+    expect(await groupExec()("/bin/sh", ["-c", "printf 'a\\303'; sleep 0.2; printf '\\247o\\n'"])).toBe("aço\n");
+    const told: string[] = [];
+    const big = await groupExec(process.env, undefined, { overflow: (line) => told.push(line) })("/bin/sh", ["-c", "head -c 17825792 /dev/zero | tr '\\0' 'x'"]);
+    expect(big.length).toBeGreaterThanOrEqual(16 * 1024 * 1024);
+    expect(big.length).toBeLessThan(17825792);
+    expect(told).toEqual(["/bin/sh: stdout passed 16 MB; the rest of it is not kept"]);
   });
 
   it("runs as an Exec otherwise: its output, a failure with its stderr, a timeout", async () => {
@@ -867,16 +875,21 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
     await expect(groupExec()("/bin/sh", ["-c", "echo never"], { signal: aborted.signal })).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  it("the queue waits for that child before its late and before the next start, up to the grace", async () => {
-    const enqueue = seededStartChain(100, undefined, 5_000);
+  it("the queue waits for that child before its late and before the next start (the deadline fired by hand, once the child is ready)", async () => {
+    const dir = temp();
+    const timers = new Map<number, { run: () => void; ms: number }>();
+    let id = 0;
+    const enqueue = seededStartChain(SEEDED_START_MAX_MS, { set: (run, ms) => { timers.set(++id, { run, ms }); return id; }, clear: (timer) => { timers.delete(timer as number); } });
     const log: string[] = [];
-    const started = ms();
-    void enqueue((_live, signal) => groupExec()("/bin/sh", ["-c", "trap 'sleep 0.6; exit 1' TERM; while :; do sleep 0.05; done"], { signal }).then(() => {}), (_why, stopped) => log.push(`late (stopped ${stopped}) at ${Math.round(ms() - started)}`));
-    await enqueue(async () => { log.push(`next at ${Math.round(ms() - started)}`); }, () => {});
-    expect(log).toHaveLength(2);
-    expect(log[0]).toMatch(/^late \(stopped true\) at \d+$/);
-    expect(Number(log[0]!.split(" at ")[1])).toBeGreaterThanOrEqual(650);
-    expect(Number(log[1]!.split(" at ")[1])).toBeGreaterThanOrEqual(650);
+    let ready: () => void = () => {};
+    const isReady = new Promise<void>((resolve) => { ready = resolve; });
+    const watching = groupExec(process.env, undefined, { output: (text) => { if (text.includes("ready")) ready(); } });
+    void enqueue((_live, signal) => watching("/bin/sh", ["-c", `trap 'sleep 0.3; touch "${dir}/child-exited"; exit 1' TERM; echo ready; while :; do sleep 0.05; done`], { signal }).then(() => {}), (_why, stopped) => log.push(`late (stopped ${stopped}; child exited ${existsSync(join(dir, "child-exited"))})`));
+    const next = enqueue(async () => { log.push(`next (child exited ${existsSync(join(dir, "child-exited"))})`); }, () => {});
+    await isReady;
+    for (const [key, each] of Array.from(timers)) if (each.ms === SEEDED_START_MAX_MS) { timers.delete(key); each.run(); }
+    await next;
+    expect(log).toEqual(["late (stopped true; child exited true)", "next (child exited true)"]);
   });
 
   it("an aborted clone whose copy still writes after the TERM leaves no *.omb-clone and no probe: taken back after the copy exited (R4-3)", async () => {
@@ -888,20 +901,22 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
     writeFileSync(join(worktree, "package-lock.json"), LOCK);
     const seed: SeedState = { repo: root, path: seedPath, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", installMs: 60_000, dirs: [{ path: "node_modules", kb: 10 }, { path: "web/node_modules", kb: 10 }] };
     const controller = new AbortController();
-    const group = groupExec();
+    const group = abortOnReady(controller);
     const exec: Exec = (file, args, options = {}) => {
       if (file !== "/usr/bin/nice") return Promise.resolve("");
       const dst = args.at(-1)!;
-      // the 1st folder copies at once; the 2nd one writes, and keeps writing for 0.3 s after the TERM
+      // the 1st folder copies at once; the 2nd one says "ready" with its trap armed, and keeps writing after the TERM
       const script = dst.endsWith("web/node_modules.omb-clone")
-        ? `mkdir -p '${dst}'; echo a > '${dst}/a'; trap "echo b > '${dst}/b-after-term'; sleep 0.3; echo c > '${dst}/c-after-term'; exit 1" TERM; while :; do sleep 0.05; done`
+        ? `mkdir -p '${dst}'; echo a > '${dst}/a'; trap "echo b > '${dst}/b-after-term'; sleep 0.3; echo c > '${dst}/c-after-term'; touch '${root}/copy-exited'; exit 1" TERM; echo ready; while :; do sleep 0.05; done`
         : `mkdir -p '${dst}'; echo a > '${dst}/a'`;
       return group("/bin/sh", ["-c", script], { ...options, signal: controller.signal });
     };
     const real = realCloneIo(exec, async () => "v22.19.0");
-    const io: CloneIo = { ...real, device: () => 7, cloneFile: async (_src, dst) => { writeFileSync(dst, "probe"); return null; }, hooks: async () => null, listDir: () => null };
-    setTimeout(() => controller.abort(), 300);
+    // the order that matters: each temporary copy is taken back after its cp has exited
+    const drops: string[] = [];
+    const io: CloneIo = { ...real, device: () => 7, cloneFile: async (_src, dst) => { writeFileSync(dst, "probe"); return null; }, hooks: async () => null, listDir: () => null, dropTemp: (path) => { if (path.endsWith("web/node_modules.omb-clone") && existsSync(path)) drops.push(`web copy taken back (cp exited ${existsSync(join(root, "copy-exited"))})`); real.dropTemp(path); } };
     const out = await cloneSeedCaches(seed, worktree, OWN_DEFAULTS.lockfiles, io);
+    expect(drops).toEqual(["web copy taken back (cp exited true)"]);
     expect(out).toMatchObject({ mode: "install", dirs: ["node_modules"] });
     expect(out.reason).toContain("o clone de web/node_modules falhou");
     const left: string[] = [];

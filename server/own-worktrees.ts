@@ -152,7 +152,7 @@ export const GROUP_KILL_AFTER_MS = 10_000;
  * process holding its output (a grandchild too) is gone. execFile's callback
  * fires at the abort itself, with the program still running (3 s apart on a
  * program that takes its time to stop). */
-export function groupExec(env: NodeJS.ProcessEnv = process.env, killAfterMs = GROUP_KILL_AFTER_MS): Exec {
+export function groupExec(env: NodeJS.ProcessEnv = process.env, killAfterMs = GROUP_KILL_AFTER_MS, watch?: { output?: (text: string) => void; overflow?: (line: string) => void }): Exec {
   return (file, args, options = {}) => new Promise<string>((resolve, reject) => {
     if (options.signal?.aborted) {
       reject(Object.assign(new Error(`${file}: aborted before it started`), { name: "AbortError" }));
@@ -168,8 +168,21 @@ export function groupExec(env: NodeJS.ProcessEnv = process.env, killAfterMs = GR
     const cap = 16 * 1024 * 1024;
     let out = "";
     let err = "";
-    child.stdout?.on("data", (chunk: Buffer) => { if (out.length < cap) out += chunk.toString(); });
-    child.stderr?.on("data", (chunk: Buffer) => { if (err.length < cap) err += chunk.toString(); });
+    // decoded as a stream: a UTF-8 character split between two chunks stays whole (INSP-R5-1)
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    const over = new Set<string>();
+    const keep = (kind: "stdout" | "stderr", held: string, text: string) => {
+      if (held.length < cap) return held + text;
+      // past the cap: said once, not cut off silently
+      if (!over.has(kind)) {
+        over.add(kind);
+        (watch?.overflow ?? ((line: string) => console.warn(`[own-worktrees] ${line}`)))(`${file}: ${kind} passed ${cap / 1024 / 1024} MB; the rest of it is not kept`);
+      }
+      return held;
+    };
+    child.stdout?.on("data", (text: string) => { out = keep("stdout", out, text); watch?.output?.(text); });
+    child.stderr?.on("data", (text: string) => { err = keep("stderr", err, text); });
     let stopped: string | null = null;
     let hard: ReturnType<typeof setTimeout> | undefined;
     const group = (sig: NodeJS.Signals) => { try { if (child.pid) process.kill(-child.pid, sig); } catch { /* gone already */ } };
@@ -1154,7 +1167,7 @@ export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: st
 export function leftWorktreesReport(left: readonly LeftWorktree[]): string | null {
   if (!left.length) return null;
   const lines = left.map((each) => each.why === "interrupted"
-    ? `- ${each.path}: preparação interrompida (prazo de ${Math.round(SEEDED_START_MAX_MS / 1000)} s) da sessão de CLI "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que seguiu em outra worktree — para remover: ${each.command}`
+    ? `- ${each.path}: preparação interrompida (prazo de ${Math.round(SEEDED_START_MAX_MS / 1000)} s) da sessão de CLI "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que seguiu em outra worktree — para remover, depois de conferir com git -C ${quote(each.repo)} worktree list: ${each.command}`
     : `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
   return `Worktrees criadas pelo OMB que ficaram sem uso (${left.length}). O servidor não remove nada; uma pessoa confere (git status, o que há dentro) e decide:\n${lines.join("\n")}`;
 }
