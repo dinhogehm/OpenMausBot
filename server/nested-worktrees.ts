@@ -379,6 +379,16 @@ export function releasedScopeLine(repoName: string, plan: ReleasedPlan, tag: str
   return `${repoName}: avaliei para remoção só as worktrees já contidas na tag ${tag} (${inTag} de ${total}); as outras ${total - inTag} não foram avaliadas para remoção.`;
 }
 
+/** The folders not listed, in one parenthesis: "(e mais 188 pequenas, abaixo de 200 MB, e 1 que não consegui medir, não listadas)" (INSP-R13fol #11). */
+function notListed(small: number, unmeasured: number, min: string): string {
+  if (!small && !unmeasured) return "";
+  const parts = [
+    small ? `mais ${small} pequena${small === 1 ? "" : "s"}, abaixo de ${min}` : "",
+    unmeasured ? `${small ? "" : "mais "}${unmeasured} que não consegui medir` : "",
+  ].filter(Boolean);
+  return ` (e ${parts.join(", e ")}, não listada${small + unmeasured === 1 ? "" : "s"})`;
+}
+
 /** The idle folders outside the tag, biggest first, for a person: each with
  * its size, since when, and the command; null when there are none. */
 export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "America/Sao_Paulo", minKb = STALE_MIN_KB): { chip: string; report: string } | null {
@@ -396,7 +406,7 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
   return {
     chip: `Disco: ${shown.length} pasta(s) parada(s) há mais de 72 h fora da tag, ${total} — informação para o dono, nada foi removido`,
-    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${small ? ` (e mais ${small} pequena(s), abaixo de ${sizeLabel(minKb)}, não listada(s))` : ""}${unmeasured ? ` (e ${unmeasured} cujo tamanho não consegui medir)` : ""}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
+    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${notListed(small, unmeasured, sizeLabel(minKb))}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
   };
 }
 

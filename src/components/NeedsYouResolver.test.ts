@@ -800,7 +800,12 @@ describe("a superseded item and a fixed sheet row (R13-intake #1)", () => {
 
   it("says by which item, and turns its decisions and commands off", () => {
     const shown = view({ items: all, selectedKey: key("o2") });
-    expect(shown.html).toContain("Superado pelo o1 do Monitor Chat: Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses. As decisões e os comandos deste item ficaram desligados.");
+    expect(shown.html).toContain("Superado pelo item o1 do Monitor Chat: Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses. As decisões e os comandos deste item ficaram desligados.");
+    // the owner can lift the mark: "Os comandos ainda valem" (INSP-R13fol #13)
+    const unmark = view({ items: all, selectedKey: key("o2"), onUnsupersede: (item) => unmark.calls.push(`unsupersede:${item.pendingId}`) });
+    expect(unmark.html).toContain("Os comandos ainda valem");
+    unmark.press("data-resolver-unsupersede");
+    expect(unmark.calls).toEqual(["unsupersede:o2"]);
     expect(shown.find("data-resolver-superseded", "o1 do Monitor Chat")).toBeTruthy();
     // no decision to pick
     expect(shown.html).not.toContain("Aprovar</");

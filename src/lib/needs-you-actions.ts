@@ -78,6 +78,12 @@ export async function delegateOwnerPending(item: NeedsYouItem): Promise<{ info?:
   return { ...(typeof receipt?.sessionId === "string" ? { sessionId: receipt.sessionId } : {}), ...(typeof receipt?.queueId === "string" ? { queued: true } : {}) };
 }
 
+/** "Os comandos ainda valem": the superseded mark is lifted (INSP-R13fol #13). */
+export async function unsupersedeOwnerPending(item: NeedsYouItem): Promise<void> {
+  if (!item.pendingId) return;
+  await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/unsupersede`, { method: "POST" });
+}
+
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {
   if (!item.pendingId) return;
   await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/resolve`, { method: "POST" });

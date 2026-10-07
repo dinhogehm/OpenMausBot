@@ -40,7 +40,7 @@ export function linkLabel(url: string): string {
   }
 }
 
-export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | "delegate" | `option:${number}`;
+export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | "delegate" | "unsupersede" | `option:${number}`;
 
 export interface NeedsYouResolverViewProps {
   items: NeedsYouItem[];
@@ -88,6 +88,8 @@ export interface NeedsYouResolverViewProps {
   onResolve: (item: NeedsYouItem) => void;
   /** "Delegar a um agente" (lote del): a Claude Code session opened by the server for the item. */
   onDelegate?: (item: NeedsYouItem) => void;
+  /** "Os comandos ainda valem": the owner lifts a superseded mark (INSP-R13fol #13). */
+  onUnsupersede?: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
   onDismissNotice?: () => void;
@@ -504,10 +506,19 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         )}
         {item.superseded && (
           // another item said these commands must not run: they are off here (R13-intake #1)
-          <p role="alert" data-resolver-superseded={item.superseded.by} className="mt-3 flex items-start gap-2 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[13px] text-ink">
-            <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
-            <span>{t("needsYou.screen.superseded", { by: item.superseded.by, text: item.superseded.text })}</span>
-          </p>
+          <div data-resolver-superseded={item.superseded.by} className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="alert" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
+              <span>{t("needsYou.screen.superseded", { by: item.superseded.by, text: item.superseded.text })}</span>
+            </p>
+            {/* the bot that marked it may be wrong: the owner turns the item back on */}
+            {pending && props.onUnsupersede && (
+              <button type="button" data-resolver-unsupersede="" disabled={working} onClick={() => props.onUnsupersede!(item)} className={cn(quietButton, "py-1.5 text-[12.5px]")}>
+                {busy === "unsupersede" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Check size={14} aria-hidden="true" />}
+                {t("needsYou.screen.unsupersede")}
+              </button>
+            )}
+          </div>
         )}
         {item.rowWarning && !item.superseded && (
           // a fixed sheet row written by commands older than 6 h: it may be someone else's by now (R13-intake #1)
@@ -1037,7 +1048,7 @@ export const STEPS_ASK_AGAIN_AFTER_MS = 15 * 60_000;
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own
  * loading and error state. */
-export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve, onDelegate }: {
+export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve, onDelegate, onUnsupersede }: {
   open: boolean;
   items: NeedsYouItem[];
   initialKey?: string | null;
@@ -1056,6 +1067,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
   /** "Delegar a um agente" (lote del): the server opens a session for the item. */
   onDelegate?: (item: NeedsYouItem) => Promise<unknown>;
+  onUnsupersede?: (item: NeedsYouItem) => Promise<unknown>;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
   const [fallbackIndex, setFallbackIndex] = useState(0);
@@ -1264,6 +1276,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
           onDelegate={onDelegate ? (item) => void run("delegate", () => onDelegate(item), (result) => delegateNotice(item, result)) : undefined}
+          onUnsupersede={onUnsupersede ? (item) => void run("unsupersede", () => onUnsupersede(item), t("needsYou.screen.unsuperseded", { title: item.title })) : undefined}
           onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => remindNotice(item, result))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}

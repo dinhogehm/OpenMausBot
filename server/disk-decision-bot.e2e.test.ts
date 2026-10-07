@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
@@ -11,48 +11,34 @@ const GIT_DIR = ["/usr/bin", "/bin"].find((dir) => existsSync(join(dir, "git")))
 const toolResult = (turn: any, tool: string) =>
   turn.evidence.findLast((entry: any) => entry.step?.tool === tool)?.response?.result?.content?.[0]?.text as string;
 
-// R13-followup #2 and #4, as on 06/10. At 18:39 the Chief kept its own item,
-// o28 "Decidir o destino de 15 worktrees paradas", saying keen-agnesi was "em
-// uso agora (lsof)"; the server's check never ran, and at 18:53 "Pode remover
-// todos" had it run `git worktree remove --force` on it too. At 23:10 it left
-// two worktrees in its reply, "vazias" (2,2G each), with the commands, and no
-// item. A real server: the bot's item becomes the server's, checked on the Mac;
-// the owner's answer reaches the bot with the exact folders that may go; a
-// folder used since refuses the answer (409); the reply opens its item.
-it("a bot's own disk item is the server's, checked on the Mac, and the owner's answer carries the exact folders", async () => {
-  const keen = "keen-agnesi-80191d";
-  const dirty = "503-atendimento-helpdesk-2785c8";
-  const local = "9337-sobrecarga-d1-no-envio-do-agente-2f6a57";
-  const held = "merge-deploy-open-prs-00664b";
-  const n1 = "9032-equipe-em-massa-tickets-n1";
-  const n1b = "9032-equipe-em-massa-tickets-n1-7d8a26";
-  const o28 = {
-    action: "add",
-    title: "Decidir o destino de 4 worktrees paradas",
-    why: "Há 23 GiB livres em /Users/osvaldo/Projetos (meta: 25 GiB). Nada foi removido.",
-    steps: [
-      { text: `${local}: 2,9G, limpa, sem sessão ativa, mas o HEAD NÃO está no GitHub (commits só locais).` },
-      { text: `${keen}: 2,2G, limpa, em uso agora (lsof), HEAD na main.` },
-      { text: `Com alterações não commitadas, paradas há dias: ${dirty} 848M (02/10, HEAD só local); ${held} 592M (02/10, HEAD só local)` },
-      { text: "Para remover uma worktree que você decidir descartar (sem --force; falha se houver alteração)", command: "git -C /Users/osvaldo/Projetos/nuria-platform worktree remove <caminho>" },
-    ],
-  };
-  const reply2310 = [
-    "O servidor mandou o relatório de disco e pastas de trabalho. Não removi nada.",
-    "",
-    `- **Duas pastas da #9032 sem uso** (\`${n1}\` e \`${n1b}\`): as duas estão vazias e não guardam trabalho nenhum. Pela sua regra, a remoção fica com você. Se quiser apagá-las:`,
-    `  - \`git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${n1}\``,
-    `  - \`git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${n1b}\``,
-  ].join("\n");
-  const session = await launchVerificationServer({ ...process.env, OMB_TEST_GRANT_PATH: GIT_DIR }, undefined, undefined, undefined, undefined, { scripted: true });
+const keen = "keen-agnesi-80191d";
+const dirty = "503-atendimento-helpdesk-2785c8";
+const local = "9337-sobrecarga-d1-no-envio-do-agente-2f6a57";
+const held = "merge-deploy-open-prs-00664b";
+const n1 = "9032-equipe-em-massa-tickets-n1";
+const n1b = "9032-equipe-em-massa-tickets-n1-7d8a26";
+const o28 = {
+  action: "add",
+  title: "Decidir o destino de 4 worktrees paradas",
+  why: "Há 23 GiB livres em /Users/osvaldo/Projetos (meta: 25 GiB). Nada foi removido.",
+  steps: [
+    { text: `${local}: 2,9G, limpa, sem sessão ativa, mas o HEAD NÃO está no GitHub (commits só locais).` },
+    { text: `${keen}: 2,2G, limpa, em uso agora (lsof), HEAD na main.` },
+    { text: `Com alterações não commitadas, paradas há dias: ${dirty} 848M (02/10, HEAD só local); ${held} 592M (02/10, HEAD só local)` },
+    { text: "Para remover uma worktree que você decidir descartar (sem --force; falha se houver alteração)", command: "git -C /Users/osvaldo/Projetos/nuria-platform worktree remove <caminho>" },
+  ],
+};
+
+/** An isolated scripted server with a real repository and its worktrees, three days old, where the server looks. */
+async function diskFixture(test: (f: any) => Promise<void>, extraEnv: Record<string, string> = {}) {
+  const session = await launchVerificationServer({ ...process.env, OMB_TEST_GRANT_PATH: GIT_DIR, ...extraEnv }, undefined, undefined, undefined, undefined, { scripted: true });
   const { url, dataDir } = session.info;
   const cli = (...args: string[]) => runControlOmb(args, { env: { OPENMAUSBOT_URL: url } }) as Promise<any>;
   const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
-  const answer = (botId: string, id: string, text: string) => fetch(`${url}/api/bots/${botId}/owner-pending/${id}/reply`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text }) });
+  const reply = (botId: string, id: string, body: unknown) => fetch(`${url}/api/bots/${botId}/owner-pending/${id}/reply`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify(body) });
   const ledger = () => (existsSync(join(dataDir, "bot-autonomy.json")) ? JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")) : {});
   const holders: ChildProcess[] = [];
   try {
-    // real worktrees of a real repository, where the server looks (the fixture's home is its data dir)
     const main = join(dataDir, "Projetos", "nuria-platform");
     const root = join(main, ".claude", "worktrees");
     const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
@@ -64,7 +50,6 @@ it("a bot's own disk item is the server's, checked on the Mac, and the owner's a
     git(main, "commit", "-q", "-m", "init");
     for (const folder of [keen, dirty, local, held, n1, n1b]) git(main, "worktree", "add", "-q", "-b", folder, join(root, folder));
     writeFileSync(join(root, dirty, "rascunho.md"), "work only here\n");
-    // three days old, everywhere the server looks for the last change
     const threeDaysAgo = (Date.now() - 3 * 86_400_000) / 1000;
     const age = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -75,58 +60,120 @@ it("a bot's own disk item is the server's, checked on the Mac, and the owner's a
       utimesSync(dir, threeDaysAgo, threeDaysAgo);
     };
     age(main);
-    // a live process inside merge-deploy: in use, whatever the item says
-    holders.push(spawn("sleep", ["120"], { cwd: join(root, held), stdio: "ignore" }));
+    /** A process working inside a folder, seen by lsof before the test goes on (no fixed sleep). */
+    const hold = async (folder: string) => {
+      const child = spawn("sleep", ["120"], { cwd: join(root, folder), stdio: "ignore" });
+      holders.push(child);
+      await expect.poll(() => { try { return execFileSync("/usr/sbin/lsof", ["-a", "-p", String(child.pid), "-d", "cwd", "-Fn"]).toString(); } catch { return ""; } }, { timeout: 10_000 }).toContain(folder);
+    };
+    await hold(held);
     const bot = (await cli("new-bot", "--name", "Chief of Staff")).bot;
     const planPath = join(dataDir, "room-plan.json");
-    writeFileSync(planPath, JSON.stringify({ [bot.id]: { turns: [
-      { steps: [{ tool: "owner_pending", arguments: o28 }], reply: "Atualizei o item de disco." },
-      { expectContextIncludes: ["Pode remover todos", "o dono autorizou remover agora, e só estas:", "PROIBIDO remover qualquer pasta fora desta lista", keen], reply: "Removo só as da lista." },
-      { reply: reply2310 },
-    ] } }));
+    const plan = (turns: unknown[]) => writeFileSync(planPath, JSON.stringify({ [bot.id]: { turns } }));
     const turns = () => existsSync(`${planPath}.evidence.jsonl`)
       ? readFileSync(`${planPath}.evidence.jsonl`, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((turn: any) => turn.botId === bot.id)
       : [];
-    await cli("send", "--bot", bot.id, "--task", bot.activeTaskId, "--text", "Atualize o item de disco.");
-    await expect.poll(() => turns().length, { timeout: 30_000 }).toBe(1);
-    // the bot's item is the server's: keyed by the folders, checked on the Mac
-    expect(toolResult(turns()[0], "owner_pending")).toContain("abriu o item de disco dele no lugar do seu");
-    await expect.poll(() => (ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 10_000 }).toEqual([`disk-decision:${dirty},${local}`]);
-    const [item] = ledger().ownerPending;
-    expect(item.why).toContain(`${held} (há um processo vivo dentro dela)`);
-    expect(item.why).toContain(`${keen} (o próprio item dizia: «${keen}: 2,2G, limpa, em uso agora (lsof), HEAD na main.»)`);
-    expect(JSON.stringify(item.options)).not.toContain(keen);
-    expect(item.options.map((option: any) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
-    // a process starts in 9337 before the owner answers: the answer is refused, the item replaced — keen still kept out
-    holders.push(spawn("sleep", ["120"], { cwd: join(root, local), stdio: "ignore" }));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const refused = await answer(bot.id, item.id, "Pode remover todos");
-    expect(refused.status).toBe(409);
-    expect(await refused.json()).toMatchObject({ code: "disk_item_changed" });
-    expect(ledger().ownerPending.map((each: any) => each.key)).toEqual([`disk-decision:${dirty}`]);
-    const current = ledger().ownerPending[0];
-    expect(current.why).toContain(`${keen} (o próprio item dizia:`);
-    expect(current.why).toContain(`${local} (há um processo vivo dentro dela)`);
-    // "Pode remover todos": the bot reads the exact list, and every other folder forbidden
-    const taken = await answer(bot.id, current.id, "Pode remover todos");
-    expect(taken.status, await taken.clone().text()).toBeLessThan(300);
-    await expect.poll(() => turns().length, { timeout: 30_000 }).toBe(2);
-    const said = ((await api(`/api/threads/${bot.activeTaskId}/messages?limit=100`, undefined, "GET")).messages as any[]).find((message) => message.role === "user" && String(message.text ?? "").includes("Pode remover todos"));
-    expect(said.text).toContain(`o dono autorizou remover agora, e só estas: ${dirty} (a remoção perde: alterações não commitadas ou estado desconhecido e commits que não estão no GitHub).`);
-    expect(said.text).toContain(`PROIBIDO remover qualquer pasta fora desta lista, inclusive as que o item manteve: ${local} (há um processo vivo dentro dela); ${keen} (o próprio item dizia:`);
-    expect(said.text).toContain(`--force só em ${dirty}`);
-    expect(said.text).not.toMatch(new RegExp(`só estas:[^.]*${keen}`));
-    // 23:10: a reply that leaves two worktrees to the owner, "vazias", with the commands — an item, with the size measured
-    await cli("send", "--bot", bot.id, "--task", bot.activeTaskId, "--text", "Relatório de disco.");
-    await expect.poll(() => turns().length, { timeout: 30_000 }).toBe(3);
-    // their branches are on no remote here: not proved clean, so the key has no "limpas"
-    await expect.poll(() => (ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 15_000 }).toContain(`disk-decision:${n1},${n1b}`);
-    const n1Item = ledger().ownerPending.find((each: any) => each.key?.startsWith(`disk-decision:${n1},${n1b}`));
-    expect(n1Item.title).toMatch(new RegExp(`^Decidir o destino de 2 worktrees paradas \\(~\\d+ (?:MB|KB)\\): ${n1}, ${n1b}$`));
-    expect(n1Item.why.startsWith("A remoção dessas worktrees é sua; o servidor conferiu cada uma no Mac.")).toBe(true);
-    expect(n1Item.steps[1].text).toMatch(new RegExp(`^Veja ${n1} \\(\\d+[KMG];`));
+    const said = async (words: string) => ((await api(`/api/threads/${bot.activeTaskId}/messages?limit=200`, undefined, "GET")).messages as any[]).find((message) => message.role === "user" && String(message.text ?? "").includes(words));
+    await test({ url, dataDir, cli, api, reply, ledger, hold, bot, plan, turns, said, root });
   } finally {
     for (const holder of holders) holder.kill();
     await session.close();
   }
-}, 120_000);
+}
+
+// R13-followup #2 and #4 and INSP-R13fol #1, #2, as on 06/10. At 18:39 the
+// Chief kept its own item o28, saying keen-agnesi was "em uso agora (lsof)";
+// at 18:53 "Pode remover todos" had it run `git worktree remove --force` on it
+// too. A real server: the bot's item becomes the server's, checked on the
+// Mac; a folder used since refuses the answer (409); "Não remova nada" reaches
+// the bot as written; "Pode remover todos" allows no --force and pushes the
+// commits only on this Mac first; "Push e remover" is checked on the remote
+// after the bot's turn; the 23:10 reply opens its item.
+it("a bot's own disk item is the server's; the owner's answer allows only what it says", () => diskFixture(async (f) => {
+  const reply2310 = [
+    "O servidor mandou o relatório de disco e pastas de trabalho. Não removi nada.",
+    "",
+    `- **Duas pastas da #9032 sem uso** (\`${n1}\` e \`${n1b}\`): as duas estão vazias e não guardam trabalho nenhum. Pela sua regra, a remoção fica com você. Se quiser apagá-las:`,
+    `  - \`git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${n1}\``,
+    `  - \`git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${n1b}\``,
+  ].join("\n");
+  f.plan([
+    { steps: [{ tool: "owner_pending", arguments: o28 }], reply: "Atualizei o item de disco." },
+    { expectContextIncludes: ["Não remova nada ainda."], reply: "Certo, não removo." },
+    { expectContextIncludes: ["Pode remover todos", "Push primeiro", "PROIBIDO remover qualquer outra pasta", keen], reply: "Faço o push primeiro." },
+    { expectContextIncludes: ["Push e remover", "ANTES de remover"], reply: "Vou fazer o push." },
+    { expectContextIncludes: ["[Servidor: push conferido no remoto]", dirty], reply: "O push ainda não foi; não removo." },
+    { reply: reply2310 },
+  ]);
+  await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "Atualize o item de disco.");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "owner_pending")).toContain("abriu o item de disco dele no lugar do seu");
+  await expect.poll(() => (f.ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 10_000 }).toEqual([`disk-decision:${dirty},${local}`]);
+  const [item] = f.ledger().ownerPending;
+  expect(item.why).toContain(`${held} (há um processo vivo dentro dela)`);
+  expect([...item.diskKept].sort()).toEqual([`${keen} (o próprio item dizia: «${keen}: 2,2G, limpa, em uso agora (lsof), HEAD na main.»)`, `${held} (há um processo vivo dentro dela)`]);
+  expect(item.options.map((option: any) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
+  // a process starts in 9337 before the owner answers: the answer is refused, the item replaced — what it kept out still said
+  await f.hold(local);
+  const refused = await f.reply(f.bot.id, item.id, { text: "Pode remover todos" });
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toMatchObject({ code: "disk_item_changed" });
+  expect(f.ledger().ownerPending.map((each: any) => each.key)).toEqual([`disk-decision:${dirty}`]);
+  const current = f.ledger().ownerPending[0];
+  expect(current.diskKept).toEqual(expect.arrayContaining([`${local} (há um processo vivo dentro dela)`, expect.stringMatching(new RegExp(`^${keen} \\(o próprio item dizia:`))]));
+  // "Não remova nada ainda.": no authorization, no line of the server
+  const no = await f.reply(f.bot.id, current.id, { text: "Não remova nada ainda." });
+  expect(no.status, await no.clone().text()).toBeLessThan(300);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(2);
+  expect((await f.said("Não remova nada ainda.")).text).not.toContain("[Servidor:");
+  // "Pode remover todos": no --force, the commits only here pushed first, every other folder forbidden
+  const all = await f.reply(f.bot.id, current.id, { text: "Pode remover todos" });
+  expect(all.status, await all.clone().text()).toBeLessThan(300);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
+  const text = (await f.said("Pode remover todos")).text as string;
+  expect(text).toContain(`Push primeiro: faça push da branch e confirme o commit no remoto ANTES de remover; sem isso, não remova (o dono não escreveu que os commits locais podem se perder): ${dirty} (branch ${dirty}).`);
+  expect(text).toMatch(new RegExp(`PROIBIDO remover qualquer outra pasta, inclusive as que o item manteve: .*${local} \\(há um processo vivo dentro dela\\).*${keen} \\(o próprio item dizia:`));
+  expect(text).not.toContain("com --force");
+  expect(text).not.toContain("autorizou remover agora");
+  // "Push e remover": push first; after the bot's turn the server looks at the remote and tells it the commit is not there
+  const decided = await f.reply(f.bot.id, current.id, { option: 0, label: "Push e remover" });
+  expect(decided.status, await decided.clone().text()).toBeLessThan(300);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(5);
+  expect((await f.said("Push e remover") ?? await f.said("push da branch")).text).toContain("ANTES de remover");
+  const chips = ((await f.api(`/api/threads/${f.bot.activeTaskId}/messages?limit=200`, undefined, "GET")).messages as any[]).map((message) => String(message.tool?.name ?? ""));
+  expect(chips).toContain(`Disco: push ainda não está no remoto — ${dirty}`);
+  // 23:10: a reply that leaves two worktrees to the owner, "vazias", with the commands — an item, with the size measured
+  await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "Relatório de disco.");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(6);
+  await expect.poll(() => (f.ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 15_000 }).toContain(`disk-decision:${n1},${n1b}`);
+  const n1Item = f.ledger().ownerPending.find((each: any) => each.key?.startsWith(`disk-decision:${n1},${n1b}`));
+  expect(n1Item.title).toMatch(new RegExp(`^Decidir o destino de 2 worktrees paradas \\(~\\d+ (?:MB|KB)\\): ${n1}, ${n1b}$`));
+  expect(n1Item.why.startsWith("A remoção dessas worktrees é sua; o servidor conferiu cada uma no Mac.")).toBe(true);
+}), 150_000);
+
+// INSP-R13fol #6: a bot that asks "Quer que eu remova…?" is asked by the
+// server to open the item with replacesAsk — that item is the server's disk
+// item too, linked to the question, and only one item is open.
+it("an item that takes a question's place (replacesAsk) is the server's disk item too", () => diskFixture(async (f) => {
+  // ~/.nuria/stop holds the server's request until the plan knows the question's Ref
+  const stop = join(f.dataDir, ".nuria", "stop");
+  mkdirSync(join(f.dataDir, ".nuria"), { recursive: true });
+  writeFileSync(stop, "");
+  const asking = { reply: `As worktrees ${dirty} e ${local} estão paradas há 3 dias. Quer que eu remova as duas?` };
+  f.plan([asking]);
+  await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "Como está o disco?");
+  const task = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).find((each: any) => each.threadId === f.bot.activeTaskId);
+  await expect.poll(async () => (await task())?.goalNeedsInput, { timeout: 20_000 }).toBe(true);
+  const ref = `${f.bot.activeTaskId}@${(await task()).goalNeedsInputSince}`;
+  f.plan([asking, { expectContextIncludes: ["[Servidor: pergunta sem passo a passo]"], steps: [{ tool: "owner_pending", arguments: {
+    action: "add", replacesAsk: ref, title: "Decidir o destino de 2 worktrees paradas",
+    why: "Estão paradas há 3 dias.", steps: [{ text: `${dirty} e ${local}`, command: `git -C /Users/osvaldo/Projetos/nuria-platform worktree remove .claude/worktrees/${dirty}` }],
+  } }], reply: "Abri o item." }]);
+  rmSync(stop);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(2);
+  expect(toolResult(f.turns()[1], "owner_pending")).toContain("abriu o item de disco dele no lugar do seu");
+  expect(toolResult(f.turns()[1], "owner_pending")).toContain("Ele substitui a sua pergunta");
+  await expect.poll(() => (f.ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 10_000 }).toEqual([`disk-decision:${dirty},${local}`]);
+  const [item] = f.ledger().ownerPending;
+  expect(f.ledger().askPromotions).toEqual([expect.objectContaining({ threadId: f.bot.activeTaskId, itemId: item.id })]);
+}, { OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", OMB_OWNER_STEPS_ASK_AFTER_MS: "0", OMB_QUESTION_STEPS_ASK_AFTER_MS: "0" }), 120_000);

@@ -32,7 +32,9 @@ it("a bot's item that says another item's commands must not run supersedes that 
         why: "A linha 189 já era a do Yuri (#9382), e os comandos aprovados iriam apagá-la. A primeira linha livre é a 190.",
         steps: [{ text: "B190", command: cmd("B190", '[["Matheus"]]') }, { text: "E190", command: cmd("E190", '[["Pendente"]]') }],
         options: [{ label: "Aprovei", reply: "Aprovei os comandos da linha 190.", recommended: true, why: "O Monitor grava e relê." }, { label: "Sem linha", reply: "Não crie linha." }],
-      } }], reply: "Abri o item." }, { steps: [{ tool: "owner_pending", arguments: { action: "list" } }], reply: "Vi." }] },
+      } }], reply: "Abri o item." }, { steps: [{ tool: "owner_pending", arguments: { action: "list" } }], reply: "Vi." },
+      { expectContextIncludes: ["Aprovei, pode gravar.", "[Servidor: Superado pelo item ", "Não rode os comandos deste item"], reply: "Não gravo: o item foi superado." },
+      { expectContextIncludes: ["Aprovei os comandos da linha 190."], reply: "Gravo." }] },
       [monitor.id]: { turns: [{ steps: [{ tool: "owner_pending", arguments: {
         action: "add", title: "Criar a linha 191 da planilha para a #9384 (Matheus, ticket 127138)",
         why: "A linha 190 agora é da Marluce (#9389), criada pelo Chief às 10:09. Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses. O pedido do Matheus continua sem linha.",
@@ -67,6 +69,17 @@ it("a bot's item that says another item's commands must not run supersedes that 
     await cli("send", "--bot", chief.id, "--task", chief.activeTaskId, "--text", "O que está pendente?");
     await expect.poll(() => turns(chief.id).length, { timeout: 30_000 }).toBe(2);
     expect(toolResult(turns(chief.id)[1], "owner_pending")).toContain("(SUPERADO pelo ");
+    // the owner's own words reach the Chief, with the item said superseded (INSP-R13fol #16)
+    const words = await fetch(`${url}/api/bots/${chief.id}/owner-pending/${o2.id}/reply`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "Aprovei, pode gravar." }) });
+    expect(words.status, await words.clone().text()).toBeLessThan(300);
+    await expect.poll(() => turns(chief.id).length, { timeout: 30_000 }).toBe(3);
+    // the owner lifts the mark: "Os comandos ainda valem" — the decision goes through again (INSP-R13fol #13)
+    const lifted = await fetch(`${url}/api/bots/${chief.id}/owner-pending/${o2.id}/unsupersede`, { method: "POST", headers: { "content-type": "application/json", origin: url } });
+    expect(lifted.status).toBe(200);
+    expect(ledger().ownerPending.find((each: any) => each.id === o2.id && each.botId === chief.id).supersededBy).toBeUndefined();
+    const again = await fetch(`${url}/api/bots/${chief.id}/owner-pending/${o2.id}/reply`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ option: 0, label: "Aprovei" }) });
+    expect(again.status, await again.clone().text()).toBeLessThan(300);
+    await expect.poll(() => turns(chief.id).length, { timeout: 30_000 }).toBe(4);
   } finally {
     await session.close();
   }

@@ -128,7 +128,7 @@ import { SidebarNow } from "./NowPanel";
 import { NeedsYouResolver } from "./NeedsYouResolver";
 import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
 import { OPEN_NEEDS_YOU_EVENT } from "@/lib/pipeline-board";
-import { askQuestionSteps, decisionReply, delegateOwnerPending, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
+import { askQuestionSteps, decisionReply, delegateOwnerPending, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation, unsupersedeOwnerPending } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
@@ -2535,6 +2535,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         onResolve={resolveOwnerPending}
         onRemind={remindOwnerPending}
         onDelegate={delegateOwnerPending}
+        onUnsupersede={unsupersedeOwnerPending}
       />
 
       {universalPins && pinnedBots.length > 0 && (

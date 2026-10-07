@@ -146,23 +146,23 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     // INSP-R12F r6 D1: the app aborts while the server still checks the Mac, then the owner sends again — still once
     const abort = new AbortController();
     const aborted = fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {
-      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover sim" }), signal: abort.signal,
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover todas, sim" }), signal: abort.signal,
     }).catch(() => null);
     await new Promise((resolve) => setTimeout(resolve, 30));
     abort.abort();
     await aborted;
     const resent = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {
-      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover sim" }),
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover todas, sim" }),
     });
     expect(resent.status).toBe(200);
     expect(await resent.json()).toMatchObject({ duplicate: true });
-    await expect.poll(() => ledger().ownerPending[0].history.filter((each: any) => each.text === "pode remover sim").length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => ledger().ownerPending[0].history.filter((each: any) => each.text === "pode remover todas, sim").length, { timeout: 10_000 }).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(((await api("GET", `/api/threads/${last.threadId}/messages?limit=200`)).messages as any[]).filter((message) => message.role === "user" && String(message.text ?? "").includes("pode remover sim"))).toHaveLength(1);
+    expect(((await api("GET", `/api/threads/${last.threadId}/messages?limit=200`)).messages as any[]).filter((message) => message.role === "user" && String(message.text ?? "").includes("pode remover todas, sim"))).toHaveLength(1);
     // and a free-text answer after a folder came into use: refused, the item updated
     fourth = spawn("sleep", ["120"], { cwd: join(root, "atendimento-reaberto-bugs-496989"), stdio: "ignore" });
     const late = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {
-      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover" }),
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover a atendimento-reaberto-bugs-496989" }),
     });
     expect(late.status).toBe(409);
     expect(await late.json()).toMatchObject({ code: "disk_item_changed" });

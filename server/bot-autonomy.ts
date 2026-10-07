@@ -255,8 +255,10 @@ export interface OwnerPending {
   delegationBack?: OwnerDelegationBack;
   /** Another bot's item (or another of its own) said this one's commands must not run (R13-intake #1): decisions and commands off. */
   supersededBy?: Superseded;
-  /** What the server last read of the fixed sheet row its commands write (R13-intake #1). */
-  rowCheck?: RowCheck;
+  /** What the server last read of the fixed sheet rows its commands write (R13-intake #1), one per row. */
+  rowChecks?: RowCheck[];
+  /** A disk item's folders kept out, each "name (why)" (INSP-R13fol #8). */
+  diskKept?: string[];
 }
 
 /** One answer of the person to an item (J18). */
@@ -563,12 +565,12 @@ function ownerPendingNumber(id: string): number {
   return match ? Number(match[1]) : 0;
 }
 
-/** A saved item's structured part, read back defensively (an older ledger
- * has none; a hand-edited one may carry anything). */
 /** The item said again with the same commands and decisions (or none sent): what was said of them still holds. */
 const sameCommands = (existing: OwnerPending, input: { steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }) =>
   (!input.steps?.length || JSON.stringify(input.steps) === JSON.stringify(existing.steps)) && (!input.options?.length || JSON.stringify(input.options) === JSON.stringify(existing.options));
 
+/** A saved item's structured part, read back defensively (an older ledger
+ * has none; a hand-edited one may carry anything). */
 function savedDetails(pending: OwnerPending): OwnerPending {
   // a saved recommendation that no longer passes (no why, or two of them) loses
   // only the mark — never the item's why, steps and options (INSP-J2 #13)
@@ -1370,7 +1372,7 @@ export class BotAutonomy {
    * for anything else the existing item comes back untouched, flagged
    * `duplicate`, so the bot is told "já existe o5" instead of the person
    * getting a second item for the same action. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string }): OwnerPending & { duplicate?: true } {
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string; diskKept?: string[] }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
@@ -1400,9 +1402,11 @@ export class BotAutonomy {
       ...(existing?.delegationBack ? { delegationBack: existing.delegationBack } : {}),
       // said again with the same commands: still superseded (R13-intake #1); new commands are the bot's new answer
       ...(existing?.supersededBy && sameCommands(existing, input) ? { supersededBy: existing.supersededBy } : {}),
-      ...(existing?.rowCheck && sameCommands(existing, input) ? { rowCheck: existing.rowCheck } : {}),
+      ...(existing?.rowChecks && sameCommands(existing, input) ? { rowChecks: existing.rowChecks } : {}),
       ...(input.lastSaidAt !== undefined ? { lastSaidAt: input.lastSaidAt } : existing?.lastSaidAt !== undefined ? { lastSaidAt: existing.lastSaidAt } : {}),
       ...(input.routineId ? { routineId: input.routineId } : existing?.routineId ? { routineId: existing.routineId } : {}),
+      // a disk item's folders kept out, as a list (INSP-R13fol #8)
+      ...(input.diskKept?.length ? { diskKept: input.diskKept } : {}),
     };
     // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
@@ -1582,7 +1586,7 @@ export class BotAutonomy {
     // its own bot rewrote the commands or the decisions: no longer the superseded ones, nor the row it read (R13-intake #1)
     if (!sameCommands(item, { ...(patch.steps !== undefined ? { steps: patch.steps } : {}), ...(patch.options !== undefined ? { options: patch.options } : {}) })) {
       delete next.supersededBy;
-      delete next.rowCheck;
+      delete next.rowChecks;
     }
     // the bot answered the person by rewriting the item: no longer waiting on it (J18)
     delete next.awaitingSince;
@@ -1596,7 +1600,7 @@ export class BotAutonomy {
    * item ("pedido há 2 min") until the bot updates it. */
   /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
    * ("Talvez já resolvido"). An undefined value clears the field. */
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "supersededBy" | "rowCheck">>): OwnerPending | null {
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "supersededBy" | "rowChecks">>): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {

@@ -271,7 +271,7 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     const told = staleFoldersReport(sized)!;
     expect(told.chip).toBe("Disco: 6 pasta(s) parada(s) há mais de 72 h fora da tag, ~15,1 GB — informação para o dono, nada foi removido");
     expect(told.report).toContain("Só informação: o servidor não removeu nada");
-    expect(told.report).toContain("(e mais 1 pequena(s), abaixo de 200 MB, não listada(s))");
+    expect(told.report).toContain("(e mais 1 pequena, abaixo de 200 MB, não listada)");
     // the Trash gives the space back only when emptied (#7d)
     expect(told.report).toContain("o espaço só volta ao esvaziar a Lixeira");
     const listed = told.report.split("\n").filter((each) => each.startsWith("- "));
@@ -838,7 +838,8 @@ describe("the stale folders' log line (R13-followup #5)", () => {
     ];
     const told = staleFoldersReport(stale)!;
     expect(told.chip).toBe("Disco: 1 pasta(s) parada(s) há mais de 72 h fora da tag, ~271 MB — informação para o dono, nada foi removido");
-    expect(told.report).toContain("(e mais 188 pequena(s), abaixo de 200 MB, não listada(s)) (e 1 cujo tamanho não consegui medir)");
+    expect(told.report).toContain("(e mais 188 pequenas, abaixo de 200 MB, e 1 que não consegui medir, não listadas)");
+    expect(staleFoldersReport([stale[0]!, stale.at(-1)!])!.report).toContain("(e mais 1 que não consegui medir, não listada)");
     const line = staleFoldersLogLine(stale);
     expect(line).toBe(`1 folder(s) of 200 MB or more, ~271 MB: ${tw("b427dc32")} (271 MB); 188 smaller, not listed; 1 not measured: ${tw("timeout")}`);
     expect(line).not.toContain("? KB");
