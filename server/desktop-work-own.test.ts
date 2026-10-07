@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { CcSessionLedger, type CcSession } from "./cc-sessions.ts";
 import type { DesktopRecord, DesktopStep } from "./claude-desktop.ts";
 import {
@@ -105,7 +106,7 @@ describe("a create with a worktree of the server's", () => {
     await runDesktopWork(h.deps, h.state);
     expect(h.steps.create).not.toHaveBeenCalled();
     // with the worktree's own path, by which a "trust this workspace" prompt is judged ours
-    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function) });
+    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function), trustClicks: 0 });
     expect(session.desktop!.sentAt).toBe(h.now);
   });
 
@@ -437,15 +438,66 @@ describe("a \"trust this workspace\" click (R13-dispatch R13-3)", () => {
     expect(session.desktop!.sentAt).toBe(h.now);
   });
 
-  it("a prompt that comes back after the click counts as a miss, so the path ends instead of clicking forever", async () => {
+  it("one click per create: the next try is told it clicked, and the prompt or a scratch then (cliNow) sends it to the cli at once (INSP-R13dis 5)", async () => {
     const h = harness();
+    const started: string[] = [];
+    h.deps.own!.toCli = (session) => { started.push(session.id); return { sessionId: "cli-again" }; };
     const session = h.start();
     await prepareOwnWorktrees(h.deps, h.prepareState);
-    for (let i = 0; i < OWN_OPEN_MAX_MISSES + 1; i++) {
-      h.results.push(TRUSTED);
-      await runDesktopWork(h.deps, h.state);
-      h.advance(31 * 60_000);
-    }
+    h.results.push(TRUSTED);
+    await runDesktopWork(h.deps, h.state);
+    h.advance(31 * 60_000);
+    h.results.push({ ok: false, reason: "the app asks to trust the workspace 9353-comprar-assentos again after the server clicked it once in this create; no second click — the create goes on in the cli", retry: true, miss: true, touched: true, cliNow: true });
+    await runDesktopWork(h.deps, h.state);
+    expect(h.steps.openIn.mock.calls.map((call) => (call as unknown as [unknown, { trustClicks: number }])[1].trustClicks)).toEqual([0, 1]);
     expect(session.desktop!.own!.state).toBe("abandoned");
+    expect(session.status).toBe("failed");
+    expect(started).toEqual(["s1"]);
+    expect(h.steps.create).not.toHaveBeenCalled();
+  });
+});
+
+// INSP-R13dis 1/7: the chips on the folder before — no click ever fixes a
+// link that reuses it — go to the cli on the FIRST such give-up: no 3 misses,
+// no New Session, no new worktree per try. The 10 real screens of 05–06/10.
+const REAL_PREVIOUS_10: Array<[string, string]> = [
+  ["2f2ec068", "• Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["035161dc", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e712f070", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e712f070", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e712f070", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e0d7126a", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e0d7126a", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e0d7126a", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["b23900b6", "• Local | • 9337-sobrecarga-d1-no-….. | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["b7fcd057", "• Local | • nuria-platform | gº main |O worktree | Descreva uma tarefa ou faça uma pergunta"],
+];
+
+describe("the chips on the folder before: the cli on the first such give-up (INSP-R13dis 1, 6, 7)", () => {
+  it.each(REAL_PREVIOUS_10)("%s: no click, no 2nd try, no New Session — the breaker counts it and the same brief goes to the cli; the chip says so in pt-BR", async (_session, seen) => {
+    const h = harness();
+    const counted: string[] = [];
+    const handed: string[] = [];
+    h.deps.own!.abandoned = (session, reason) => { counted.push(`${session.id}: ${reason}`); };
+    h.deps.own!.toCli = (_session, why) => { handed.push(why); return { sessionId: "c11a0000-0000-4000-8000-000000000000" }; };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    const reason = "the new session shows another folder in its chips (the folder before), not 9353-comprar-assentos; nothing was clicked or typed";
+    h.results.push({ ok: false, reason, retry: true, miss: true, touched: true, previousFolder: true, seen: `Confiar no workspace | ${seen}` });
+    await runDesktopWork(h.deps, h.state);
+    expect(h.steps.openIn).toHaveBeenCalledTimes(1);
+    expect(h.steps.create).not.toHaveBeenCalled();
+    expect(session.desktop!.own!.state).toBe("abandoned");
+    expect(counted).toEqual([`s1: ${reason}`]);
+    expect(handed).toEqual([`the app did not open the session in the worktree the server made: ${reason}`]);
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.cliFallback).toMatchObject({ sessionId: "c11a0000-0000-4000-8000-000000000000" });
+    expect(session.lastError).toContain("The Claude app did not open the session in the right folder, so the server started the same brief in the CLI as session c11a0000-0000-4000-8000-000000000000;");
+    expect(h.chips.map((chip) => chip.text)).toEqual(expect.arrayContaining([
+      "parou com um problema — o app abriu a sessão nova na pasta anterior, não na worktree do OMB",
+      "o app não abriu na pasta certa; segui pela linha de comando (sessão c11a0000)",
+    ]));
+    expect(sessionErrorPt(session.lastError!)).toBe("o app não abriu na pasta certa; segui pela linha de comando (sessão c11a0000)");
+    expect(h.reports).toHaveLength(1);
   });
 });

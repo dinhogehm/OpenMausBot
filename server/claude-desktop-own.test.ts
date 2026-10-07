@@ -21,6 +21,8 @@ import {
   rootFolderRefusal,
   trustPrompt,
   trustPromptFolder,
+  trustPromptFor,
+  folderChip,
   parseTrustLog,
   createDesktopSession,
   rootAnchorSession,
@@ -355,13 +357,11 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
 
 // The 16 creates of 05–06/10 that stopped at "does not show the folder" with
 // the trust prompt on screen (server.log: time, session, the folder asked
-// for, what the screen showed). The owner's call: click "Confiar" right after
-// OUR link even with the chip on the folder before — only when something ties
-// the prompt to our worktree by its real path (the folder it names, or the
-// app's main.log checking it since the link opened); nothing does: no click,
-// a miss, as before. NB: in all 16, main.log has no line naming our folder
-// before the screen was read — only after a click (saveTrust), or a check of
-// ANOTHER folder (03:31:25 checkTrust …/9337-…-2f6a57, 4 s before 06/10 03:31:29Z).
+// for, what the screen showed). INSP-R13dis 1/2/7: main.log follows the
+// composer, not the button (06/10 03:31:25 checkTrust of …/9337-…-2f6a57, the
+// chip's folder, 4 s before e712f070's screen) — so with the chips on another
+// folder, or cut short to a start another worktree shares, nothing is ever
+// clicked, whatever the log says, and the create goes to the cli.
 const REAL_TRUST_16: Array<[string, string, string, string]> = [
   ["2026-10-05T16:00:50Z", "472b5524", "9378-supervisor-do-atendimento", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.,5 | Médio"],
   ["2026-10-05T16:02:00Z", "472b5524", "9378-supervisor-do-atendimento", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.,5 | Médio"],
@@ -381,11 +381,11 @@ const REAL_TRUST_16: Array<[string, string, string, string]> = [
   ["2026-10-06T14:52:35Z", "b7fcd057", "9384-hook-v2-7-c2b-append-atendimento-b7fcd0", "Confiar no workspace | • Local | • nuria-platform | gº main |O worktree | Descreva uma tarefa ou faça uma pergunta | + o v Ignorar permissões | Opus 5.5 | Médio"],
 ];
 
-describe("\"Confiar\" with the chip still on the folder before: clicked only when tied to our worktree (R13-dispatch, owner's call)", () => {
+describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous cut: the cli instead (INSP-R13dis 1, 2, 4, 5)", () => {
   const dirs: string[] = [];
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-  /** Our worktree and the alias the app is given, and the previous session's (another one), for real: the tie is by real path. */
-  const world = (folder: string) => {
+  /** The worktrees git listed at `at` (the 16's folders made by then, and 2f6a57's from 05/10 23:56Z), for real: by real path. */
+  const world = (folder: string, at = "2026-10-07T00:00:00Z") => {
     const root = mkdtempSync(join(tmpdir(), "omb-trust16-"));
     dirs.push(root);
     const make = (name: string) => {
@@ -393,10 +393,15 @@ describe("\"Confiar\" with the chip still on the folder before: clicked only whe
       mkdirSync(worktree, { recursive: true });
       const alias = join(root, ".omb-worktree-links", "nuria-platform", name);
       mkdirSync(join(alias, ".."), { recursive: true });
-      symlinkSync(worktree, alias);
+      try { symlinkSync(worktree, alias); } catch { /* made already */ }
       return { worktree, alias };
     };
-    return { ours: make(folder), before: make("9337-sobrecarga-d1-no-envio-do-agente-2f6a57") };
+    const before = make("9337-sobrecarga-d1-no-envio-do-agente-2f6a57");
+    const listed = [...new Set(REAL_TRUST_16.filter(([when]) => when <= at).map(([, , name]) => name))].map((name) => make(name).worktree);
+    if (at > "2026-10-05T23:56:00Z") listed.push(before.worktree);
+    const ours = make(folder);
+    if (!listed.includes(ours.worktree)) listed.push(ours.worktree);
+    return { ours, before, listed };
   };
   /** A line of main.log as the app writes it: local time, to the second. */
   const logLine = (at: number, text: string) => {
@@ -405,80 +410,115 @@ describe("\"Confiar\" with the chip still on the folder before: clicked only whe
     return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} [info] ${text}`;
   };
   const screenFrom = (seen: string) => seen.split(" | ");
-  const chipOurs = (seen: string, folder: string) => showsFolderName(screenFrom(seen).map((text) => ({ x: 600, y: 800, w: 200, h: 16, text })), folder);
+  const ocr = (seen: string) => screenFrom(seen).map((text) => ({ x: 600, y: 800, w: 200, h: 16, text }));
+  const names = (paths: readonly string[]) => paths.map((path) => path.split("/").pop()!);
+  const chipOf = ([at, , folder, seen]: [string, string, string, string]) => folderChip(ocr(seen), folder, () => names(world(folder, at).listed));
 
-  it("are 16; in 6 the chip already reads as ours (cut short), in 10 it shows the folder before", () => {
+  it("are 16: in 4 the chip is ours (cut, and no other worktree starts so), in 2 the cut is ambiguous (035161dc with 472b5524's worktree there), in 10 another folder", () => {
     expect(REAL_TRUST_16).toHaveLength(16);
-    expect(REAL_TRUST_16.filter(([, , folder, seen]) => chipOurs(seen, folder))).toHaveLength(6);
-    expect(REAL_TRUST_16.every(([, , , seen]) => trustPrompt(screenFrom(seen).map((text) => ({ x: 600, y: 800, w: 200, h: 16, text })))?.text === "Confiar no workspace")).toBe(true);
+    expect(REAL_TRUST_16.every(([, , , seen]) => trustPrompt(ocr(seen))?.text === "Confiar no workspace")).toBe(true);
+    const read = REAL_TRUST_16.map((row) => `${row[1]} ${row[0].slice(11, 16)} ${chipOf(row)}`);
+    expect(read).toEqual([
+      "472b5524 16:00 cut", "472b5524 16:02 cut", "472b5524 16:04 cut",
+      "035161dc 18:37 ambiguous", "035161dc 18:38 ambiguous",
+      "2f2ec068 18:41 none", "035161dc 19:45 none", "2f2ec068 19:56 cut",
+      "e712f070 03:31 none", "e712f070 03:32 none", "e712f070 03:33 none",
+      "e0d7126a 03:43 none", "e0d7126a 03:44 none", "e0d7126a 03:45 none",
+      "b23900b6 14:02 none", "b7fcd057 14:52 none",
+    ]);
   });
 
-  it.each(REAL_TRUST_16.filter(([, , folder, seen]) => !chipOurs(seen, folder)))("%s %s: nothing ties the prompt to %s (main.log as it was: no line naming it before the screen) — no click, a miss", async (at, _session, folder, seen) => {
-    const { ours } = world(folder);
-    vi.setSystemTime(Date.parse(at) - 4_000);
-    // what main.log had before that screen: other folders, checked earlier than the link (or nothing)
-    const log = [logLine(Date.parse(at) - 3_600_000, `LocalSessions.checkTrust: cwd=${ours.alias}`), logLine(Date.parse(at) - 120_000, "LocalSessions.checkTrust: cwd=/Users/o/Projetos/nuria-platform")].join("\n");
-    const app = fakeApp([screenFrom(seen)]);
-    let listed = 0;
-    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => { listed += 1; return [ours.worktree]; }, trustLog: () => log });
-    expect(step).toMatchObject({ ok: false, miss: true, retry: true });
-    expect(!step.ok && step.reason).toContain(`nothing ties it to ${folder}`);
-    expect(!step.ok && step.reason).toContain("not clicked");
-    expect(listed).toBe(0);
-    expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
-  });
-
-  it.each(REAL_TRUST_16.filter(([, , folder, seen]) => !chipOurs(seen, folder)))("%s %s: the app's log checked OUR worktree (%s) since the link opened — clicked, nothing pasted, the link opened again next", async (at, _session, folder, seen) => {
-    const { ours } = world(folder);
+  const notOurs = REAL_TRUST_16.filter((row) => chipOf(row) === "none" || chipOf(row) === "ambiguous");
+  it.each(notOurs)("%s %s (%s): no click whatever main.log says — even a check of OUR worktree after the link — and the step sends the create to the cli (previousFolder)", async (at, _session, folder, seen) => {
+    const { ours, listed } = world(folder, at);
     vi.setSystemTime(Date.parse(at) - 4_000);
     const opened = Date.now();
     const log = [logLine(opened - 60_000, "LocalSessions.checkTrust: cwd=/Users/o/Projetos/nuria-platform"), logLine(opened + 1_000, `LocalSessions.checkTrust: cwd=${ours.alias}`)].join("\n");
-    const after = screenFrom(seen).filter((line) => !line.startsWith("Confiar"));
-    const app = fakeApp([screenFrom(seen), after]);
-    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => `${log}\n${logLine(Date.now(), `Saved workspace trust for ${ours.alias}`)}` });
-    expect(step).toMatchObject({ ok: false, retry: true, trusted: true });
-    expect(app.actions.filter((action) => action.startsWith("click"))).toEqual(["click 700,708"]);
-    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
-  });
-
-  it("the log checked ANOTHER folder since the link (06/10 03:31:25 checkTrust …/9337-…-2f6a57, before e712f070's screen): no click, and the reason names it", async () => {
-    const [at, , folder, seen] = REAL_TRUST_16[8]!;
-    const { ours, before } = world(folder);
-    vi.setSystemTime(Date.parse(at) - 4_000);
-    const log = logLine(Date.now() + 0, `LocalSessions.checkTrust: cwd=${before.alias}`);
     const app = fakeApp([screenFrom(seen)]);
-    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => log });
-    expect(step).toMatchObject({ ok: false, miss: true });
-    expect(!step.ok && step.reason).toContain(`it is ${before.alias}, not ${folder}`);
-    expect(app.actions.some((action) => action.startsWith("click"))).toBe(false);
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => listed, trustLog: () => log });
+    expect(step).toMatchObject({ ok: false, miss: true, retry: true, previousFolder: true });
+    expect(!step.ok && step.reason).toContain("nothing was clicked or typed");
+    expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
   });
 
-  it("the prompt naming our folder in its own words ties it; naming another does not; a folder not git's (X3-2) is never clicked", async () => {
-    const [at, , folder, seen] = REAL_TRUST_16[15]!;
-    const { ours, before } = world(folder);
-    vi.setSystemTime(Date.parse(at));
+  it("the real pair of 05/10: 035161dc's cut chip is ours only while no other worktree starts so (472b5524's there: ambiguous, no click, even with nothing in the log)", async () => {
+    const [at, , folder, seen] = REAL_TRUST_16[3]!;
+    expect(folder).toBe("9378-supervisor-do-atendimento-035161");
+    const { ours, listed } = world(folder, at);
+    expect(names(listed)).toContain("9378-supervisor-do-atendimento");
+    expect(folderChip(ocr(seen), folder, () => names(listed))).toBe("ambiguous");
+    expect(folderChip(ocr(seen), folder, () => [folder])).toBe("cut");
+    vi.setSystemTime(Date.parse(at) - 4_000);
+    const app = fakeApp([screenFrom(seen)]);
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustLog: () => "" });
+    expect(step).toMatchObject({ ok: false, previousFolder: true });
+    expect(!step.ok && step.reason).toContain("cut short to a start that another worktree of the repository shares");
+    expect(app.actions.some((action) => action.startsWith("click"))).toBe(false);
+    // and 2f2ec068 at 18:41, asking for 9337, read the same chip: the folder before
+    const [at2, , folder2, seen2] = REAL_TRUST_16[5]!;
+    expect(seen2).toContain("9378-supervisor-do-ate");
+    expect(folderChip(ocr(seen2), folder2, () => names(world(folder2, at2).listed))).toBe("none");
+  });
+
+  it("our chip (472b5524, 16:00): the log or the prompt naming ANOTHER folder since the link — no click, named; the X3-2 git check still asked", async () => {
+    const [at, , folder, seen] = REAL_TRUST_16[0]!;
+    const { ours, before, listed } = world(folder, at);
+    vi.setSystemTime(Date.parse(at) - 4_000);
+    const other = fakeApp([screenFrom(seen)]);
+    const step = await openDesktopSessionIn(other.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => listed, trustLog: () => logLine(Date.now() + 1_000, `LocalSessions.checkTrust: cwd=${before.alias}`) });
+    expect(step).toMatchObject({ ok: false, miss: true });
+    expect(!step.ok && step.reason).toContain(`trust the workspace ${before.alias}, not ${folder}`);
+    expect(other.actions.some((action) => action.startsWith("click"))).toBe(false);
     const named = (path: string) => screenFrom(seen).map((line) => (line === "Confiar no workspace" ? `Confiar em ${path} e iniciar uma sessão de código?` : line)).concat("Confiar");
     expect(trustPromptFolder([{ x: 0, y: 0, w: 0, h: 0, text: `Confiar em ${ours.alias} e iniciar uma sessão de código?` }])).toBe(ours.alias);
-    const yes = fakeApp([named(ours.alias), screenFrom(seen).slice(1)]);
-    expect(await openDesktopSessionIn(yes.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => "" })).toMatchObject({ trusted: true });
     const no = fakeApp([named(before.alias)]);
-    expect(await openDesktopSessionIn(no.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => "" })).toMatchObject({ ok: false, miss: true });
+    expect(await openDesktopSessionIn(no.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustLog: () => "" })).toMatchObject({ ok: false, miss: true });
     expect(no.actions.some((action) => action.startsWith("click"))).toBe(false);
-    // tied to it, but git does not list it as the repository's worktree: the person decides (X3-2)
+    const yes = fakeApp([named(ours.alias), screenFrom(seen).slice(1)]);
+    expect(await openDesktopSessionIn(yes.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustLog: () => "" })).toMatchObject({ trusted: true });
+    // ours by every reading, but git does not list it: the person decides (X3-2)
     const notGits = fakeApp([named(ours.alias)]);
     expect(await openDesktopSessionIn(notGits.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => ["/elsewhere"], trustLog: () => "" })).toMatchObject({ ok: false, trustNeeded: ours.alias });
     expect(notGits.actions.some((action) => action.startsWith("click"))).toBe(false);
   });
 
+  it("one click per create: after it, the prompt again or a scratch is no second click — the cli (cliNow)", async () => {
+    const [at, , folder, seen] = REAL_TRUST_16[0]!;
+    const { ours, listed } = world(folder, at);
+    vi.setSystemTime(Date.parse(at));
+    const again = fakeApp([screenFrom(seen)]);
+    const step = await openDesktopSessionIn(again.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustClicks: 1 });
+    expect(step).toMatchObject({ ok: false, cliNow: true });
+    expect(!step.ok && step.reason).toContain("no second click");
+    expect(again.actions.some((action) => action.startsWith("click"))).toBe(false);
+    const scratch = fakeApp([[...screenFrom(seen).slice(1, 3), "scratch-2026-10-06-c55113", ...screenFrom(seen).slice(3)]]);
+    expect(await openDesktopSessionIn(scratch.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustClicks: 1 })).toMatchObject({ ok: false, cliNow: true });
+    expect(scratch.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+  });
+
+  it("ties by the newest line, never one of up to 999 ms before the link, and two folders in the newest second tie to none", () => {
+    const { ours, before } = world("9378-supervisor-do-atendimento", "2026-10-05T16:00:50Z");
+    const opened = new Date(2026, 9, 5, 13, 0, 6, 500).getTime();
+    const line = (second: number, folder: string) => ({ at: new Date(2026, 9, 5, 13, 0, second).getTime(), kind: "check" as const, folder });
+    // the second the link was opened in: not "after" it
+    expect(trustPromptFor([], [line(6, ours.alias)], opened, ours.worktree)).toEqual({ is: "none" });
+    expect(trustPromptFor([], [line(7, ours.alias)], opened, ours.worktree)).toEqual({ is: "ours" });
+    // the newest second wins over an older one, whatever the file order
+    expect(trustPromptFor([], [line(9, before.alias), line(8, ours.alias)], opened, ours.worktree)).toEqual({ is: "other", folder: before.alias });
+    // two folders in the newest second: nothing ties it (no first-in-file win)
+    expect(trustPromptFor([], [line(8, ours.alias), line(8, before.alias)], opened, ours.worktree)).toEqual({ is: "none" });
+    expect(trustPromptFor([], [line(8, ours.alias), line(8, ours.worktree)], opened, ours.worktree)).toEqual({ is: "ours" });
+  });
+
   it("after the click, the app saving the trust for another folder is a miss, said", async () => {
-    const [at, , folder, seen] = REAL_TRUST_16[15]!;
-    const { ours, before } = world(folder);
+    const [at, , folder, seen] = REAL_TRUST_16[0]!;
+    const { ours, before, listed } = world(folder, at);
     vi.setSystemTime(Date.parse(at));
     const opened = Date.now();
     let reads = 0;
     const log = () => (reads++ === 0 ? logLine(opened, `LocalSessions.checkTrust: cwd=${ours.alias}`) : `${logLine(opened, `LocalSessions.checkTrust: cwd=${ours.alias}`)}\n${logLine(Date.now(), `Saved workspace trust for ${before.alias}`)}`);
     const app = fakeApp([screenFrom(seen), screenFrom(seen).slice(1)]);
-    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => [ours.worktree], trustLog: log });
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustLog: log });
     expect(step).toMatchObject({ ok: false, miss: true });
     expect(!step.ok && step.reason).toContain(`the app saved the trust for ${before.alias}`);
   });
@@ -531,8 +571,8 @@ describe("a new session in the server's own folder", () => {
     const root = ["• Local", "nuria-platform", "gº main", "v worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Ignorar permissões"];
     const app = fakeApp([root]);
     const step = await openDesktopSessionIn(app.driver, { folder: LINK, folderName: FOLDER, text: "brief" });
-    expect(step).toMatchObject({ ok: false, miss: true });
-    expect(!step.ok && step.reason).toContain("does not show the folder 9353-comprar-assentos");
+    expect(step).toMatchObject({ ok: false, miss: true, previousFolder: true });
+    expect(!step.ok && step.reason).toContain("shows another folder in its chips (the folder before), not 9353-comprar-assentos");
     expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
   });
 

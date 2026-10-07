@@ -446,25 +446,33 @@ export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, re
   deps.report(session, reportFor(deps, session));
 }
 
-/** Both ways of the app failed for a create (the server's worktree, then
- * New Session, or New Session barred): the session fails — on record, which
- * frees the cli — and the same brief is started there at once, the reason
- * recorded, instead of a bot finding out and asking (R13-dispatch R13-2). */
-function appWaysFailed(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
+/** The app failed for a create — both ways (the server's worktree, then New
+ * Session, or New Session barred: "both"), or its link showed the folder
+ * before / came back after our one click ("own"): the session fails — on
+ * record, which frees the cli — and the same brief is started there at once,
+ * the reason recorded, instead of a bot finding out and asking (R13-dispatch
+ * R13-2, INSP-R13dis 1). The person's chip says the cli took over. */
+function appWaysFailed(deps: DesktopWorkDeps, session: CcSession, reason: string, how: "both" | "own" = "both"): void {
+  const said = how === "both" ? "Both ways of the Claude app failed" : "The Claude app did not open the session in the right folder";
+  let started: ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>> | null = null;
   failDesktopSession(deps, session, reason, (failed) => {
     if (!deps.own?.toCli) return null;
-    let started: ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>>;
     try {
       started = deps.own.toCli(failed, reason);
     } catch (error) {
       started = { refusal: error instanceof Error ? error.message.slice(0, 200) : String(error) };
     }
-    failed.desktop!.cliFallback = { at: deps.now(), ...started };
-    deps.log?.(`create: session ${failed.id} failed both ways of the app — ${"sessionId" in started ? `started in the cli as ${started.sessionId}` : "queueId" in started ? `queued for the cli (${started.queueId})` : `the cli refused: ${started.refusal}`}`);
-    if ("sessionId" in started) return `Both ways of the Claude app failed, so the server started the same brief in the CLI as session ${started.sessionId}; its report comes here. Do not start it again`;
-    if ("queueId" in started) return `Both ways of the Claude app failed, so the server put the same brief in the session queue for the CLI (${started.queueId}); it opens by itself. Do not start it again`;
-    return `Both ways of the Claude app failed, and the server could not start the same brief in the CLI: ${started.refusal}`;
+    const got: ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>> = started;
+    failed.desktop!.cliFallback = { at: deps.now(), ...got };
+    deps.log?.(`create: session ${failed.id} ${how === "both" ? "failed both ways of the app" : "did not open in its folder in the app"} — ${"sessionId" in got ? `started in the cli as ${got.sessionId}` : "queueId" in got ? `queued for the cli (${got.queueId})` : `the cli refused: ${got.refusal}`}`);
+    if ("sessionId" in got) return `${said}, so the server started the same brief in the CLI as session ${got.sessionId}; its report comes here. Do not start it again`;
+    if ("queueId" in got) return `${said}, so the server put the same brief in the session queue for the CLI (${got.queueId}); it opens by itself. Do not start it again`;
+    return `${said}, and the server could not start the same brief in the CLI: ${got.refusal}`;
   });
+  const got = started as ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>> | null;
+  if (!got) return;
+  const why = how === "both" ? "os dois caminhos do app falharam" : "o app não abriu na pasta certa";
+  deps.chip(session, "sessionId" in got ? `${why}; segui pela linha de comando (sessão ${got.sessionId.slice(0, 8)})` : "queueId" in got ? `${why}; a mesma tarefa entrou na fila da linha de comando` : `${why}, e a linha de comando recusou: ${got.refusal.slice(0, 100)}`, !("refusal" in got));
 }
 
 const actionLabel = (kind: CcDesktopPending["kind"]) =>
@@ -846,7 +854,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       deps.ledger.save();
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
-        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}) })
+        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}), trustClicks: pending.trustClicks ?? 0 })
         : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
@@ -909,11 +917,21 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       giveUpPending(deps, next, step.reason);
       return;
     }
-    // after a "trust" click the link is opened again (R13-3); a second click is a miss, so a prompt that keeps coming back ends
+    // after a "trust" click the link is opened again (R13-3); openIn clicks once per create, and a prompt or a scratch after it is the cli
     if (step.trusted && own) {
       pending.trustClicks = (pending.trustClicks ?? 0) + 1;
-      if (pending.trustClicks > 1) step.miss = true;
       deps.chip(next, `confiei no workspace ${basename(own.path)} no app Claude; reabrindo o link e conferindo a pasta antes de colar`, false);
+    }
+    // The chips on the folder before (no click fixes that), or the app again
+    // after our one click: no more tries of the app for this create — the
+    // breaker counts it, and the same brief goes to the cli at once, the
+    // reason on record (INSP-R13dis 1, 5, 7).
+    if ((step.previousFolder || step.cliNow) && own) {
+      own.state = "abandoned";
+      own.reason = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`.slice(0, 600);
+      deps.own?.abandoned?.(next, step.reason, step.seen);
+      appWaysFailed(deps, next, `the app did not open the session in the worktree the server made: ${step.reason}`, "own");
+      return;
     }
     if (step.miss && own) {
       pending.misses = (pending.misses ?? 0) + 1;

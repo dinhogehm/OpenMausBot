@@ -4,6 +4,18 @@
 // through unchanged.
 
 const KNOWN: Array<[RegExp, (match: RegExpExecArray) => string]> = [
+  // the app failed and the cli took over (R13-dispatch, INSP-R13dis 6): said first, it is what matters now
+  [/(Both ways of the Claude app failed|The Claude app did not open the session in the right folder), so the server started the same brief in the CLI as session (\S+?);/, (m) => `${m[1]!.startsWith("Both") ? "os dois caminhos do app falharam" : "o app não abriu na pasta certa"}; segui pela linha de comando (sessão ${m[2]!.slice(0, 8)})`],
+  [/(Both ways of the Claude app failed|The Claude app did not open the session in the right folder), so the server put the same brief in the session queue for the CLI/, (m) => `${m[1]!.startsWith("Both") ? "os dois caminhos do app falharam" : "o app não abriu na pasta certa"}; a mesma tarefa entrou na fila da linha de comando`],
+  [/(Both ways of the Claude app failed|The Claude app did not open the session in the right folder), and the server could not start the same brief in the CLI: (.+)$/, (m) => `${m[1]!.startsWith("Both") ? "os dois caminhos do app falharam" : "o app não abriu na pasta certa"}, e a linha de comando recusou a mesma tarefa: ${m[2]}`],
+  [/the app did not open the session in the worktree the server made.*New Session failed too/i, () => "o app não abriu a sessão na worktree do OMB, e a sessão nova pelo jeito antigo também falhou"],
+  [/New Session, the old way, would land in a wrong folder/i, () => "o app não abriu a sessão na worktree do OMB, e a sessão nova pelo jeito antigo cairia numa pasta errada"],
+  [/the app did not open the session in the worktree the server made: the new session shows another folder in its chips/i, () => "o app abriu a sessão nova na pasta anterior, não na worktree do OMB"],
+  [/the app did not open the session in the worktree the server made: the new session's folder chip is cut short to a start that another worktree/i, () => "o app mostrou um nome de pasta cortado que serve para mais de uma worktree; não dá para saber se é a do OMB"],
+  [/the app did not open the session in the worktree the server made: the app asks to trust the workspace .* again after the server clicked it once/i, () => "o app pediu de novo para confiar no workspace depois do clique do servidor"],
+  [/the app did not open the session in the worktree the server made: the new session shows a scratch folder/i, () => "o app levou a sessão nova para uma pasta de rascunho (scratch) depois do clique em Confiar"],
+  [/the app did not open the session in the worktree the server made/i, () => "o app não abriu a sessão na worktree do OMB"],
+  [/New Session did not show a new session's screen/i, () => "o app não mostrou a tela de sessão nova (apareceu uma conversa)"],
   [/could not send the message after (\d+) tries/i, (m) => `não foi possível enviar a mensagem depois de ${m[1]} tentativas`],
   [/a message was typed into the Claude app (\d+) times but never reached the session/i, (m) => `uma mensagem foi digitada no app Claude ${m[1]} vezes e nunca chegou à sessão`],
   [/the turn ran past (\d+) minutes and was stopped/i, (m) => `o turno passou de ${m[1]} minutos e foi parado`],

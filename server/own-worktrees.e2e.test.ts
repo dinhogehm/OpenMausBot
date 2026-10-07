@@ -299,4 +299,7 @@ it("has no command that removes, prunes or unlocks a worktree anywhere in its co
   // the probe, a temporary copy a stopped server left, and the one a failed cp left
   expect([...own.matchAll(/io\.dropTemp\((\w+)\)/g)].map((match) => match[1])).toEqual(["probe", "temp", "temp"]);
   expect(own).toContain("const temp = `${target}.omb-clone`;");
+  // the one unlink takes back an alias (a symlink) whose worktree is gone, never the worktree (R13-2d)
+  expect(own.match(/unlinkSync\(/g)).toHaveLength(1);
+  expect(own).toMatch(/readlink: \(path\) => \{ try \{ return lstatSync\(path\)\.isSymbolicLink\(\) \? readlinkSync\(path\) : null;/);
 });

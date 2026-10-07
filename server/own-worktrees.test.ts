@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
-  cliDependencyLine, cliWorktreePlan, prepareCliWorktree, type OwnPlan,
+  cliDependencyLine, cliWorktreePlan, prepareCliWorktree, pruneDanglingLinks, type OwnPlan,
 } from "./own-worktrees.ts";
 import { ccTurnArgs } from "./cc-sessions.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -494,6 +494,24 @@ describe("the breaker counts every give-up of the path, and sends the next sessi
     expect(ownFailureCause({ folder: "", expected: "x", missed: "the new session does not show the folder 9384-hook-v2-7-c2b-append-atendimento-b7fcd0 in its chips; nothing was clicked or typed" }, REPO)).toContain("a sessão nova mostrou outra pasta nos chips (a da sessão anterior)");
   });
 
+  // INSP-R13dis 6: every reason the screen steps give now, in pt-BR, and no English left in the owner's item
+  it("says every new reason in pt-BR, with no English in the owner's text", () => {
+    const cases: Array<[string, string]> = [
+      ["the new session shows another folder in its chips (the folder before), not x; nothing was clicked or typed", "a sessão nova mostrou outra pasta nos chips (a da sessão anterior), não a worktree do OMB"],
+      ["the new session's folder chip is cut short to a start that another worktree of the repository shares, not only x; nothing was clicked or typed", "o nome da pasta nos chips veio cortado e serve para mais de uma worktree; não dá para saber se é a do OMB"],
+      ["the app asks to trust the workspace x again after the server clicked it once in this create; no second click — the create goes on in the cli", "o app pediu de novo para confiar no workspace depois do clique do servidor"],
+      ["the app asks to trust the workspace /a/b, not x; nothing was clicked or typed", "o app pediu para confiar em outra pasta (/a/b), não na worktree do OMB; não cliquei"],
+      ["the app asks to trust the workspace x, which is not a worktree the server made; nothing was clicked or typed", "o app pediu para confiar numa pasta que não é uma worktree do OMB; não cliquei"],
+      ["the app saved the trust for /a/c, not x, after the click; nothing was typed", "o app gravou a confiança para outra pasta (/a/c), não para a worktree do OMB"],
+      ["trusted the workspace x; nothing was typed — the app's link is opened again and the folder checked before the brief goes in", "confiei no workspace da worktree do OMB, mas a sessão não abriu nela depois"],
+      ["New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed", "a sessão nova pelo jeito antigo também não apareceu (a tela mostrou uma conversa)"],
+      ["something the server never said before", "o app não abriu a sessão na worktree do OMB (motivo registrado no log do servidor)"],
+    ];
+    for (const [missed, said] of cases) expect(ownFailureCause({ folder: "", expected: "x", missed }, REPO)).toBe(`${said}; nada foi colado`);
+    const item = ownBreakerItem(REPO, cases.map(([missed], i) => ({ at: i, sessionId: `s${i}`, title: `t${i}`, folder: "", expected: "x", missed })));
+    expect(item.why).not.toMatch(/\b(?:the|was|nothing|clicked|typed|asks|folder)\b/);
+  });
+
   it("sends new sessions to the cli only while tripped with the owner asked, until the item is resolved (rearmed)", () => {
     let out = noteOwnFailure({ repos: {} }, REPO, first);
     expect(ownBreakerCli(out.state, REPO)).toBeNull();
@@ -626,5 +644,42 @@ describe("a headless session's worktree, seeded like the app's (R13-gate G2)", (
     const thrown = await prepareCliWorktree(REPO, "w", { add: made([]), clone: async () => { throw new Error("cp: No space left on device"); } });
     expect(thrown).toMatchObject({ ok: true, caches: { mode: "install", reason: "o clone das dependências falhou: cp: No space left on device" } });
     expect(cliDependencyLine(thrown)).toContain("ANTES de qualquer `npm run ci:local`");
+  });
+});
+
+// R13-dispatch R13-2(d): 06/10, 13 aliases in ~/Projetos/.omb-worktree-links/
+// nuria-platform/ pointed at worktrees removed by hand (the 9032 ones among them).
+describe("the aliases whose worktree is gone (R13-2d)", () => {
+  it("are removed, and only they: a live alias, a session's own, a plain folder or file, another repository's stay", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "omb-links-")));
+    try {
+      const repo = join(root, "Projetos", "nuria-platform");
+      const links = join(root, "Projetos", ".omb-worktree-links", "nuria-platform");
+      const others = join(root, "Projetos", ".omb-worktree-links", "outro");
+      mkdirSync(links, { recursive: true });
+      mkdirSync(others, { recursive: true });
+      const worktree = (name: string) => { const path = join(repo, ".claude", "worktrees", name); mkdirSync(path, { recursive: true }); return path; };
+      // 13 gone, as on 06/10
+      const gone = Array.from({ length: 13 }, (_, i) => `93${String(i).padStart(2, "0")}-gone`);
+      for (const name of gone) symlinkSync(join(repo, ".claude", "worktrees", name), join(links, name));
+      symlinkSync(worktree("9398-live"), join(links, "9398-live"));
+      symlinkSync(join(repo, ".claude", "worktrees", "9032-kept"), join(links, "9032-kept"));
+      symlinkSync("../../nuria-platform/.claude/worktrees/rel-gone", join(links, "rel-gone"));
+      symlinkSync("../../nuria-platform/.claude/worktrees/9398-live", join(links, "rel-live"));
+      mkdirSync(join(links, "a-folder"));
+      writeFileSync(join(links, "a-file"), "x");
+      symlinkSync(join(root, "nowhere"), join(others, "gone-elsewhere"));
+      const removed = pruneDanglingLinks(repo, new Set([join(links, "9032-kept")]));
+      expect(removed.map((path) => path.split("/").pop()).sort()).toEqual([...gone, "rel-gone"].sort());
+      expect(readdirSync(links).sort()).toEqual(["9032-kept", "9398-live", "a-file", "a-folder", "rel-live"]);
+      expect(readdirSync(others)).toEqual(["gone-elsewhere"]);
+      // the worktrees themselves untouched; nothing more to remove the second time
+      expect(existsSync(join(repo, ".claude", "worktrees", "9398-live"))).toBe(true);
+      expect(pruneDanglingLinks(repo, new Set([join(links, "9032-kept")]))).toEqual([]);
+      // no alias folder at all: nothing
+      expect(pruneDanglingLinks(join(root, "Projetos", "sem-links"), new Set())).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

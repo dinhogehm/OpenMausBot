@@ -23,7 +23,7 @@
 // server only reports. A failed clone takes back only the temporary copy it
 // was writing, inside the new worktree, before any session saw it.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { slugify } from "./cc-sessions.ts";
@@ -885,11 +885,18 @@ export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected" 
 
 /** A miss of the screen (desktop-work's reason, in English) said in pt-BR. */
 function missedCause(reason: string): string {
+  if (/New Session did not show a new session's screen/i.test(reason)) return "a sessão nova pelo jeito antigo também não apareceu (a tela mostrou uma conversa)";
   if (/no empty task field/i.test(reason)) return "o link do app não abriu uma sessão nova (a tela mostrou uma conversa, sem o campo vazio de tarefa)";
-  if (/does not show the folder/i.test(reason)) return "a sessão nova mostrou outra pasta nos chips (a da sessão anterior), não a worktree do OMB";
+  if (/does not show the folder|shows another folder in its chips/i.test(reason)) return "a sessão nova mostrou outra pasta nos chips (a da sessão anterior), não a worktree do OMB";
+  if (/cut short to a start that another worktree/i.test(reason)) return "o nome da pasta nos chips veio cortado e serve para mais de uma worktree; não dá para saber se é a do OMB";
+  if (/again after the server clicked it once/i.test(reason)) return "o app pediu de novo para confiar no workspace depois do clique do servidor";
   if (/scratch folder/i.test(reason)) return "a sessão nova mostrou uma pasta de rascunho (scratch) do app";
   if (/still asks to trust/i.test(reason)) return "o app continuou pedindo para confiar no workspace depois do clique";
-  return `o app não abriu a sessão na worktree do OMB (${reason.slice(0, 120)})`;
+  if (/saved the trust for (\S+), not/i.test(reason)) return `o app gravou a confiança para outra pasta (${/saved the trust for (\S+), not/i.exec(reason)![1]}), não para a worktree do OMB`;
+  if (/asks to trust the workspace (\S+), not /i.test(reason)) return `o app pediu para confiar em outra pasta (${/asks to trust the workspace (\S+), not /i.exec(reason)![1]}), não na worktree do OMB; não cliquei`;
+  if (/which is not a worktree the server made/i.test(reason)) return "o app pediu para confiar numa pasta que não é uma worktree do OMB; não cliquei";
+  if (/trusted the workspace/i.test(reason)) return "confiei no workspace da worktree do OMB, mas a sessão não abriu nela depois";
+  return `o app não abriu a sessão na worktree do OMB (motivo registrado no log do servidor)`;
 }
 
 /** The owner's item when the breaker trips. */
@@ -952,4 +959,47 @@ export function leftWorktreesReport(left: readonly LeftWorktree[]): string | nul
   if (!left.length) return null;
   const lines = left.map((each) => `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
   return `Worktrees criadas pelo OMB que ficaram sem uso (${left.length}). O servidor não remove nada; uma pessoa confere (git status, o que há dentro) e decide:\n${lines.join("\n")}`;
+}
+
+// ── the aliases whose worktree is gone: removed (R13-dispatch R13-2d) ─────
+// 06/10: 13 aliases in ~/Projetos/.omb-worktree-links/nuria-platform/
+// pointed at worktrees removed by hand. An alias is only a symlink the
+// server made: removing one whose target is gone removes nothing else.
+
+/** What the cleanup touches, so a test runs it on a fake folder. */
+export interface LinkFs {
+  list: (dir: string) => string[];
+  /** The link's target as written, or null when `path` is not a symlink. */
+  readlink: (path: string) => string | null;
+  exists: (path: string) => boolean;
+  unlink: (path: string) => void;
+}
+
+export const realLinkFs: LinkFs = {
+  list: (dir) => { try { return readdirSync(dir); } catch { return []; } },
+  readlink: (path) => { try { return lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null; } catch { return null; } },
+  exists: (path) => existsSync(path),
+  // unlink: the symlink itself, never what it points to (and never a folder)
+  unlink: (path) => unlinkSync(path),
+};
+
+/** Remove the aliases of `repo` (ownLinkPath's folder) that are symlinks
+ * pointing at a folder that no longer exists, and only them — a live link,
+ * a plain folder or file, or a link still named by a session that is not
+ * archived are left as they are. The paths removed. */
+export function pruneDanglingLinks(repo: string, keep: ReadonlySet<string>, fs: LinkFs = realLinkFs): string[] {
+  const dir = join(dirname(repo), OWN_LINK_DIR, basename(repo));
+  const removed: string[] = [];
+  for (const name of fs.list(dir)) {
+    const path = join(dir, name);
+    const target = fs.readlink(path);
+    if (target === null || keep.has(path)) continue;
+    // a relative target is read from the link's own folder
+    if (fs.exists(target.startsWith("/") ? target : join(dir, target))) continue;
+    try {
+      fs.unlink(path);
+      removed.push(path);
+    } catch { /* left: told next time */ }
+  }
+  return removed;
 }

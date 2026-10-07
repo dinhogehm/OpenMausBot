@@ -411,7 +411,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, breakerRepo, cacheLine, cliDependencyLine, installText, prepareCliWorktree, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, breakerRepo, cacheLine, cliDependencyLine, installText, prepareCliWorktree, pruneDanglingLinks, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -10411,6 +10411,8 @@ async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnTyp
   };
 }
 const ownPrepareState = { preparing: false };
+/** The seeded headless starts, chained: each spawns after the one before it (INSP-R13dis 3). */
+let seededStarts: Promise<void> = Promise.resolve();
 /** A headless session's first turn in a worktree the server made and seeded
  * from the same seed as the app's (R13-gate G2: `claude -p -w` made bare
  * ones, and the first ci:local failed on a missing vite after ~14 min of
@@ -10712,6 +10714,12 @@ async function cleanReleasedWorktrees(): Promise<void> {
     const leftTold = leftKey !== (releasedCleanup.lastKey.get("\u0000own-left") ?? "") ? leftWorktreesReport(left) : null;
     releasedCleanup.lastKey.set("\u0000own-left", leftKey);
     if (leftTold) console.log(`[worktrees] the server's worktrees left by failed or other-way sessions (told, nothing removed): ${left.map((each) => each.path).join(", ")}`);
+    // the aliases the app was given whose worktree is gone: only those symlinks go (R13-dispatch R13-2d)
+    const keepLinks = new Set(ccLedger.all().filter((each) => each.status !== "archived").map((each) => each.desktop?.own?.link).filter((link): link is string => Boolean(link)));
+    for (const repo of new Set(ccLedger.all().filter((each) => each.desktop?.own).map((each) => each.repo))) {
+      const pruned = pruneDanglingLinks(repo, keepLinks);
+      if (pruned.length) console.log(`[own-worktrees] removed ${pruned.length} alias(es) whose worktree is gone: ${pruned.join(", ")}`);
+    }
     const staleKey = stale.map((each) => each.path).sort().join("\n");
     const staleNews = staleKey !== (releasedCleanup.lastKey.get("\u0000stale") ?? "");
     releasedCleanup.lastKey.set("\u0000stale", staleKey);
@@ -11371,7 +11379,14 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     session.status = "running";
     session.progressAt = Date.now();
     ccLedger.save();
-    void startSeededCli(session, input.brief).catch((error) => console.error(`[cc-session] ${session.id}: seeded start failed: ${error instanceof Error ? error.message : String(error)}`));
+    // one at a time, in the order of the starts: a P1 the queue opened first spawns first (INSP-R13dis 3)
+    const brief = input.brief;
+    seededStarts = seededStarts.then(() => startSeededCli(session, brief)).catch((error) => {
+      const why = error instanceof Error ? error.message : String(error);
+      console.error(`[cc-session] ${session.id}: seeded start failed: ${why}`);
+      // never left "running" with no process: the old way, told to install
+      if (session.turns === 0 && session.status === "running") runCcTurn(session, `${brief}\n\n${cliDependencyLine({ ok: false, reason: why })}`, true);
+    });
   } else runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
   noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
