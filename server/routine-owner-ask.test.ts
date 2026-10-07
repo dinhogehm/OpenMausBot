@@ -182,6 +182,29 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
     expect(next.opened).toEqual([]);
     expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[first!.id, "routine-ask:linha:185+186"]]);
     expect(ledger.ownerPendingOf("monitor")).toHaveLength(1);
+    // the title the owner reads names both rows (round 10)
+    expect(first!.title).toBe("Ver: a linha 185");
+    expect(next.refreshed[0]!.title).toBe("Ver: as linhas 185 e 186");
+  });
+
+  it("a range holds the rows inside it: \"linhas 100 a 200\" and \"a linha 150\" are one item, either way round (round 10)", () => {
+    const ledger = make();
+    const [range] = run(ledger, "As linhas 100 a 200 da planilha dependem de você.").opened;
+    expect(range!.key).toBe("routine-ask:linha:100-200");
+    now += 3_600_000;
+    expect(run(ledger, "A linha 150 depende de você.").opened).toEqual([]);
+    // the other way round, in a ledger of its own
+    const apart = mkdtempSync(join(tmpdir(), "omb-routine-ask-range-"));
+    try {
+      const other = new BotAutonomy({ path: join(apart, "bot-autonomy.json"), now: () => now });
+      const [row] = run(other, "A linha 150 depende de você.").opened;
+      now += 3_600_000;
+      const next = run(other, "As linhas 100 a 200 da planilha dependem de você.");
+      expect(next.opened).toEqual([]);
+      expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[row!.id, "routine-ask:linha:150"]]);
+    } finally {
+      rmSync(apart, { recursive: true, force: true });
+    }
   });
 
   it("B: an item on the 185 and 186, then \"a linha 185\": the same item, still both rows", () => {

@@ -272,8 +272,8 @@ function subjectOf(text: string, exclude: ReadonlySet<string>): Pick<RoutineAsk,
   if (ids.ticket[0]) return { subject: { kind: "ticket", id: ids.ticket[0], label: ids.ticket[0].toUpperCase() }, ...extra };
   if (ids.issue[0]) return { subject: { kind: "issue", id: ids.issue[0], label: `#${ids.issue[0]}` }, ...extra };
   // "linhas 76, 98 e 106": one pendency about the three rows, by its key and its label (INSP-R13VIS H1)
-  if (ids.linha.length > 1) return { subject: { kind: "linha", id: ids.linha.join("+"), label: `linhas ${ids.linha.slice(0, -1).join(", ")} e ${ids.linha.at(-1)}` }, ...extra };
-  if (ids.linha[0]) return { subject: { kind: "linha", id: ids.linha[0], label: `linha ${ids.linha[0]}` }, ...extra };
+  // a range reads "linhas 100 a 200" (round 10)
+  if (ids.linha.length) return { subject: { kind: "linha", id: ids.linha.join("+"), label: rowsLabel(ids.linha) }, ...extra };
   if (conversation && /\d|[A-Z]/.test(conversation)) return { subject: { kind: "conversa", id: conversation.toLowerCase(), label: conversation }, ...extra };
   if (people) return { subject: { kind: "pessoa", id: people.map((each) => slug(each.name)).join("+"), label: people.map((each) => each.name).join(" e ") }, ...extra };
   return { subject: { kind: "frase", id: [...contentWords(text)].slice(0, 4).join("-") || "pendencia", label: "" }, ...extra };
@@ -393,7 +393,9 @@ function echoesItem(ask: string, same: string, neighbours: string, items: Readon
   if ([...same.matchAll(ITEM_BY_ID)].some((match) => near(match[1]!.toLowerCase()))) return true;
   const subjectless = !asked.size && !subjectNouns(ask).size;
   if (subjectless && !/(?<![\p{L}])(?:mas|por[ée]m|s[óo]\s+que)(?![\p{L}])/iu.test(same) && (NO_ITEM_OPENED.test(same) || ITEM_WHERE_DECIDED.test(same))) return true;
-  return subjectless && [...neighbours.matchAll(ITEM_BY_ID)].some((match) => items.has(match[1]!.toLowerCase()));
+  // a pointer that says it is about something else ("Atualizei o item o3, mas isso é outra coisa") points this ask nowhere
+  const pointers = splitSentences(neighbours).filter((each) => !/(?<![\p{L}])outr[ao]s?\s+(?:coisas?|assuntos?|pend[êe]ncias?|tema)(?![\p{L}])/iu.test(each)).join(" ");
+  return subjectless && [...pointers.matchAll(ITEM_BY_ID)].some((match) => items.has(match[1]!.toLowerCase()));
 }
 /** The nouns that say what an ask is about — content words, names ("o Matheus", "o Chat") and acronyms ("o OK", "o
  * MCP") — not a verb, a pronoun, nor the words every ask has: an ask with none ("Continua com você", "Isso depende de
@@ -491,9 +493,15 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
       const colon = colonOutsideQuotes(original);
       const lead = colon > 0 && colon < 80 && asksOwnerSentence(unquoted(original.slice(0, colon)), owner?.asks) ? original.slice(0, colon) : null;
       const what = lead !== null && original.slice(colon + 1).trim().length > 8 ? original.slice(colon + 1).trim() : undefined;
-      // the ask already has its item, or the bot opened none for it (INSP-R13VIS E2, F1)
-      if (echoesItem(unquoted(what ?? original), `${around.leads} ${sentence}`, around.paragraph.replace(sentence, " "), openItems)) return;
+      // the pronoun first: "A linha 192 da Marluce está parada. Ela continua com você." is about the row 192, and so
+      // has a subject of its own whatever item the next sentence names (INSP-R13VIS J1)
       const resolved = PRONOUN_START.test(sentence) ? antecedentSubject(sentence, sentences.slice(0, at), lines[index]!, lines.slice(0, index), exclude) : null;
+      const before = sentences[at - 1];
+      const askedText = resolved ? sentence.replace(PRONOUN_START, resolved.label)
+        // a pronoun with no row or name to inherit still says what the sentence before it said, unless that one only points at an item
+        : PRONOUN_START.test(sentence) && before && !new RegExp(ITEM_BY_ID.source, "iu").test(before) ? `${unquoted(before)} ${sentence}` : unquoted(what ?? original);
+      // the ask already has its item, or the bot opened none for it (INSP-R13VIS E2, F1)
+      if (echoesItem(askedText, `${around.leads} ${sentence}`, around.paragraph.replace(sentence, " "), openItems)) return;
       add(original, what, lead, false, sentences[at - 1] ?? lines.slice(0, index).map(plainLine).filter(Boolean).at(-1), resolved);
     });
   }
@@ -1026,12 +1034,21 @@ const closedWithReservation = (item: Pick<ResolvedOwnerPending, "history">) => {
 /** The rows of a sheet item's key ("routine-ask:linha:185+186" → 185, 186); null for any other key. */
 const rowsOfKey = (key: string | undefined) => (key ? /^routine-ask:linha:([\d+-]+)$/.exec(baseKey(key))?.[1]?.split("+") ?? null : null);
 const rowsKey = (rows: readonly string[]) => `${ROUTINE_ASK_KEY_PREFIX}linha:${rows.join("+")}`;
-const rowsLabel = (rows: readonly string[]) => (rows.length > 1 ? `linhas ${rows.slice(0, -1).join(", ")} e ${rows.at(-1)}` : `linha ${rows[0]}`);
+const rowName = (row: string) => row.replace("-", " a ");
+const rowsLabel = (rows: readonly string[]) => (rows.length > 1 || rows[0]!.includes("-") ? `linhas ${rows.slice(0, -1).map(rowName).join(", ")}${rows.length > 1 ? " e " : ""}${rowName(rows.at(-1)!)}` : `linha ${rows[0]}`);
+/** Two rows meet: the same row, or one inside a range ("100-200" holds the 150) (INSP-R13VIS round 10). */
+function rowsMeet(a: string, b: string): boolean {
+  const span = (row: string) => { const [from, to] = row.split("-").map(Number); return [from!, to ?? from!] as const; };
+  const [a1, a2] = span(a);
+  const [b1, b2] = span(b);
+  return a1 <= b2 && b1 <= a2;
+}
+const holds = (rows: readonly string[], row: string) => rows.some((each) => rowsMeet(each, row));
 function itemIsAsk(item: Pick<OwnerPending, "key" | "why" | "title">, ask: RoutineAsk): boolean {
   // a sheet item is the ask about any of its rows: "linha:185" and "linhas 185 e 186" are one pendency, grown (INSP-R13VIS I2)
   const itemRows = rowsOfKey(item.key);
   const askRows = rowsOfKey(routineAskKey(ask));
-  if (itemRows && askRows) { if (!itemRows.some((row) => askRows.includes(row))) return false; } else if (!item.key || baseKey(item.key) !== routineAskKey(ask)) return false;
+  if (itemRows && askRows) { if (!itemRows.some((row) => holds(askRows, row))) return false; } else if (!item.key || baseKey(item.key) !== routineAskKey(ask)) return false;
   // "a linha 185" and "as linhas 185 e 186" say the row, not what is asked of it
   const except = [...subjectWords(ask), ...(itemRows ? [...itemRows, "linha", "linhas", "dependem"] : [])];
   const asked = quotedOf(item);
@@ -1078,7 +1095,7 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
       const answered = ledger.resolvedOwnerPendingOf(run.botId).filter((item) => item.resolvedBy === "owner" && run.at - item.resolvedAt < ROUTINE_ASK_SETTLED_MS && itemIsAsk(item, ask) && !closedWithReservation(item));
       // rows the owner answered stay answered; only the rows the ask adds are asked ("linhas 185 e 186" after the 185, INSP-R13VIS I2)
       const askRows = rowsOfKey(routineAskKey(ask));
-      const left = askRows?.filter((row) => !answered.some((item) => rowsOfKey(item.key)?.includes(row)));
+      const left = askRows?.filter((row) => !answered.some((item) => holds(rowsOfKey(item.key) ?? [], row)));
       if (answered.length && !left?.length) continue;
       if (answered.length && left && left.length < askRows!.length) {
         ask = { ...ask, subject: { kind: "linha", id: left.join("+"), label: rowsLabel(left) } };
@@ -1088,9 +1105,14 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
     // an open sheet item about some of these rows takes the others: one item, its key grown (INSP-R13VIS I2)
     const grown = existing ? rowsOfKey(existing.key) : null;
     const wanted = rowsOfKey(routineAskKey(ask));
-    if (existing && grown && wanted && wanted.some((row) => !grown.includes(row)) && existing.key === baseKey(existing.key!)) {
-      const rows = [...grown, ...wanted.filter((row) => !grown.includes(row))];
+    // the title the owner reads names every row too ("Gravar o Status (linha 185)" → "… (linhas 185 e 186)", round 10)
+    let title = existing?.title;
+    if (existing && grown && wanted && wanted.some((row) => !holds(grown, row)) && existing.key === baseKey(existing.key!)) {
+      const rows = [...grown, ...wanted.filter((row) => !holds(grown, row))];
       existing = ledger.patchOwnerPending(run.botId, existing.id, { key: rowsKey(rows) }) ?? existing;
+      const named = /\(linhas?\s[^)]*\)\s*$|(?<![\p{L}])(?:as?\s+)?linhas?\s+\d[\d\s,ea-]*?(?=\s*(?:[).,;:]|$|\s+(?:da|do|na|no|para)\s))/u;
+      // "a linha 185" → "as linhas 185 e 186"
+      title = named.test(title!) ? title!.replace(named, (said) => (said.startsWith("(") ? `(${rowsLabel(rows)})` : `${/^as?\s/.test(said) ? "as " : ""}${rowsLabel(rows)}`)) : `${title} (${rowsLabel(rows)})`;
     }
     // another pendency about a subject that already has one: its own key
     const base = routineAskKey(ask);
@@ -1105,7 +1127,7 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
     // asked again, under "Talvez já resolvido": the refresh brings it back on top (read before: the refresh replaces it)
     const wasDown = existing?.demotedAt !== undefined;
     // the same item keeps its title: a reworded repetition never renames what the owner reads
-    const item = ledger.addOwnerPending(run.botId, existing?.threadId ?? run.threadId, { ...want, key, ...(existing ? { title: existing.title } : {}), ...(run.routineId ? { routineId: run.routineId } : {}) });
+    const item = ledger.addOwnerPending(run.botId, existing?.threadId ?? run.threadId, { ...want, key, ...(title ? { title } : {}), ...(run.routineId ? { routineId: run.routineId } : {}) });
     (existing ? refreshed : opened).push(item);
     if (wasDown) promoted.push(item);
   }

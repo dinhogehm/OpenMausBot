@@ -34,7 +34,10 @@
 // R9: the sentence beside an ask makes it an echo only when the ask has no subject of its own; the title comparison
 // of R7-R8 is gone (INSP-R13VIS I1). Over the replies of 7 days, 5 of the 22 echoes came back as items — all from
 // conversations, none from a routine's reply, the only path this runs on.
-export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9";
+//
+// R10: a pronoun is resolved before the echo is judged ("Ela continua com você" after "A linha 192… está parada");
+// a pointer that says it is about something else points nowhere (INSP-R13VIS J1 and round 10).
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "R10";
 /** The items open when a phrase is read, any bot's, by id and title — the test's default set when a phrase gives none. */
 export type CorpusItems = ReadonlyArray<{ id: string; title: string }>;
 export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco" | "", open?: CorpusItems]> = [
@@ -245,6 +248,13 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   ["R9", "A planilha tem 120 linhas; o modelo A100 depende de você. Atualizei o item o3.", ["Ver: o modelo A100"], "", [{ id: "o3", title: "Escrever na linha 100 da planilha" }]],
   ["R9", "Entre as linhas 100 a 200 da planilha, a 150 depende de você.", ["Ver: a 150 (entre as linhas 100 a 200 da planilha)"]],
   ["R9", "A linha 12 e a 13 dependem de você.", ["Ver: a linha 12 e a 13"]],
+  // R10: the pronoun resolved before the echo is judged — its antecedent is its subject (INSP-R13VIS J1)
+  ["R10", "A linha 192 da Marluce está parada. Ela continua com você. Atualizei o item o3 com outra coisa.", ["Ver: a linha 192"], "", [{ id: "o3", title: "Aplicar a exceção do WAF da Cloudflare (#9381)" }]],
+  ["R10", "O merge da #9400 travou. Ele depende de você. Atualizei o item o3 com o WAF.", ["Ver: o merge da #9400"], "", [{ id: "o3", title: "Aplicar a exceção do WAF da Cloudflare (#9381)" }]],
+  ["R10", "A cliente Daiane mandou o anexo de novo. Isso continua com você. O WAF está no item o3.", ["Ver o recado do Monitor na rotina \"Atendimento\""], "", [{ id: "o3", title: "Aplicar a exceção do WAF da Cloudflare (#9381)" }]],
+  ["R10", "Uma coisa nova depende de você. Atualizei o item o3, mas isso é outra coisa.", ["Ver o recado do Monitor na rotina \"Atendimento\""], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  // the sentence before the pronoun only points at the item: still the item's echo
+  ["R10", "Atualizei o item o3 com o passo a passo. Isso continua com você.", [], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
   // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
   ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
 ];
