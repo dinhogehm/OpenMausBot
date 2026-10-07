@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArrowLeft, BellRing, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
+  ArrowLeft, BellRing, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
   ListChecks, ListTodo, Loader2, MessageSquare, Repeat, Send, ShieldQuestion, Sparkles, X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, maybeResolved, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
+  answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, delegated, dueAt, maybeResolved, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
 import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
@@ -40,7 +40,7 @@ export function linkLabel(url: string): string {
   }
 }
 
-export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | `option:${number}`;
+export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | "delegate" | `option:${number}`;
 
 export interface NeedsYouResolverViewProps {
   items: NeedsYouItem[];
@@ -86,6 +86,8 @@ export interface NeedsYouResolverViewProps {
   changingAnswer?: string | null;
   onChangeAnswer: (item: NeedsYouItem) => void;
   onResolve: (item: NeedsYouItem) => void;
+  /** "Delegar a um agente" (lote del): a Claude Code session opened by the server for the item. */
+  onDelegate?: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
   onDismissNotice?: () => void;
@@ -270,8 +272,22 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                             <span aria-hidden="true">·</span>
                             <span className="shrink-0 tabular-nums">{waitingAge(each.since, now)}</span>
                           </span>
+                          {/* delegated: it waits on the agent's session (lote del) */}
+                          {delegated(each) && (
+                            <span data-resolver-delegated-row="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-hairline/70 px-1.5 py-px text-[11px] font-medium text-ink-secondary">
+                              <Bot size={11} aria-hidden="true" />
+                              <span className="truncate">{t("needsYou.screen.delegatedShort", { time: answerTime(each.delegation!.at, now) })}</span>
+                            </span>
+                          )}
+                          {/* back from the agent: on top, said so (lote del) */}
+                          {each.delegationBack && !delegated(each) && (
+                            <span data-resolver-back-row="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-warning/60 px-1.5 py-px text-[11px] font-medium text-ink">
+                              <CircleAlert size={11} aria-hidden="true" className="text-warning" />
+                              <span className="truncate">{t("needsYou.screen.delegationBackShort")}</span>
+                            </span>
+                          )}
                           {/* answered: now it waits on the bot, not on the person (J18) */}
-                          {awaitingBot(each, now) && (
+                          {awaitingBot(each, now) && !delegated(each) && (
                             <span data-resolver-awaiting="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-hairline/70 px-1.5 py-px text-[11px] font-medium text-ink-secondary">
                               <Clock size={11} aria-hidden="true" />
                               <span className="truncate">{t("needsYou.screen.awaiting", { name: each.botName })}</span>
@@ -394,12 +410,14 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   const working = busy !== null;
   const layout = placement(item.options?.length ?? 0);
   const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
-  const awaiting = awaitingBot(item, now);
+  // delegated to an agent (lote del): its own banner, no decisions to pick meanwhile
+  const isDelegated = delegated(item);
+  const awaiting = awaitingBot(item, now) && !isDelegated;
   const silent = botSilent(item, now);
   const stuck = answerStuck(item, now);
   const notDelivered = notDeliveredLine(item, now);
   // answered and waiting on the bot: the decisions fold behind "Mudar resposta" (INSP-J2 #2)
-  const decisionsOpen = Boolean(item.options?.length) && (!awaiting || props.changingAnswer === needsYouKey(item));
+  const decisionsOpen = Boolean(item.options?.length) && !isDelegated && (!awaiting || props.changingAnswer === needsYouKey(item));
   return (
     <>
       <div className="flex items-center gap-1 border-b border-hairline/40 px-2 py-1.5 sm:px-3">
@@ -449,6 +467,39 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         )}
 
+        {isDelegated && (
+          // delegated: a session of the server works on it; the item waits on it (lote del)
+          <div data-resolver-delegated="" className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-accent/40 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="status" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <Bot size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-text" />
+              <span>{delegatedLine(item, now)}</span>
+            </p>
+            {item.delegation!.link && (
+              <button type="button" data-resolver-delegated-link={item.delegation!.link} onClick={() => props.onOpenLink(item.delegation!.link!)} className={cn(quietButton, "py-1.5 text-[12.5px]")}>
+                <ExternalLink size={14} aria-hidden="true" />
+                {t("needsYou.screen.openSession")}
+              </button>
+            )}
+          </div>
+        )}
+        {item.delegationBack && !isDelegated && (
+          // back from the agent: what it did, what is left, the exact command (lote del)
+          <div data-resolver-delegation-back="" className="mt-3 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="status" className="flex items-start gap-2">
+              <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
+              <span>{t(item.delegationBack.outcome === "falhou" ? "needsYou.screen.delegationFailed" : item.delegationBack.outcome === "barrado" ? "needsYou.screen.delegationStopped" : "needsYou.screen.delegationPartial", { time: answerTime(item.delegationBack.at, now), text: item.delegationBack.text })}</span>
+            </p>
+            {item.delegationBack.command && (
+              <div className="mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5">
+                <code className="min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{item.delegationBack.command}</code>
+                <button type="button" data-resolver-copy={item.delegationBack.command} aria-label={t("needsYou.screen.copyCommand")} onClick={() => props.onCopy(item.delegationBack!.command!)} className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus">
+                  {props.copied === item.delegationBack.command ? <Check size={13} aria-hidden="true" className="text-success" /> : <Copy size={13} aria-hidden="true" />}
+                  <span aria-hidden="true">{props.copied === item.delegationBack.command ? t("needsYou.screen.copied") : t("needsYou.screen.copy")}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         {awaiting && (
           // the person answered: the ball is with the bot — said with what was answered (INSP-J2 #9)
           <p role="status" data-resolver-awaiting-detail="" className="mt-3 flex items-start gap-2 rounded-lg border border-accent/40 bg-panel px-3 py-2 text-[13px] text-ink">
@@ -630,6 +681,19 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             <MessageSquare size={14} aria-hidden="true" />
             {t("needsYou.screen.openConversation")}
           </button>}
+          {/* "Delegar a um agente" (lote del): the server's word on whether an agent may; else why only the person */}
+          {pending && !isDelegated && item.delegable && props.onDelegate && (
+            <button type="button" data-resolver-delegate="" disabled={working} onClick={() => props.onDelegate!(item)} title={t("needsYou.screen.delegateHint")} className={quietButton}>
+              {busy === "delegate" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Bot size={14} aria-hidden="true" />}
+              {t("needsYou.screen.delegate")}
+            </button>
+          )}
+          {pending && !isDelegated && !item.delegable && item.onlyYou && (
+            <span data-resolver-only-you="" className="inline-flex max-w-full items-center gap-1.5 px-2 py-1 text-[12px] text-ink-secondary">
+              <ShieldQuestion size={13} aria-hidden="true" className="shrink-0" />
+              <span className="truncate">{t("needsYou.screen.onlyYou", { reason: item.onlyYou })}</span>
+            </span>
+          )}
           {pending && (
             <button type="button" data-resolver-resolve="" disabled={working} onClick={() => props.onResolve(item)} className={cn(item.options?.length || !steps.length ? quietButton : strongButton)}>
               {busy === "resolve" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Check size={14} aria-hidden="true" />}
@@ -691,6 +755,22 @@ export function awaitingLine(item: Pick<NeedsYouItem, "history" | "awaitingSince
   if (!last?.queued) return line;
   // what is queued, said by its name: never two "respostas" meaning opposite things (INSP-J2 r3 R4)
   return `${line} ${t(last.kind === "option" ? "needsYou.screen.awaitingQueuedChoice" : last.kind === "ask" ? "needsYou.screen.awaitingQueuedRequest" : "needsYou.screen.awaitingQueuedMessage", { name })}`;
+}
+
+/** "Delegado ao agente às 14:05" — with the decision it carries and the session, when known (lote del). */
+export function delegatedLine(item: Pick<NeedsYouItem, "delegation">, now: number): string {
+  const delegation = item.delegation!;
+  const parts = [t("needsYou.screen.delegated", { time: answerTime(delegation.at, now) })];
+  if (delegation.option) parts.push(t("needsYou.screen.delegatedOption", { label: delegation.option }));
+  parts.push(delegation.sessionTitle ? t("needsYou.screen.delegatedSession", { title: delegation.sessionTitle }) : t("needsYou.screen.delegatedQueued"));
+  return parts.join(" ");
+}
+
+/** What the screen says after "Delegar a um agente": opened, queued, or the server's word on a second click. */
+export function delegateNotice(item: Pick<NeedsYouItem, "title">, result: unknown): string {
+  const { info, queued } = (result ?? {}) as { info?: string; queued?: boolean };
+  if (info) return info;
+  return t(queued ? "needsYou.screen.delegatedQueuedNotice" : "needsYou.screen.delegatedNotice", { title: item.title });
 }
 
 /** The answer has waited its turn for 2 h: what is queued, for how long, and that the bot is busy elsewhere (INSP-J2 r4 A1). */
@@ -940,7 +1020,7 @@ export const STEPS_ASK_AGAIN_AFTER_MS = 15 * 60_000;
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own
  * loading and error state. */
-export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve }: {
+export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve, onDelegate }: {
   open: boolean;
   items: NeedsYouItem[];
   initialKey?: string | null;
@@ -957,6 +1037,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   /** Reminds the bot of an answered item it let go silent; `deduped` when one is already on its way. */
   onRemind?: (item: NeedsYouItem) => Promise<{ deduped: boolean; info?: string }>;
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
+  /** "Delegar a um agente" (lote del): the server opens a session for the item. */
+  onDelegate?: (item: NeedsYouItem) => Promise<unknown>;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
   const [fallbackIndex, setFallbackIndex] = useState(0);
@@ -1164,6 +1246,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
+          onDelegate={onDelegate ? (item) => void run("delegate", () => onDelegate(item), (result) => delegateNotice(item, result)) : undefined}
           onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => remindNotice(item, result))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}

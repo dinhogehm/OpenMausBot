@@ -31,6 +31,7 @@ import { leadingVocative } from "./owner-channel.ts";
 import { languageReminder } from "./reply-language.ts";
 import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
+import type { OwnerDelegation, OwnerDelegationBack } from "./owner-delegate.ts";
 import { chatStartHash, chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
 export const SEEN_CHAT_MS = 24 * 3_600_000;
@@ -247,6 +248,10 @@ export interface OwnerPending {
   keptAt?: number;
   /** A routine's item: the routine that said it (its runs are counted by it, not by a name that may change). */
   routineId?: string;
+  /** The owner delegated it to a Claude Code session (lote del): out of the count while it runs. */
+  delegation?: OwnerDelegation;
+  /** It came back from a delegation (partial, stopped by the hook, never opened): on top, with why. */
+  delegationBack?: OwnerDelegationBack;
 }
 
 /** One answer of the person to an item (J18). */
@@ -1381,6 +1386,9 @@ export class BotAutonomy {
       ...(existing?.history?.length ? { history: existing.history } : {}),
       ...(existing?.awaitingSince ? { awaitingSince: existing.awaitingSince } : {}),
       ...(existing?.stepsAutoAskedAt ? { stepsAutoAskedAt: existing.stepsAutoAskedAt } : {}),
+      // a delegation running (or just back) stays with the item when the bot or the server says it again (lote del)
+      ...(existing?.delegation ? { delegation: existing.delegation } : {}),
+      ...(existing?.delegationBack ? { delegationBack: existing.delegationBack } : {}),
       ...(input.lastSaidAt !== undefined ? { lastSaidAt: input.lastSaidAt } : existing?.lastSaidAt !== undefined ? { lastSaidAt: existing.lastSaidAt } : {}),
       ...(input.routineId ? { routineId: input.routineId } : existing?.routineId ? { routineId: existing.routineId } : {}),
     };
@@ -1571,7 +1579,7 @@ export class BotAutonomy {
    * item ("pedido há 2 min") until the bot updates it. */
   /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
    * ("Talvez já resolvido"). An undefined value clears the field. */
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId">>): OwnerPending | null {
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack">>): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {

@@ -973,7 +973,7 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     // both ways in (the tool call and the queue) go through startCcSession with this text
     const index = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
     expect(index).toContain("reusedFolderRefusal(block.last, basename(input.repo), fromQueue)");
-    expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true)");
+    expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true, item.delegation)");
     expect(index).not.toMatch(/6 de 7 creates|fechá-la sem enviar/);
   });
 

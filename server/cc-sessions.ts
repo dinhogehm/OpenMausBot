@@ -18,6 +18,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import { writeFileAtomic } from "./atomic.ts";
 import type { BgJob } from "./bg-jobs.ts";
 import type { CcDelivery } from "./prod-delivery.ts";
+import type { DelegatedItemRef } from "./owner-delegate.ts";
 
 export const CC_TITLE_MAX = 120;
 export const CC_BRIEF_MAX = 20_000;
@@ -122,6 +123,10 @@ export interface CcSession {
   claimedPrs?: number[];
   /** The orders it was given before claimedPrs existed were read back (once). */
   claimsReadAt?: number;
+  /** The owner delegated it an item of "Precisa de você" (lote del): its report settles the item. */
+  delegatedItem?: DelegatedItemRef;
+  /** Turns whose report already settled that item (an archive's report does not again). */
+  delegationSettledTurns?: number;
   /** When its bot and the Chief were told it must be resumed (once per stop: a later failure or idle tells again). */
   resumeReportedAt?: number;
   /** When the last word on its stop was said (24 h: the exact block, or

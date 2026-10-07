@@ -134,6 +134,7 @@ import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
+import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
@@ -9992,7 +9993,11 @@ function ccChipShort(session: CcSession, text: string, ok = true, skip?: string 
  * the thread that gave the order. */
 function ccReport(session: CcSession, text: string): void {
   const to = sessionReportThread(session);
+  // the Chief reads that the item is the owner's to settle: no resuming a refused session (INSP-DEL A13)
+  if (session.delegatedItem) text = `${text}\n\n${delegationChiefNote(session.delegatedItem)}`;
   autonomy.addReport(session.ownerBotId, to, text);
+  // a delegated item hears the report too: closed or given back by its lines (lote del)
+  settleDelegation(session);
   if (to !== session.ownerThreadId || ownerChannelOf(session.ownerBotId)) return;
   if (session.replyThreadId && session.replyThreadId !== session.ownerThreadId && store.taskByThread(session.ownerBotId, session.replyThreadId)) {
     autonomy.addReport(session.ownerBotId, session.replyThreadId, text);
@@ -10805,6 +10810,8 @@ threadSignals = (threadId) => {
     ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
     // a routine's item said once and let go: under "Talvez já resolvido", out of the count (INSP-N22 r2 F2)
     ...(item.demotedAt ? { demotedAt: item.demotedAt } : {}),
+    // "Delegar a um agente": the button, why not, or the delegation running or back (lote del)
+    ...wireDelegation(item),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -11201,7 +11208,7 @@ const ccStartQueue = new CcStartQueue(process.env.VITEST ? null : join(DATA_DIR,
 /** Existing work may take a slot: one stays free for each P1 waiting. */
 const ccSlotFreeForWork = () => slotFreeForWork({ taken: ccLedger.slotsTaken(), urgentQueued: ccStartQueue.urgentCount(), max: CC_MAX_RUNNING });
 
-function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false): StartResult {
+function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false, delegation?: DelegatedItemRef): StartResult {
   const input = parseCcStartInput(body, ccIsGitRepo);
   if (!input.ok) return { status: 400, body: { error: input.error } };
   // One live session per issue: a second would redo the same work.
@@ -11236,15 +11243,18 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   if (gate === "busy") return { status: 409, body: { error: "busy" }, busy: true };
   if (gate === "queue") {
     // urgency from the bot's explicit priority, else the title; never the brief
-    const priority = startPriority(input.title, body.priority);
-    const queued = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, ...(issueNumber(input.title, input.brief) ? { issue: issueNumber(input.title, input.brief) } : {}), priority, at: Date.now() });
+    // a delegated item's start never borrows urgency from the item's title: it waits as the lowest (INSP-DEL A10)
+    const priority = delegation ? startPriority("", "low") : startPriority(input.title, body.priority);
+    const queued = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, ...(issueNumber(input.title, input.brief) ? { issue: issueNumber(input.title, input.brief) } : {}), priority, at: Date.now(), ...(delegation ? { delegation } : {}) });
     if (queued === null) return { status: 409, body: { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code ocupando as vagas e a fila de espera está cheia (${START_QUEUE_MAX}); espere uma relatar, ou tire um start seu da fila (cc_session_archive com o id dele)` } };
     const why = taken >= CC_MAX_RUNNING ? `as ${CC_MAX_RUNNING} vagas do Claude Code estão ocupadas` : "há starts esperando na fila (um novo não passa na frente deles)";
+    // a delegation: the same start already queued is not this one, and the owner reads no bot hint (INSP-DEL A11)
+    if (delegation && queued.duplicate) return { status: 409, body: { error: `um start igual ("${input.title}") já está na fila de sessões (id ${queued.id}); não enfileirei outro` } };
     if (queued.duplicate) {
       return { status: 200, body: { message: `"${input.title}" já estava na fila de sessões (#${queued.position}, id ${queued.id}); não enfileirei de novo. Encerre o turno agora.` } };
     }
     store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Fila de sessões: "${input.title}" é a #${queued.position} (prioridade ${priorityLabel(priority)}); abre sozinha quando uma vaga liberar`, 240), ok: true } });
-    return { status: 200, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
+    return { status: 200, queueId: queued.id, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
   }
   if (body.surface !== "cli" && process.platform === "darwin") {
     const appId = randomUUID();
@@ -11282,24 +11292,26 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     session.desktop!.pending = { kind: "create", text: classicText, since: Date.now(), attempts: 0 };
     // the app's text is made once the worktree exists (its folder check names it)
     if (ownPlan) session.desktop!.own = { path: ownPlan.path, branch: ownPlan.branch, state: "planned", brief: input.brief, classicText };
+    if (delegation) delegationOpened(delegation, session);
     if (corridor) session.corridorVersion = corridorVersionOf(corridor);
     session.status = "running";
     ccLedger.save();
     ccChip(session, ownPlan ? `criando a worktree ${ownPlan.dir} (${ownPlan.branch}, de origin/main); depois abre no app Claude quando o Mac estiver livre` : "na fila para abrir no app Claude quando o Mac estiver livre");
-    noteClaimedPrs(session, input.brief);
+    noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
     const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
     const where = ownPlan ? `numa worktree que o servidor cria agora para ela (${ownPlan.path}, branch ${ownPlan.branch}, com as dependências clonadas quando a semente está em dia)` : `em ${basename(input.repo)} com worktree própria`;
-    return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, ${where}, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+    return { status: 200, sessionId: session.id, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, ${where}, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
   }
   const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
   if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
   if (corridor) session.corridorVersion = corridorVersionOf(corridor);
+  if (delegation) delegationOpened(delegation, session);
   ccLedger.save();
   runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
-  noteClaimedPrs(session, input.brief);
+  noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
   if (cliOnRecord) ccChipShort(session, sessionChips.cli(session.title, `${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`));
-  return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+  return { status: 200, sessionId: session.id, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
 }
 
 /** Whether the Claude app can take a new session in `repo` now: not on this
@@ -11371,6 +11383,211 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string, bl
 
 /** The app sessions the server opened (their local ids): never the
  * owner's, never an anchor. */
+// ── "Delegar a um agente" (lote del, server/owner-delegate.ts) ──────────
+// The owner hands an item of "Precisa de você" to a Claude Code session,
+// opened by startCcSession like the Chief's (same guard, worktree option,
+// breaker). The item waits on it, out of the count; the session's report
+// settles it: "concluido" with evidence closes it, anything else gives it
+// back on top. Never an approve, never the owner's approval.
+
+/** "às 14:05" (São Paulo), for what the owner and the session read. */
+const delegationTime = (at: number) => `às ${new Date(at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" })}`;
+
+/** Whether an agent may take the item, and in which repository; else why only the owner can.
+ * `isRepo` is cheap on the wire (the folder exists) and strict on the click (git). */
+function delegateView(item: OwnerPending, isRepo: (path: string) => boolean): { repo: string } | { onlyYou: string } {
+  const reason = onlyYouReason(item);
+  if (reason) return { onlyYou: reason };
+  const found = delegationRepo(itemText(item), ccLedger.all());
+  if ("reason" in found) return { onlyYou: found.reason };
+  return isRepo(found.repo) ? { repo: found.repo } : { onlyYou: "o repositório que o item cita não existe mais neste Mac" };
+}
+
+/** Who owns the delegated session: the Chief at its desk (it runs the sessions), else the item's bot where it talks to the owner. */
+function delegationOwner(bot: BotRecord, item: OwnerPending): { bot: BotRecord; threadId: string } | null {
+  const chief = store.bots.find((each) => each.chiefOfStaff && !each.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (chief && desk && openThreadOf(chief.id, desk) && !store.groupByThread(desk)) return { bot: chief, threadId: desk };
+  const thread = ownerTurnThread(bot.id, item.threadId);
+  return store.taskByThread(bot.id, thread) && !store.groupByThread(thread) ? { bot, threadId: thread } : null;
+}
+
+/** A chip in the item's conversation: its bot reads what became of it. */
+function delegationChip(item: OwnerPending, text: string, ok = true): void {
+  if (store.taskByThread(item.botId, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok } });
+}
+
+/** The session for a delegated item exists now: the item says which. */
+function delegationOpened(ref: DelegatedItemRef, session: CcSession): void {
+  session.delegatedItem = ref;
+  const item = autonomy.ownerPendingById(ref.botId, ref.itemId);
+  if (!item?.delegation) return;
+  const { queueId: _queueId, ...delegation } = item.delegation;
+  autonomy.patchOwnerPending(ref.botId, item.id, { delegation: { ...delegation, state: "running", sessionId: session.id } });
+  refreshBotRow(ref.botId);
+}
+
+/** The item goes back to the owner, on top, with what the agent did and what is left. */
+function delegationReturned(ref: DelegatedItemRef, back: OwnerDelegationBack): void {
+  const item = autonomy.ownerPendingById(ref.botId, ref.itemId);
+  if (!item) return;
+  // the server's hints to a bot (tool names, "end the turn") are not the owner's to read
+  const owned = { ...back, text: forOwner(back.text) };
+  autonomy.patchOwnerPending(ref.botId, item.id, { delegation: undefined, delegationBack: owned });
+  // back with the owner: delegating it again is a new click, not a duplicate of the last (INSP-DEL A13)
+  answerDedupe.release(answerKey(ref.botId, item.id, { kind: "delegate", text: "" }));
+  delegationChip(item, `Voltou para o dono (delegação): ${item.title} — ${owned.text}`, false);
+  refreshBotRow(ref.botId);
+  console.log(`[owner-delegate] ${item.id} of ${store.bot(ref.botId)?.name ?? ref.botId} is back with the owner (${back.outcome}${back.sessionId ? `, session ${back.sessionId}` : ""})`);
+}
+
+/** A delegated session reported: its report, read by its lines, settles the
+ * item — closed only on "concluido" with evidence; given back otherwise.
+ * A turn the server resumes by itself (background job, release) waits. */
+function settleDelegation(session: CcSession): void {
+  const ref = session.delegatedItem;
+  if (!ref) return;
+  const item = autonomy.ownerPendingById(ref.botId, ref.itemId);
+  // resolved meanwhile, or delegated again to another session
+  if (!item || (item.delegation ? item.delegation.sessionId !== session.id : item.delegationBack?.sessionId !== session.id)) return;
+  if (session.status === "failed") {
+    if (item.delegationBack?.sessionId === session.id && item.delegationBack.outcome === "falhou") return;
+    delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `a sessão parou com um problema: ${(session.lastError ?? "erro desconhecido").slice(0, 300)}`, sessionId: session.id });
+    return;
+  }
+  if (session.status === "running" || session.status === "stalled" || session.bgJob || session.resumeAfterTag) return;
+  if ((session.delegationSettledTurns ?? -1) >= session.turns) return;
+  session.delegationSettledTurns = session.turns;
+  ccLedger.save();
+  const report = session.lastReport ?? "";
+  const result = parseDelegationReport(report);
+  if (result.outcome !== "concluido") {
+    delegationReturned(ref, { at: Date.now(), outcome: result.outcome, text: delegationBackText(result, report), ...(result.command ? { command: result.command.slice(0, 500) } : {}), sessionId: session.id });
+    return;
+  }
+  // "concluido" closes only on evidence the server checks itself: a PR open or
+  // merged since the delegation, or a commit on the session's branch (INSP-DEL A5)
+  // the work must be newer than THIS session, which the delegation created: never 0, even after the item came back (INSP-DEL r2 B1)
+  const since = Math.max(session.createdAt, item.delegation?.at ?? 0);
+  void verifiedEvidence(result.evidence, since, delegationEvidenceDeps(session, since)).then((proof) => {
+    const now = autonomy.ownerPendingById(ref.botId, ref.itemId);
+    // resolved or delegated again while the check ran
+    if (!now || (now.delegation ? now.delegation.sessionId !== session.id : now.delegationBack?.sessionId !== session.id)) return;
+    // already back with the owner: a later "concluido" only notes what it shows, the owner settles (INSP-DEL r3 C6)
+    if (!now.delegation && now.delegationBack) {
+      // once per piece of evidence: a session saying it again does not grow the text (INSP-DEL r4 D5)
+      if (proof && !now.delegationBack.text.includes(proof)) autonomy.patchOwnerPending(ref.botId, ref.itemId, { delegationBack: { ...now.delegationBack, text: `${now.delegationBack.text} Depois disso, a sessão ${session.id} disse que concluiu, com evidência conferida: ${proof}. Confira e marque como resolvido, se for o caso.` } });
+      refreshBotRow(ref.botId);
+      return;
+    }
+    if (!proof) {
+      delegationReturned(ref, { at: Date.now(), outcome: "parcial", text: `o agente disse concluído, mas não deu evidência que o servidor conseguisse conferir (um link de PR aberto ou mergeado depois da delegação, ou um commit na branch da sessão). Confira na sessão ${session.id}.`, sessionId: session.id });
+      return;
+    }
+    // the type has no "agent": the bot's, with the session and the checked evidence in the note
+    for (const done of autonomy.resolveOwnerPending({ botId: ref.botId, id: ref.itemId, by: "bot", note: delegationClosedNote(session.id, proof) })) {
+      delegationChip(done, `Resolvido pelo agente (sessão ${session.id}): ${done.title} — evidência conferida: ${proof}`);
+    }
+    refreshBotRow(ref.botId);
+    console.log(`[owner-delegate] ${ref.itemId} of ${store.bot(ref.botId)?.name ?? ref.botId} closed: session ${session.id} reported "concluido", evidence checked (${proof})`);
+  }).catch((error) => console.error(`[owner-delegate] evidence check for ${ref.itemId}: ${error instanceof Error ? error.message : String(error)}`));
+}
+
+/** How the server checks a delegated session's evidence: `gh pr view` for a
+ * PR, `git` in the session's own worktree for a commit on its branch. */
+function delegationEvidenceDeps(session: CcSession, since: number): EvidenceDeps {
+  const run = (cmd: string, args: string[], cwd?: string) => new Promise<string>((resolve, reject) => {
+    // the app's PATH lacks Homebrew (gh) and a sealed fixture's lacks git: the same augmented PATH as execCc
+    execFileCc(cmd, args, { timeout: 15_000, env: { ...process.env, PATH: augmentedPath() }, ...(cwd ? { cwd } : {}) }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))));
+  });
+  // only the session's own worktree: never the repository's main checkout (INSP-DEL r2 B3)
+  const dir = session.desktop?.own?.path ?? (session.worktree ? join(session.repo, ".claude", "worktrees", session.worktree) : null);
+  const branchOf = async () => (dir && existsSync(dir) ? (await run("git", ["-C", dir, "branch", "--show-current"])).trim() : "");
+  const baseRef = async () => {
+    // the base the work must be new against: origin's default branch, else origin/main
+    try { return (await run("git", ["-C", dir!, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim() || "origin/main"; } catch { return "origin/main"; }
+  };
+  return {
+    // a PR of THIS session: its head is the session's branch, in the session's repository, created since the delegation (INSP-DEL r2 B2)
+    prView: async (url) => {
+      const branch = await branchOf();
+      if (!branch || !dir) return null;
+      const parsed = JSON.parse(await run("gh", ["pr", "view", url, "--json", "state,createdAt,headRefName,url"], dir)) as { state?: string; createdAt?: string; headRefName?: string; url?: string };
+      if (!parsed.state || !parsed.createdAt || parsed.headRefName !== branch) return null;
+      // the repository: `gh pr view` run in the session's worktree resolves the same URL only for that repository
+      const own = JSON.parse(await run("gh", ["pr", "view", parsed.headRefName, "--json", "url"], dir).catch(() => "{}")) as { url?: string };
+      if (!own.url || own.url !== parsed.url) return null;
+      return { state: parsed.state, createdAt: parsed.createdAt };
+    },
+    // a commit of THIS session: on its branch, new against the base, with a real change, made since the delegation (INSP-DEL r2 B3)
+    hasCommit: async (sha) => {
+      if (!dir || !existsSync(dir)) return false;
+      await run("git", ["-C", dir, "cat-file", "-e", `${sha}^{commit}`]);
+      await run("git", ["-C", dir, "merge-base", "--is-ancestor", sha, "HEAD"]);
+      const base = await baseRef();
+      const onBase = await run("git", ["-C", dir, "merge-base", "--is-ancestor", sha, base]).then(() => true, () => false);
+      if (onBase) return false;
+      const changed = (await run("git", ["-C", dir, "show", "--name-only", "--format=", sha])).trim();
+      if (!changed) return false;
+      const committed = Number((await run("git", ["-C", dir, "show", "-s", "--format=%ct", sha])).trim()) * 1000;
+      return Number.isFinite(committed) && committed >= since;
+    },
+  };
+}
+
+/** Delegations nothing will settle: a queued start that left the queue
+ * without opening, a session gone from the ledger, or one ended without a
+ * report (archived, stopped, failed). Each goes back to the owner. */
+function reconcileDelegations(): void {
+  for (const item of autonomy.allOwnerPending()) {
+    const delegation = item.delegation;
+    if (!delegation) continue;
+    const ref = { botId: item.botId, itemId: item.id };
+    // one item's trouble never stops the others, nor the desktop-work tick that calls this (INSP-DEL A8)
+    try {
+      const session = delegation.sessionId ? ccLedger.get(delegation.sessionId) ?? null : null;
+      // too long without a report, stalled, or silent: back to the owner, whatever its state (INSP-DEL A8)
+      const stuck = delegationStuck(delegation, session ? { status: session.status, lastActivityAt: session.lastActivityAt, progressAt: session.progressAt } : null, Date.now());
+      if (stuck) {
+        delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `${stuck}; confira a sessão${session ? ` ${session.id}` : ""} antes de delegar de novo`, ...(session ? { sessionId: session.id } : {}) });
+        continue;
+      }
+      if (delegation.state === "queued") {
+        if (delegation.queueId && ccStartQueue.ordered().some((each) => each.id === delegation.queueId)) continue;
+        const opened = ccLedger.all().find((each) => each.delegatedItem?.botId === ref.botId && each.delegatedItem.itemId === ref.itemId && each.createdAt >= delegation.at);
+        if (opened) delegationOpened(ref, opened);
+        else delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: "a sessão não abriu: o start saiu da fila de sessões sem abrir (o motivo está na conversa de quem a pediu)" });
+        continue;
+      }
+      if (!session) delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: "a sessão sumiu do registro do servidor sem relatório" });
+      else if (session.status !== "running" && session.status !== "stalled") settleDelegation(session);
+    } catch (error) {
+      console.error(`[owner-delegate] reconcile ${item.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/** The item as "Precisa de você" shows its delegation: running (with the
+ * session and its link), came back (with why), or the button — or why not. */
+function wireDelegation(item: OwnerPending): Pick<WireOwnerPending, "delegable" | "onlyYou" | "delegation" | "delegationBack"> {
+  if (item.delegation) {
+    const session = item.delegation.sessionId ? ccLedger.get(item.delegation.sessionId) : null;
+    const local = session?.desktop?.localId;
+    return {
+      delegation: {
+        at: item.delegation.at, state: item.delegation.state, ...(item.delegation.option ? { option: item.delegation.option } : {}),
+        ...(session ? { sessionId: session.id, sessionTitle: session.title } : {}), ...(local ? { link: `claude://code/continue?session=${local}` } : {}),
+      },
+    };
+  }
+  const view = delegateView(item, existsSync);
+  const back = item.delegationBack;
+  return {
+    ...("repo" in view ? { delegable: true as const } : { onlyYou: view.onlyYou }),
+    ...(back ? { delegationBack: { at: back.at, outcome: back.outcome, text: back.text, ...(back.command ? { command: back.command } : {}) } } : {}),
+  };
+}
+
 const ourAppLocalIds = () => new Set(ccLedger.all().flatMap((session) => session.desktop?.localId ? [session.desktop.localId] : []));
 
 /** The blocks the server saw lately (owner-chips.ts noteFolderBlock), kept
@@ -11471,7 +11688,17 @@ function drainCcStartQueue(): void {
     mainThread: (botId, except) => mainThreadOf(botId, except),
     start: (item, threadId, replyThreadId) => {
       const bot = store.bot(item.botId);
-      return bot ? startCcSession(bot, threadId, replyThreadId, item.body, true) : { status: 404, body: { error: "o bot não existe mais" } };
+      if (!bot) return { status: 404, body: { error: "o bot não existe mais" } };
+      // a delegated start checks the stop and the budget again when it leaves the queue: they held at the click, maybe not now (INSP-DEL A10)
+      if (item.delegation) {
+        if (existsSync(NURIA_STOP_FILE)) return { status: 409, body: { error: "o ~/.nuria/stop está ativo: a delegação espera na fila até ele ser removido" }, retry: true };
+        try {
+          assertWithinBudget(cfg, DATA_DIR);
+        } catch (error) {
+          return { status: 409, body: { error: error instanceof Error ? error.message : String(error) } };
+        }
+      }
+      return startCcSession(bot, threadId, replyThreadId, item.body, true, item.delegation);
     },
     chip: (threadId, text, ok) => { store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok } }); },
     report: (botId, threadId, text) => autonomy.addReport(botId, threadId, text),
@@ -11724,6 +11951,7 @@ async function runDesktopWork(): Promise<void> {
   watchDelivery();
   void preemptCiForReleaseTick().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
   drainCcStartQueue();
+  reconcileDelegations();
   void watchArchivedOutside().catch((error) => console.error(`[cc-sessions] archived-outside check failed: ${error instanceof Error ? error.message : String(error)}`));
   void cleanReleasedWorktrees().catch((error) => console.error(`[worktrees] cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -25430,6 +25658,59 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const asked = askQuestionSteps(bot.id, m[2]!, at);
       if (!asked) return json(res, 409, { error: `A conversa de ${bot.name} com você não existe mais. Responda abaixo.`, code: "no_channel" });
       return json(res, 202, { ok: true, deduped: false, askedAt: asked.askedAt });
+    }
+    // "Delegar a um agente" (lote del): the server opens a Claude Code session
+    // for the item the way the Chief does (startCcSession: the same guard,
+    // worktree option and breaker) with the decision the owner chose, else
+    // the recommended one, else the steps. The item waits on the session, out
+    // of the count, until its report settles it. Never an approve, and only
+    // what an agent may do (server/owner-delegate.ts onlyYouReason).
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/delegate$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const item = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!item) return json(res, 404, { error: "Este item já foi resolvido." });
+      const notYours = cloudGuestSendRefusal(auth, item.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      // a double click is one delegation: the replies' answer-dedupe, keyed by the item
+      const key = answerKey(bot.id, item.id, { kind: "delegate", text: "" });
+      const claim = answerDedupe.claim(key);
+      if (!claim.ok) return json(res, 200, { ok: true, duplicate: true, message: claim.sent ? "Este item já foi delegado; não abri outra sessão." : "A delegação deste item ainda está sendo aberta; não abri outra sessão." });
+      onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
+      // one delegation at a time per item
+      if (item.delegation) return json(res, 409, { error: `Este item já está com um agente (delegado ${delegationTime(item.delegation.at)}).`, code: "already_delegated" });
+      const view = delegateView(item, ccIsGitRepo);
+      if ("onlyYou" in view) return json(res, 409, { error: `Só você: ${view.onlyYou}.`, code: "not_delegable" });
+      if (existsSync(NURIA_STOP_FILE)) return json(res, 409, { error: "O ~/.nuria/stop está ativo: nenhuma sessão é aberta até ele ser removido.", code: "stopped" });
+      try {
+        assertWithinBudget(cfg, DATA_DIR);
+      } catch (error) {
+        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
+      }
+      const owner = delegationOwner(bot, item);
+      if (!owner) return json(res, 409, { error: "A conversa de origem deste item não existe mais. Marque-o como resolvido.", code: "no_thread" });
+      const { title, brief } = delegationBrief(item, { botName: bot.name, threadTitle: store.taskByThread(bot.id, item.threadId)?.title, now: Date.now(), time: delegationTime });
+      // the app when it can take the session now; else the terminal, with the reason the server knows
+      const app = appAvailability(view.repo);
+      const body: Record<string, unknown> = { title, brief, repo: view.repo, ...(app.state === "available" ? {} : { surface: "cli", cliReason: `delegação do dono pelo "Precisa de você": ${app.reason ?? "o app Claude não abre sessão neste repositório agora"}` }) };
+      const choice = delegationChoice(item);
+      const ref = { botId: bot.id, itemId: item.id };
+      // marked before the start: the session it creates finds the item delegated
+      autonomy.patchOwnerPending(bot.id, item.id, { delegation: { at: Date.now(), state: "queued", ...(choice && choice !== "none" ? { option: choice.option.label } : {}) }, delegationBack: undefined });
+      const started = startCcSession(owner.bot, owner.threadId, owner.threadId, body, false, ref);
+      if (started.status !== 200 || (!started.sessionId && !started.queueId)) {
+        const reason = String(started.body.error ?? started.body.message ?? "erro desconhecido").slice(0, 600);
+        delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `a sessão não abriu: ${reason}` });
+        return json(res, 409, { error: `A sessão não abriu: ${reason}`, code: "not_opened" });
+      }
+      const now = autonomy.ownerPendingById(bot.id, item.id);
+      if (started.queueId && now?.delegation) autonomy.patchOwnerPending(bot.id, item.id, { delegation: { ...now.delegation, queueId: started.queueId } });
+      delegationChip(item, `Delegado a um agente pelo dono: ${item.title}${started.sessionId ? ` (sessão ${started.sessionId})` : " (na fila de sessões)"}`);
+      refreshBotRow(bot.id);
+      if (owner.bot.id !== bot.id) refreshBotRow(owner.bot.id);
+      console.log(`[owner-delegate] ${item.id} of ${bot.name} delegated: ${started.sessionId ? `session ${started.sessionId}` : `queued ${started.queueId}`} in ${view.repo}${choice && choice !== "none" ? `, decision "${choice.option.label}"` : ""}`);
+      return json(res, 202, { ok: true, ...(started.sessionId ? { sessionId: started.sessionId } : {}), ...(started.queueId ? { queueId: started.queueId } : {}) });
     }
     // The person answers an item from "Precisa de você": a decision the bot
     // offered (options[n]), their own words, or a request for the steps. The
