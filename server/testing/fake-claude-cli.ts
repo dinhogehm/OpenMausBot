@@ -729,6 +729,8 @@ const playTurn = (prompt: JsonValue, late = false) => {
   turnsPlayed += 1;
   if (process.env.FAKE_CLAUDE_COMPACT === "1" && turnsPlayed >= 2) {
     runHooks("PreCompact", { trigger: "auto" });
+    // the stream frame the real CLI prints when it compacts the session
+    out({ type: "system", subtype: "compact_boundary", session_id: sessionId, compact_metadata: { trigger: "auto", pre_tokens: 1000 } });
     const context = runHooks("SessionStart", { source: "compact" });
     if (context.trim()) replyParts = [`${context.trim()}\n\n${replyParts[0] ?? ""}`, ...replyParts.slice(1)];
   }
