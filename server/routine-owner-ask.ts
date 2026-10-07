@@ -173,6 +173,12 @@ function idsIn(text: string): { ticket: string[]; issue: string[]; linha: string
 
 // "como você decidiu às 11:05" tells a decision taken, never one asked (R13-visual N26, real o16 of 06/10)
 const DECIDE = /(?<![\p{L}])(?:decis[ãa]o|decid(?!(?:i|iu|imos|iram|ido|ida|idos|idas)(?![\p{L}]))\p{L}*)/iu;
+/** A decision already taken, reported: "como você decidiu", "o Chief concordou", "como combinado", "conforme você pediu". */
+const PAST_DECISION = /(?<![\p{L}])(?:voc[êe]\s+(?:j[áa]\s+)?(?:decidiu|escolheu|aprovou)|(?:como|conforme)\s+(?:voc[êe]\s+)?(?:decidiu|pediu|combinamos|combinado|definiu)|j[áa]\s+decidid[oa]|concord(?:ou|aram))(?![\p{L}])/iu;
+/** The routine left it alone because it is the owner's: "continua com você, então não mexi". */
+const LEFT_ALONE = /(?<![\p{L}])(?:continua|continuam|fica|ficam|segue|seguem)\s+com\s+voc[êe](?![\p{L}])[^.!?]*?(?<![\p{L}])(?:n[ãa]o\s+(?:mexi|mexo|mexerei|vou\s+mexer|toquei|toco|alterei|altero)|deixei\s+como\s+est(?:á|a|ava))(?![\p{L}])/iu;
+/** The owner asked for something in so many words: an imperative, "preciso que", a question. */
+const EXPLICIT_REQUEST = /(?<![\p{L}])(?:preciso\s+que|precisamos\s+que|decida|confirme|responda|aprove|escolha|libere|me\s+(?:diga|avise|confirme|responda|passe)|pode\s+(?:me\s+)?(?:confirmar|dizer|decidir|aprovar|responder|liberar))(?![\p{L}])|\?/iu;
 /** A sentence whose subject is a pronoun ("Ela continua com você, então não mexi."): what it is about was said before it. */
 const PRONOUN_START = /^\s*(?:el[ae]s?|isso|isto|aquilo|(?:ess|est)[ae]s?(?=\s+(?:continua|fica|segue|depende|est[áa]|precisa|aguarda|espera)))(?![\p{L}])/iu;
 /** What it is about: a ticket, an issue, a sheet row, a conversation, the person it is owed to, else its words. */
@@ -240,8 +246,8 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
     if (echoAsk(sentence, context.itemIds ?? []) && (!what || echoAsk(what, context.itemIds ?? []))) return;
     const task = !what && ownerTask ? ownerTask.exec(sentence) : null;
     // "Ela continua com você": what it is about is the sentence it points back to — kept in the why too (R13-visual N26, real o17 of 06/10)
-    if (!what && !task && before && PRONOUN_START.test(sentence)) {
-      what = before;
+    if (!task && before && PRONOUN_START.test(sentence)) {
+      what = what ?? before;
       sentence = `${before} ${sentence}`;
     }
     if (task) {
@@ -265,6 +271,11 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
     sentences.forEach((original, at) => {
       const sentence = unquoted(original);
       if (!asks(sentence, sentences[at + 1], owner)) return;
+      // a report, not an ask: a decision already taken ("como você decidiu às 11:05"), or what the routine left alone
+      // because it is the owner's ("continua com você, então não mexi") — unless the owner is asked for something
+      // in so many words (R13-followup 1: o16 and o17 of 06/10, the only two items in 22 h, both false)
+      if (PAST_DECISION.test(sentence) && !EXPLICIT_REQUEST.test(sentence)) return;
+      if (LEFT_ALONE.test(sentence) && !EXPLICIT_REQUEST.test(unquoted(line))) return;
       // a list it leads: each of its items is a pendency of its own (INSP-N22 A9)
       if (/:\s*$/.test(original) && at === sentences.length - 1) {
         const items: string[] = [];

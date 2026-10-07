@@ -677,16 +677,38 @@ const MONITOR_0610_1500 = [
 ].join("\n");
 
 describe("R13-visual N26: a routine item's title always says what it is about", () => {
-  it("o16 (real 11:08): a fact told before the colon is no label, and \"como você decidiu\" asks no decision", () => {
-    expect(titles(MONITOR_0610_1108)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389)"]);
+  // R13-followup 1: the only two routine items in 22 h of N22 were both reports, not asks
+  it("o16 (real 11:08): a decision already taken, reported, opens no item", () => {
+    expect(routineOwnerAsks(MONITOR_0610_1108, ctx)).toEqual([]);
+    for (const said of ["A escala de sábado fica com você, como combinado ontem.", "A linha 179 fica com você, conforme você pediu.", "Você decidiu às 9h: a #9370 fica com você."]) {
+      expect(routineOwnerAsks(said, ctx), said).toEqual([]);
+    }
   });
 
-  it("o17 (real 15:00): \"Ela continua com você\" takes its subject from the sentence before, which the why quotes too", () => {
-    const asks = routineOwnerAsks(MONITOR_0610_1500, ctx);
+  it("o17 (real 15:00): what the routine left alone because it is the owner's opens no item", () => {
+    expect(routineOwnerAsks(MONITOR_0610_1500, ctx)).toEqual([]);
+    // the inspector's third phrase
+    expect(routineOwnerAsks("A linha 192 da Marluce continua com você, então não mexi.", ctx)).toEqual([]);
+  });
+
+  it("an explicit ask in the same paragraph still opens it, titled with its subject", () => {
+    expect(titles("A linha 192 da Marluce continua com você, então não mexi. Preciso que confirme o valor da coluna H.")).toEqual(["routine-ask:linha:192 | Ver: a linha 192 da Marluce"]);
+    expect(titles("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você, então não mexi: pode confirmar se grava hoje?")).toHaveLength(1);
+    expect(titles("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você, então não mexi: pode confirmar se grava hoje?")[0]).toMatch(/^routine-ask:issue:9389 \| /);
+    // a decision taken, with a new one asked in the same sentence
+    expect(titles("Como você decidiu, a #9370 fica com você: decida até sexta se ela entra no lote.")).toHaveLength(1);
+  });
+
+  it("a pronoun takes its subject from the sentence before, which the why quotes too", () => {
+    const asks = routineOwnerAsks("A linha da Marluce (#9389) ainda não aparece na planilha. Isso depende de você confirmar.", ctx);
     expect(asks.map((ask) => `${routineAskKey(ask)} | ${routineAskTitle(ask)}`)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389) ainda não aparece na planilha"]);
     const item = routineAskItem(asks[0]!, { botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", firstAt: 0, lastAt: 0 });
     expect(item.why).toContain("A linha da Marluce (#9389");
-    expect(item.why).toContain("Ela continua com você, então não mexi.");
+    expect(item.why).toContain("Isso depende de você confirmar.");
+  });
+
+  it("a told fact before the colon is no label: what follows is the subject", () => {
+    expect(titles("O Filipe respondeu: a linha 110 continua com você.")).toEqual(["routine-ask:linha:110 | Ver: a linha 110"]);
   });
 
   it("the subject from the paragraph: the nearest sentence naming an issue, a row or a person, else the one before", () => {
