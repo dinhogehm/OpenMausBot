@@ -387,7 +387,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, breakerRepo, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, breakerRepo, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText, trustLinkForClaude } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -9699,6 +9699,9 @@ async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnTyp
     ownStore.record({ ...event, mode: "failed", reason });
     return { ok: false, reason };
   }
+  // trusted in the app as its repository is: no "Confiar neste workspace?" for each alias
+  const trustError = await trustLinkForClaude(link, session.repo);
+  if (trustError) console.warn(`[own-worktrees] ${link}: not trusted ahead in the Claude app (it will ask): ${trustError}`);
   // while this clone reads the seed, the seed is not installed again (refreshOwnSeeds waits)
   ownSeedWatch.cloning += 1;
   let caches: Awaited<ReturnType<typeof cloneSeedCaches>>;

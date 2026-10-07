@@ -23,7 +23,8 @@
 // server only reports. A failed clone takes back only the temporary copy it
 // was writing, inside the new worktree, before any session saw it.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { slugify } from "./cc-sessions.ts";
@@ -207,6 +208,67 @@ export function ensureLink(link: string, target: string): string | null {
     return null;
   } catch (error) {
     return failureText(error);
+  }
+}
+
+/** Where Claude keeps the folders it trusts: `~/.claude.json`, or
+ * `$CLAUDE_CONFIG_DIR/.claude.json` (the app's own rule, `SU`). */
+export const claudeConfigPath = (env: NodeJS.ProcessEnv = process.env, home = homedir()) =>
+  join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+
+/** The lock the Claude app and the CLI take before rewriting `.claude.json`:
+ * a `<file>.lock` folder, taken by mkdir, left by rm; one older than 10 s is
+ * a crashed writer's (the app's `Uir`, `Vir = 1e4`). */
+const CLAUDE_LOCK_STALE_MS = 10_000;
+
+/** Have the Claude app trust the alias `link`, as it would after "Confiar no
+ * workspace", when `repo` (or a folder above it) is trusted already. Null
+ * when it is (now or already), else why not.
+ *
+ * The app asks for each alias (07/10): a symlink out of its folder leaves the
+ * app unable to read the checkout's .claude/settings files behind it, and
+ * then it trusts only that exact path, never one above it — and every
+ * session gets an alias of a new name. Writing it here, before the session
+ * opens, under the app's own lock, spares the question; a repository the
+ * person never trusted still asks. */
+export async function trustLinkForClaude(link: string, repo: string, opts: { configPath?: string; lockWaitMs?: number } = {}): Promise<string | null> {
+  let config = opts.configPath ?? claudeConfigPath();
+  try { config = realpathSync(config); } catch { /* not there: nothing trusted */ }
+  const lock = `${config}.lock`;
+  const deadline = Date.now() + (opts.lockWaitMs ?? 5_000);
+  for (;;) {
+    try {
+      mkdirSync(lock, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return `trava de ${config}: ${failureText(error)}`;
+    }
+    try {
+      if (Date.now() - statSync(lock).mtimeMs > CLAUDE_LOCK_STALE_MS) rmdirSync(lock);
+    } catch { /* released meanwhile */ }
+    // never written without the lock: a lost race only means the app asks once
+    if (Date.now() > deadline) return `${lock} ocupada`;
+    await new Promise((done) => setTimeout(done, 15));
+  }
+  try {
+    const data = JSON.parse(readFileSync(config, "utf8")) as { projects?: Record<string, { hasTrustDialogAccepted?: boolean } | undefined> };
+    const projects = data.projects ?? {};
+    if (projects[link]?.hasTrustDialogAccepted === true) return null;
+    let trusted = false;
+    for (let folder = repo; ; folder = dirname(folder)) {
+      if (projects[folder]?.hasTrustDialogAccepted === true) { trusted = true; break; }
+      if (dirname(folder) === folder) break;
+    }
+    if (!trusted) return `${repo} não é confiável no app Claude`;
+    projects[link] = { ...projects[link], hasTrustDialogAccepted: true };
+    data.projects = projects;
+    writeFileAtomic(config, JSON.stringify(data, null, 2), { mode: 0o600 });
+    return null;
+  } catch (error) {
+    return failureText(error);
+  } finally {
+    // an empty folder (rmdir): nothing here removes more than the lock
+    try { rmdirSync(lock); } catch { /* taken back as stale by another writer */ }
   }
 }
 
