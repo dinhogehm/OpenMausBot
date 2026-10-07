@@ -186,55 +186,94 @@ it("cuts a survivor at the turn limit, and says it once on the Chief's desk", as
   }
 }, 90_000);
 
-// R13-2: a survivor cut at the turn limit while its gate runs in a group of
-// its own (npm → local-ci, holding the CI lease). The gate is seen before the
-// claude's group is stopped and followed as a cut turn's: the session is not
-// handed to the Chief, and the server resumes it once when the gate ends.
-it("cuts a survivor at the turn limit with its gate running, follows the gate and resumes the session once when it ends", async () => {
+// R13-2, INSP-R13res A1: survivors past the turn limit, with stand-ins that
+// behave as Claude Code does — on SIGTERM it kills its own background shells,
+// the gate with them, whatever their process group. One per case, in one boot:
+// - "bg": its gate runs as a background child → the cut waits; the gate ends,
+//   the claude hears it and ends its turn (idle, not cut);
+// - "nohup": its gate was started with nohup (launchd's child, outside the
+//   claude's tree) → found all the same, the cut waits, the turn ends;
+// - "stuck": its gate runs past the ceiling → cut, the gate dies with the
+//   claude, said as "gate interrompido pelo corte, sem resultado", no job;
+// - "plain": no gate → cut as before, the Chief resumes it.
+// No session is resumed by the server: nothing truly outlived a cut.
+it("waits for a survivor's gate at the turn limit (background or nohup), cuts honestly past the ceiling, and cuts a survivor with no gate as before", async () => {
   const { chmodSync, existsSync, mkdirSync, realpathSync } = await import("node:fs");
   const { execFileSync } = await import("node:child_process");
-  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", OMB_CC_TURN_TIMEOUT_MS: "5000" };
+  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", OMB_CC_TURN_TIMEOUT_MS: "5000", OMB_CC_GATE_WAIT_MAX_MS: "1800000" };
   const fixture = await launchVerificationServer(parentEnv);
   const { url, logPath } = fixture.info;
   const data = fixture.info.dataDir;
   const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
   let restarted: ChildProcess | undefined;
-  let standIn: ChildProcess | undefined;
-  let gatePid: number | undefined;
+  const standIns: ChildProcess[] = [];
+  const gatePids: number[] = [];
   try {
     const chief = (await runControlOmb(["new-bot", "--name", "Chief", "--url", url]) as any).bot;
     await api(`/api/bots/${chief.id}`, { chiefOfStaff: true }, "PATCH");
     await waitForExit(fixture.child, { signal: "SIGTERM" });
-    // the resumption's claude: ends its turn at once, and counts itself
+    // a resumption would run this: it only counts itself
     const fake = join(data, "fake-claude-resume.mjs");
     const calls = join(data, "fake-claude-resume.calls");
     writeFileSync(fake, `#!/usr/bin/env node
 import { appendFileSync } from "node:fs";
-appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");
-console.log(JSON.stringify({ type: "system", subtype: "init", cwd: process.cwd(), session_id: "x" }));
-console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "gate verde, PR pronta", total_cost_usd: 0.01 }));
+appendFileSync(${JSON.stringify(calls)}, "x\\n");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "resumed", total_cost_usd: 0 }));
 `);
     chmodSync(fake, 0o755);
     const resumed = () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length : 0);
-    // the session's worktree, as the claude's init event says it (the real path)
-    const folder = join(data, ".claude", "worktrees", "9317-gate");
-    mkdirSync(folder, { recursive: true });
-    const cwd = realpathSync(folder);
-    // the stand-in claude (a group of its own) starts a gate in another group, in the worktree;
-    // the gate ends when the test says so, not on a clock
-    const release = join(data, "gate-release");
-    const gateFile = join(data, "gate.pid");
-    const gateSource = `const { existsSync } = require("node:fs"); setInterval(() => { if (existsSync(${JSON.stringify(release)})) process.exit(0); }, 100); setTimeout(() => process.exit(0), 120000);`;
-    const claudeSource = `const { spawn } = require("node:child_process"); const gate = spawn(process.execPath, ["-e", ${JSON.stringify(gateSource)}, "ci:local"], { detached: true, stdio: "ignore" }); gate.unref(); require("node:fs").writeFileSync(${JSON.stringify(gateFile)}, String(gate.pid)); setTimeout(() => {}, 120000);`;
-    standIn = spawn(process.execPath, ["-e", claudeSource], { cwd, detached: true, stdio: "ignore" });
-    await expect.poll(() => existsSync(gateFile), { timeout: 10_000 }).toBe(true);
-    gatePid = Number(readFileSync(gateFile, "utf8"));
-    const lstart = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(standIn.pid)], { env: { ...process.env, LC_ALL: "C", LANG: "C" } }).toString().trim();
-    const at = Date.now() - 60_000;
-    writeFileSync(join(data, "cc-sessions.json"), JSON.stringify({ sessions: [{
-      id: "eeeeeeee-0000-4000-8000-0000000000e5", ownerBotId: chief.id, ownerThreadId: chief.activeTaskId, title: "9317 gate longo", repo: data, worktree: "9317-gate", cwd,
-      permissionMode: "auto", status: "running", surface: "cli", createdAt: at, lastActivityAt: at, progressAt: at, turns: 7, costUsd: 0, queued: [], proc: { pid: standIn.pid, lstart },
-    }] }));
+    // the gate: a "ci:local" that ends when its release file exists, not on a clock
+    const gateJs = join(data, "gate.cjs");
+    writeFileSync(gateJs, `const { existsSync } = require("node:fs"); const release = process.argv[3]; setInterval(() => { if (existsSync(release)) process.exit(0); }, 100); setTimeout(() => process.exit(0), 120000);\n`);
+    // the stand-in claude: argv [mode, gate.js, release, gate pid file, transcript]
+    const claudeJs = join(data, "stand-in.cjs");
+    writeFileSync(claudeJs, `const { spawn, execFileSync } = require("node:child_process");
+const { mkdirSync, writeFileSync } = require("node:fs");
+const { dirname } = require("node:path");
+const [mode, gateJs, release, pidFile, transcript] = process.argv.slice(2);
+const end = () => { mkdirSync(dirname(transcript), { recursive: true }); writeFileSync(transcript, JSON.stringify({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "gate verde no head" }] } }) + "\\n"); process.exit(0); };
+if (mode === "plain") setInterval(() => {}, 1000);
+else if (mode === "nohup") {
+  const pid = Number(execFileSync("/bin/sh", ["-c", 'nohup "$0" "$1" ci:local "$2" >/dev/null 2>&1 & echo $!', process.execPath, gateJs, release]).toString().trim());
+  writeFileSync(pidFile, String(pid));
+  setInterval(() => { try { process.kill(pid, 0); } catch { end(); } }, 100);
+} else {
+  const gate = spawn(process.execPath, [gateJs, "ci:local", release], { detached: true, stdio: "ignore" });
+  writeFileSync(pidFile, String(gate.pid));
+  // as Claude Code: a cut kills its background shells
+  process.on("SIGTERM", () => { try { process.kill(-gate.pid, "SIGKILL"); } catch {} process.exit(143); });
+  gate.on("exit", end);
+}
+`);
+    const ids = { bg: "a1a1a1a1-0000-4000-8000-0000000000a1", nohup: "b2b2b2b2-0000-4000-8000-0000000000b2", stuck: "c3c3c3c3-0000-4000-8000-0000000000c3", plain: "d4d4d4d4-0000-4000-8000-0000000000d4" };
+    const titles = { bg: "9401 gate", nohup: "9402 gate nohup", stuck: "9403 gate travado", plain: "9404 sem gate" };
+    const releases = { bg: join(data, "release-bg"), nohup: join(data, "release-nohup"), stuck: join(data, "release-stuck"), plain: join(data, "release-plain") };
+    const now = Date.now();
+    const sessions = [];
+    for (const mode of ["bg", "nohup", "stuck", "plain"] as const) {
+      const folder = join(data, ".claude", "worktrees", titles[mode].replace(/ /g, "-"));
+      mkdirSync(folder, { recursive: true });
+      const cwd = realpathSync(folder);
+      const pidFile = join(data, `${mode}.pid`);
+      const transcript = join(data, ".claude", "projects", "-repo", `${ids[mode]}.jsonl`);
+      const standIn = spawn(process.execPath, [claudeJs, mode, gateJs, releases[mode], pidFile, transcript], { cwd, detached: true, stdio: "ignore" });
+      standIns.push(standIn);
+      if (mode !== "plain") {
+        await expect.poll(() => existsSync(pidFile), { timeout: 10_000 }).toBe(true);
+        gatePids.push(Number(readFileSync(pidFile, "utf8")));
+      }
+      const lstart = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(standIn.pid)], { env: { ...process.env, LC_ALL: "C", LANG: "C" } }).toString().trim();
+      // past the 5-s limit; "stuck" also past the 30-min ceiling
+      const at = mode === "stuck" ? now - 40 * 60_000 : now - 60_000;
+      sessions.push({
+        id: ids[mode], ownerBotId: chief.id, ownerThreadId: chief.activeTaskId, title: titles[mode], repo: data, worktree: titles[mode].replace(/ /g, "-"), cwd,
+        permissionMode: "auto", status: "running", surface: "cli", createdAt: at, lastActivityAt: at, progressAt: at, turns: 7, costUsd: 0, queued: [], proc: { pid: standIn.pid, lstart },
+      });
+    }
+    const [bgGate, nohupGate, stuckGate] = gatePids as [number, number, number];
+    // the nohup'd gate is launchd's, outside any claude's tree
+    expect(execFileSync("/bin/ps", ["-o", "ppid=", "-p", String(nohupGate)]).toString().trim()).toBe("1");
+    writeFileSync(join(data, "cc-sessions.json"), JSON.stringify({ sessions }));
     const log = openSync(logPath, "a", 0o600);
     restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
       cwd: fileURLToPath(new URL("..", import.meta.url)), env: { ...verificationServerEnvironment(parentEnv, data, Number(new URL(url).port)), OMB_CC_BIN: fake }, stdio: ["ignore", log, log],
@@ -243,40 +282,46 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
     const chips = async (threadId: string) => ((await api(`/api/threads/${threadId}/messages`, undefined, "GET")).messages as any[])
       .filter((message) => message.kind === "activity").map((message) => String(message.tool?.name ?? ""));
-    const ledger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions[0];
+    const ledger = () => Object.fromEntries((JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions as any[]).map((each) => [each.id, each]));
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-    // cut: its claude is stopped, its gate is followed as a cut turn's
-    await expect.poll(() => ledger().bgJob?.afterCut ?? false, { timeout: 20_000 }).toBe(true);
-    expect(ledger()).toMatchObject({ status: "failed", bgJob: { pids: [gatePid] } });
-    expect(ledger().lastError).toContain("the server resumes it when the process(es) it left running finish");
-    await expect.poll(() => standIn!.exitCode !== null || standIn!.signalCode !== null, { timeout: 10_000 }).toBe(true);
-    expect(() => process.kill(gatePid!, 0)).not.toThrow();
+    // "plain" and "stuck" are cut; "stuck"'s gate dies with its claude, and it is said so
+    await expect.poll(() => [ledger()[ids.plain].status, ledger()[ids.stuck].status], { timeout: 20_000 }).toEqual(["failed", "failed"]);
+    expect(ledger()[ids.stuck].lastError).toContain("after waiting 30 min for its gate (ci:local)");
+    expect(ledger()[ids.stuck].lastError).toContain("its gate (ci:local) was stopped with it, with no result");
+    expect(ledger()[ids.stuck].bgJob).toBeUndefined();
+    await expect.poll(() => alive(stuckGate), { timeout: 5_000 }).toBe(false);
+    expect(ledger()[ids.plain].bgJob).toBeUndefined();
+    // "bg" and "nohup" wait for their gates: nothing killed, the cut said to wait
+    expect(ledger()[ids.bg].status).toBe("running");
+    expect(ledger()[ids.nohup].status).toBe("running");
+    expect([standIns[0]!.exitCode, standIns[1]!.exitCode, alive(bgGate), alive(nohupGate)]).toEqual([null, null, true, true]);
+    await expect.poll(async () => (await chips(chief.activeTaskId)).filter((chip) => chip.includes("mas o gate (ci:local) dela ainda roda — o corte espera o gate terminar (até 30 min)")).length, { timeout: 15_000 }).toBe(2);
     const desk = await chips(chief.activeTaskId);
-    expect(desk.some((chip) => chip.startsWith("Sessão 9317 cortada no limite de 1 min com 1 processo ainda rodando — o servidor retoma"))).toBe(true);
-    expect(desk.some((chip) => chip.startsWith("Sessão 9317") && chip.includes("o Chief retoma"))).toBe(false);
-    expect(readFileSync(logPath, "utf8")).toContain(`following 1 process(es) it left running (${gatePid})`);
-    // while the gate runs, nobody resumes the session
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
-    expect(resumed()).toBe(0);
+    expect(desk.some((chip) => chip.startsWith("Sessão 9403 cortada após 30 min com o gate (ci:local) rodando — gate interrompido pelo corte, sem resultado"))).toBe(true);
+    expect(desk.some((chip) => chip.startsWith("Sessão 9404 cortada no limite de 1 min — o Chief retoma"))).toBe(true);
+    expect(desk.some((chip) => /^Sessão 940[12] cortada/.test(chip))).toBe(false);
+    expect(readFileSync(logPath, "utf8")).toContain(`passed the 1-min turn limit with its gate running (${nohupGate})`);
 
-    // the gate ends: one resumption, which tells the session the gate finished
-    writeFileSync(release, "");
-    await expect.poll(() => resumed(), { timeout: 20_000 }).toBe(1);
-    await expect.poll(() => ledger().status, { timeout: 10_000 }).toBe("idle");
-    expect(ledger().bgJob).toBeUndefined();
-    expect(ledger().lastReport).toBe("gate verde, PR pronta");
-    const argv = JSON.parse(readFileSync(calls, "utf8").trim().split("\n")[0]!) as string[];
-    expect(argv.at(-1)).toContain("[The server resumed you: the process(es) you left running when your last turn ended have finished");
-    expect(argv.at(-1)).toContain(`PID ${gatePid}`);
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
-    expect(resumed()).toBe(1);
+    // the gates end: each claude hears it and ends its turn — finished, not cut, nobody resumed
+    writeFileSync(releases.bg, "");
+    writeFileSync(releases.nohup, "");
+    await expect.poll(() => [ledger()[ids.bg].status, ledger()[ids.nohup].status], { timeout: 25_000 }).toEqual(["idle", "idle"]);
+    expect(ledger()[ids.bg]).toMatchObject({ lastReport: "gate verde no head", turns: 7 });
+    expect(ledger()[ids.nohup]).toMatchObject({ lastReport: "gate verde no head", turns: 7 });
+    expect(ledger()[ids.bg].bgJob).toBeUndefined();
+    expect(ledger()[ids.nohup].bgJob).toBeUndefined();
+    const after = await chips(chief.activeTaskId);
+    expect(after.filter((chip) => /^Sessão 940[12] terminou o turno 7, acompanhado após o reinício/.test(chip))).toHaveLength(2);
+    expect(after.some((chip) => /^Sessão 940[12] cortada/.test(chip))).toBe(false);
+    expect(resumed()).toBe(0);
   } finally {
-    standIn?.kill("SIGKILL");
-    if (gatePid) try { process.kill(gatePid, "SIGKILL"); } catch { /* gone */ }
+    for (const child of standIns) child.kill("SIGKILL");
+    for (const pid of gatePids) try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();
   }
-}, 90_000);
+}, 120_000);
 
 it("tells a standing watch armed with an unanchored ignore, once, when the server starts (INSP-E 7)", async () => {
   const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50" };

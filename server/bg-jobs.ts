@@ -80,6 +80,43 @@ export function isToolProcess(command: string): boolean {
     || /^(?:\S*\/)?sleep\s+[\d.]+[smhd]?$/.test(cmd);
 }
 
+/** A shell the agent left waiting on something ("until grep -q exit= …log;
+ * do sleep 5; done", "pgrep -f ci:local", "tail -f …"): it does no work of
+ * its own, so it is neither a gate nor a job to follow (INSP-R13res A6). */
+export function isPollingShell(command: string): boolean {
+  const cmd = command.trim();
+  return /\b(?:until|while)\b[\s\S]*\bdo\b/.test(cmd)
+    || /(?:^|[\s/'"(;&|])(?:pgrep|pkill)\s/.test(cmd)
+    || /^(?:\S*\/)?(?:grep|tail|watch)\s/.test(cmd);
+}
+
+/** A gate at work: the platform's `ci:local` (npm → local-ci.sh) or the
+ * merge gate (`pr:merge`, pr-merge-gate), never a shell polling for one. */
+export function isGateCommand(command: string): boolean {
+  return /\bci:local\b|(?:^|[\s/])local-ci\.(?:sh|mjs)\b|\bpr:merge\b|pr-merge-gate/.test(command) && !isPollingShell(command);
+}
+
+/** How the owner names a gate: "pr:merge" or "ci:local". */
+export function gateLabel(gates: readonly Pick<BgProcess, "command">[]): string {
+  return gates.some((gate) => /\bpr:merge\b|pr-merge-gate/.test(gate.command)) ? "pr:merge" : "ci:local";
+}
+
+/** The gates running in `folder`, whoever their parent is: one started with
+ * nohup or `&` belongs to launchd by now, not to the turn's tree. */
+export function gatesIn(folder: string, rows: readonly PsRow[], cwds: ReadonlyArray<{ pid: number; cwd: string }>, exclude: readonly number[] = []): BgProcess[] {
+  const inFolder = new Map(leftoversIn(folder, [...cwds], exclude).map((proc) => [proc.pid, proc.cwd]));
+  return rows
+    .filter((row) => inFolder.has(row.pid) && isGateCommand(row.command))
+    .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start, pgid: row.pgid }));
+}
+
+/** The same processes once, by pid. */
+export function mergeProcesses(...lists: ReadonlyArray<readonly BgProcess[]>): BgProcess[] {
+  const byPid = new Map<number, BgProcess>();
+  for (const proc of lists.flat()) if (!byPid.has(proc.pid)) byPid.set(proc.pid, proc);
+  return [...byPid.values()];
+}
+
 /** What the server saw under a turn's `claude` process: pid → start, and their process groups. */
 export interface TurnTree { rootPid: number; seen: Map<number, string>; groups: Set<number> }
 
@@ -108,7 +145,7 @@ export function sessionLeftovers(folder: string, tree: TurnTree, rows: readonly 
   noteDescendants(tree, rows);
   const inFolder = new Map(leftoversIn(folder, [...cwds], exclude).map((proc) => [proc.pid, proc.cwd]));
   return rows
-    .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command) && !isToolProcess(row.command))
+    .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command) && !isToolProcess(row.command) && !isPollingShell(row.command))
     .filter((row) => tree.seen.get(row.pid) === row.start || (!tree.seen.has(row.pid) && tree.groups.has(row.pgid)))
     .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start, pgid: row.pgid }));
 }
@@ -131,6 +168,17 @@ export async function backgroundProcesses(folder: string, tree: TurnTree): Promi
   if (!candidates.length) return [];
   const cwds = parseLsofCwd(await run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", candidates.join(",")]));
   return sessionLeftovers(folder, tree, rows, cwds, [process.pid]);
+}
+
+/** The gates running in `folder` anywhere on the machine (ps, then lsof on
+ * those only). `claudePid` is the turn's claude, never a gate itself even
+ * when its prompt (in its argv) names one. */
+export async function sessionGates(folder: string, claudePid?: number): Promise<BgProcess[]> {
+  if (process.platform === "win32") return [];
+  const rows = (await psTable()).filter((row) => row.pid !== process.pid && row.pid !== claudePid && isGateCommand(row.command));
+  if (!rows.length) return [];
+  const cwds = parseLsofCwd(await run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", rows.map((row) => row.pid).join(",")]));
+  return gatesIn(folder, rows, cwds, [process.pid]);
 }
 
 export function pidAlive(pid: number): boolean {
@@ -165,7 +213,8 @@ export function bgJobResumePrompt(job: { pids: number[]; commands: string[]; sin
   return [
     `[The server resumed you: the process(es) you left running when your last turn ended have finished, after ${minutes} min.]`,
     ...job.commands.map((command, i) => `- PID ${job.pids[i]}: ${command}`),
-    "Check how it ended (its log or receipt, the gate's status) and continue from where you stopped. End with your report as usual.",
+    // they were not the server's children: how they exited is not known here
+    "The server cannot see their exit code: they may have passed, failed or been killed. Check how it ended (its log or receipt, the gate's status) before going on from where you stopped. End with your report as usual.",
   ].join("\n");
 }
 
