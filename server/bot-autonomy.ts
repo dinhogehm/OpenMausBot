@@ -691,6 +691,18 @@ interface Ledger {
   askPromotions?: AskPromotion[];
   /** Per bot, the number of its last "oN": ids only go up, never reused (R12-followup #3). */
   ownerPendingSeq?: Record<string, number>;
+  /** "Push e remover" answered: the commits the server looks for on the remote after the turn that carries the answer (INSP-R13fol R2-4). */
+  diskPushChecks?: DiskPushCheck[];
+}
+
+/** One "Push e remover" answer the server checks on the remote, kept across a restart. */
+export interface DiskPushCheck {
+  botId: string;
+  /** The conversation the answer was sent to, and when, and how it begins: the turn that carried it ends there. */
+  threadId: string;
+  at: number;
+  marker: string;
+  folders: Array<{ name: string; branch?: string; head: string }>;
 }
 
 /** A conversation whose last standing watch was cancelled: a watcher bot
@@ -801,6 +813,7 @@ export class BotAutonomy {
   private ownerPending: OwnerPending[] = [];
   private resolvedOwnerPending: ResolvedOwnerPending[] = [];
   private askPromotions: AskPromotion[] = [];
+  private pushChecks: DiskPushCheck[] = [];
   private ownerPendingSeq = new Map<string, number>();
   /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
@@ -881,6 +894,9 @@ export class BotAutonomy {
           this.askPromotions.push({ ...asked, reportThreadId: typeof asked.reportThreadId === "string" ? asked.reportThreadId : asked.threadId });
         }
       }
+      for (const check of raw.diskPushChecks ?? []) {
+        if (check && typeof check.botId === "string" && typeof check.threadId === "string" && typeof check.marker === "string" && Number.isFinite(check.at) && Array.isArray(check.folders)) this.pushChecks.push(check);
+      }
       // Turns a restart cut off: what woke them is due again, marked as such.
       const at = this.now();
       let recovered = false;
@@ -916,7 +932,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}), ...(this.ownerPendingSeq.size ? { ownerPendingSeq: Object.fromEntries(this.ownerPendingSeq) } : {}) };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}), ...(this.pushChecks.length ? { diskPushChecks: this.pushChecks } : {}), ...(this.ownerPendingSeq.size ? { ownerPendingSeq: Object.fromEntries(this.ownerPendingSeq) } : {}) };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -1648,6 +1664,21 @@ export class BotAutonomy {
     promotion.itemId = item.id;
     promotion.itemThreadId = item.threadId;
     promotion.itemCreatedAt = item.createdAt;
+    this.save();
+  }
+
+  /** "Push e remover" answered: the commits to look for on the remote, kept across a restart (INSP-R13fol R2-4). */
+  addDiskPushCheck(check: DiskPushCheck): void {
+    this.pushChecks.push(check);
+    this.save();
+  }
+
+  diskPushChecksOf(botId: string): DiskPushCheck[] {
+    return this.pushChecks.filter((each) => each.botId === botId);
+  }
+
+  dropDiskPushCheck(check: DiskPushCheck): void {
+    this.pushChecks = this.pushChecks.filter((each) => each !== check);
     this.save();
   }
 

@@ -640,6 +640,12 @@ describe("keys on the resolution screen", () => {
     expect(sent).toEqual({ resolved: 0 });
     expect(replyNotice(item, false, sent)).toContain("Chief of Staff");
     expect(replyNotice(item, false, sent)).not.toBe(message);
+    // INSP-R13fol R2-1: words the server did not read as an authorization — sent, and the owner told so
+    const notice = "O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas.";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, resolved: 0, notice }), { status: 202 })));
+    const unread = await replyToOwnerPending(item, { text: "sim", resolve: false }, dispatch);
+    expect(unread).toEqual({ resolved: 0, notice });
+    expect(replyNotice(item, false, unread)).toBe(`${replyNotice(item, false, sent)} ${notice}`);
     // the notice is the neutral one, like "ainda está na fila"
     const shown = view({ selectedKey: keyOf("o1"), notice: message, noticeTone: "info" });
     expect(shown.find("data-resolver-notice")!.props["data-tone"]).toBe("info");

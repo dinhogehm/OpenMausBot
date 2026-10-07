@@ -136,7 +136,7 @@ import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
-import { answerRemoves, asksOwnerToDecide, botDiskItemFolders, busyNote, diskAnswerLine, diskChangedText, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
+import { answerRemoves, asksOwnerToDecide, botDiskItemFolders, busyNote, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_NOT_AUTHORIZED_NOTICE, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, keepsFolders, ownerRemovalIntent, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
 import { checkItemRows, fixedRowWarning, RowCheckBackoff, supersededItems, supersededLine, supersedeRefs } from "./owner-pending-guard.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -8175,7 +8175,7 @@ bus.subscribe((event: RuntimeEvent) => {
         // a reply that leaves worktrees to the owner in text only opens the disk item (R13-followup #4); a routine's run is openDiskDecision's
         if (terminal?.text && bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId && !store.groupByThread(event.threadId)) openDiskDecisionFromReply(bot.id, event.threadId, terminal.text);
         // "Push e remover" answered: the remote is looked at after the bot's turn (INSP-R13fol #2)
-        if (bot && diskPushChecks.some((each) => each.botId === bot.id)) void diskItemTurn(() => checkDiskPushes(bot.id)).catch((error) => console.error(`[disk] push check: ${error instanceof Error ? error.message : String(error)}`));
+        if (bot && autonomy.diskPushChecksOf(bot.id).length) void diskItemTurn(() => checkDiskPushes(bot.id, event.threadId)).catch((error) => console.error(`[disk] push check: ${error instanceof Error ? error.message : String(error)}`));
         // and the owner's words that started it may have dealt with one (INSP-N22 r2 F2) — never in a routine's own run
         if (bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId) closeRoutineAsksOwnerSaid(bot.id, event.threadId);
       }
@@ -14953,28 +14953,30 @@ async function diskFolderFacts(path: string, used: readonly string[], processCwd
   const head = await gitAsync(["-C", path, "rev-parse", "HEAD"]).then((out) => out.trim(), () => "");
   return {
     inUse, dirty: state ? state.dirty : null, unpushed, ...(state?.ignored.length ? { ignored: state.ignored } : {}), ...(state?.secrets.length ? { secrets: state.secrets } : {}),
-    ...(branch && branch !== "HEAD" ? { branch } : {}), ...(/^[0-9a-f]{40}$/.test(head) ? { head } : {}),
+    ...(branch && branch !== "HEAD" ? { branch } : {}), ...(branch === "HEAD" ? { detached: true } : {}), ...(/^[0-9a-f]{40}$/.test(head) ? { head } : {}),
   };
 }
 
 /** The repository the worktrees belong to. */
 const NURIA_MAIN = join(homedir(), "Projetos", "nuria-platform");
 
-/** "Push e remover" answered: the folders whose commit must reach the remote
- * before they go. After the bot's next turn the server looks at the remote;
- * a commit still only on this Mac — the folder kept or already removed — is
- * said to the bot, so no commit is lost unseen (INSP-R13fol #2). */
-interface DiskPushCheck { botId: string; threadId: string; at: number; folders: Array<{ name: string; branch?: string; head: string }> }
-const diskPushChecks: DiskPushCheck[] = [];
-/** How long the server keeps looking for a push it was promised. */
+/** "Push e remover" answered (or the owner's words with commits only here):
+ * the folders whose commit must reach the remote before they go. After the
+ * turn that CARRIES the answer — in the conversation it was sent to, once
+ * the answer is there — the server looks at the remote; a commit still only
+ * on this Mac, the folder kept or already removed, is said to the bot, so no
+ * commit is lost unseen (INSP-R13fol #2, R2-4). Kept in the ledger. */
 const DISK_PUSH_CHECK_MS = 24 * 3_600_000;
 
-async function checkDiskPushes(botId: string): Promise<void> {
+async function checkDiskPushes(botId: string, threadId: string): Promise<void> {
   const now = Date.now();
-  for (const check of diskPushChecks.filter((each) => each.botId === botId)) {
-    // looked at once, after the bot's turn that followed the answer: said, then settled
-    diskPushChecks.splice(diskPushChecks.indexOf(check), 1);
-    if (now - check.at > DISK_PUSH_CHECK_MS) continue;
+  for (const check of autonomy.diskPushChecksOf(botId)) {
+    if (now - check.at > DISK_PUSH_CHECK_MS) { autonomy.dropDiskPushCheck(check); continue; }
+    // only the turn that carried the answer: its conversation, with the answer in it
+    if (check.threadId !== threadId) continue;
+    const carried = store.messagesFor(threadId).some((message) => message.role === "user" && message.at >= check.at - 1_000 && String(message.text ?? "").includes(check.marker));
+    if (!carried) continue;
+    autonomy.dropDiskPushCheck(check);
     const lines: string[] = [];
     for (const folder of check.folders) {
       // the remote-tracking branches holding the commit: a push from the worktree updates them
@@ -15015,10 +15017,15 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
   if (result.action === "keep") {
     // under the owner's answer, only what the answer itself allows, and every other folder forbidden (R13-followup #2, INSP-R13fol #1-#3)
     const allowed = answer ? diskAnswerLine(folders.map((folder) => folder.name), facts, answer, kept) : null;
-    if (answer?.kind === "option" && answer.label === DISK_PUSH_LABEL) {
-      // the server looks at the remote after the bot's next turn (INSP-R13fol #2)
-      const pending = folders.filter((folder) => answer.text && namedFolders(answer.text, [folder.name]).length && facts.get(folder.name)?.unpushed !== false && facts.get(folder.name)?.head);
-      if (pending.length) diskPushChecks.push({ botId: item.botId, threadId: item.threadId, at: Date.now(), folders: pending.map((folder) => ({ name: folder.name, head: facts.get(folder.name)!.head!, ...(facts.get(folder.name)!.branch ? { branch: facts.get(folder.name)!.branch! } : {}) })) });
+    // what must be pushed before it goes: looked for on the remote after the turn that carries the answer (INSP-R13fol #2, R2-4)
+    const covered = !answer?.text ? [] : answer.kind === "option" ? (answer.label === DISK_PUSH_LABEL || answer.label === DISK_BRANCH_LABEL ? namedFolders(answer.text, folders.map((folder) => folder.name)) : [])
+      : answer.kind === "text" ? (ownerRemovalIntent(answer.text, folders.map((folder) => folder.name))?.folders ?? []) : [];
+    const pending = covered.filter((name) => facts.get(name)?.unpushed !== false && facts.get(name)?.head && !facts.get(name)?.inUse);
+    if (pending.length && answer?.text) {
+      autonomy.addDiskPushCheck({
+        botId: item.botId, threadId: ownerTurnThread(item.botId, item.threadId), at: Date.now(), marker: answer.text.trim().split("\n")[0]!.slice(0, 60),
+        folders: pending.map((name) => ({ name, head: facts.get(name)!.head!, ...(facts.get(name)!.branch ? { branch: facts.get(name)!.branch! } : {}) })),
+      });
     }
     return { outcome: "keep", line: allowed ? `${line}\n${allowed}` : line };
   }
@@ -15179,10 +15186,24 @@ function openDiskDecisionFromReply(botId: string, threadId: string, text: string
  * the server's, and the owner's answer is checked again (R13-followup #2).
  * Null when the item is not about removing worktrees; otherwise what the
  * bot reads back. `replacing` is the bot's item it rewrote (update). */
-async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending): Promise<{ message: string; opened?: OwnerPending } | null> {
+/** A mixed item's removal part (INSP-R13fol R2-3: o1 URGENTE of 05/10 had a
+ * `git worktree remove` next to a `rm -rf`): the server's disk item opened
+ * beside it for those folders, and the bot's steps without the removal
+ * commands. Null when the item is not mixed or names no worktree. */
+async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: string, input: { title: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): Promise<{ steps: OwnerPendingStep[]; message: string } | null> {
   let names: string[];
   try { names = readdirSync(NURIA_WORKTREES); } catch { return null; }
-  const folders = botDiskItemFolders(input, names);
+  const split = splitMixedRemoval(input, names);
+  if (!split) return null;
+  const opened = await serverDiskItem(bot, threadId, input, undefined, split.folders);
+  return { steps: split.steps, message: opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor." };
+}
+
+async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending, beside?: LeftFolder[]): Promise<{ message: string; opened?: OwnerPending } | null> {
+  let names: string[];
+  try { names = readdirSync(NURIA_WORKTREES); } catch { return null; }
+  // `beside`: the removal part of a mixed item, the server's item opened next to the bot's (INSP-R13fol R2-3)
+  const folders = beside ?? botDiskItemFolders(input, names);
   if (!folders.length) return null;
   return diskItemTurn(async () => {
     // the bot's request waits on this: du gets 3 s in all, the rest stays "?" (INSP-R13fol #10)
@@ -15207,6 +15228,7 @@ async function serverDiskItem(bot: { id: string; name: string }, threadId: strin
     refreshBotRow(bot.id);
     const kept = item.diskKept.join("; ");
     console.log(`[disk] ${bot.name}'s own item about worktrees is the server's now: ${opened.id} (${item.key})${kept ? `; kept out: ${kept}` : ""}`);
+    if (beside) return { opened, message: `A remoção de worktrees deste item vai pelo item de disco do servidor, conferido no Mac: ${opened.id}: ${item.title}. Tirei do seu item os comandos de remoção; o resto ficou como você escreveu.${kept ? ` Fora do item de disco, não mexer: ${kept}.` : ""} Não remova worktree por este item.` };
     return { opened, message: `O servidor conferiu as pastas no Mac e abriu o item de disco dele no lugar do seu: ${opened.id}: ${item.title}.${was}${kept ? ` Fora do item, não mexer: ${kept}.` : ""} Os passos e as decisões são do servidor, que reconfere o item a cada passada da rotina de disco e na resposta do dono: não o reescreva. A resposta do dono chega com o que ela autoriza, e só isso pode sair.` };
   });
 }
@@ -21961,7 +21983,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             }
             return json(res, 200, { message: `${disk.message}${promotion && disk.opened ? ` Ele substitui a sua pergunta em "Precisa de você".` : ""}` });
           }
-          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
+          // a mixed item (push, rm -rf… and `worktree remove`): its removal part goes to the server's item beside it,
+          // its own removal commands leave it (INSP-R13fol R2-3)
+          const beside = await mixedRemovalBeside(bot, threadId, { title, ...structured });
+          const own = beside ? { ...structured, steps: beside.steps } : structured;
+          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...own });
           if (promotion) {
             autonomy.linkAskPromotion(promotion, item);
             refreshBotRow(bot.id);
@@ -21975,7 +22001,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const shape = practical(item);
           const superseding = markSuperseded(bot, item);
           const marked = superseding.length ? ` Marquei como superado, com decisões e comandos desligados: ${superseding.join(", ")}.` : "";
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced}${marked} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced}${marked}${beside ? ` ${beside.message}` : ""} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }
         if (body.action === "update") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -21998,13 +22024,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             const disk = await serverDiskItem(bot, current.threadId, { title: patch.title ?? current.title, why: structured.why ?? current.why, ...(current.command ? { command: current.command } : {}), steps: structured.steps ?? current.steps, options: structured.options ?? current.options }, current);
             if (disk) return json(res, 200, { message: disk.message });
           }
-          const item = autonomy.updateOwnerPending(bot.id, id, patch);
+          // the removal part of a mixed item: beside it, its commands out of it (INSP-R13fol R2-3)
+          const beside = current.key ? null : await mixedRemovalBeside(bot, current.threadId, { title: patch.title ?? current.title, ...(current.command ? { command: current.command } : {}), steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
+          const item = autonomy.updateOwnerPending(bot.id, id, beside ? { ...patch, steps: beside.steps } : patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
           const shape = practical(item);
           const superseding = markSuperseded(bot, item);
           const marked = superseding.length ? ` Marquei como superado, com decisões e comandos desligados: ${superseding.join(", ")}.` : "";
-          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${marked}` });
+          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${marked}${beside ? ` ${beside.message}` : ""}` });
         }
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -26074,9 +26102,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // settled by what this handler answers, when it answers — never by the client going away (r6 D1)
         onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
       }
-      // "Manter" removes nothing: never checked, never refused (INSP-R12F r4); nor does an answer that authorizes
-      // no removal ("Não remova nada", a question): it reaches the bot as the owner wrote it, with no line (INSP-R13fol #1)
-      if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answerRemoves(answer, keyFolders(item.key))) {
+      // "Manter" removes nothing: never checked, never refused (INSP-R12F r4). Every other answer is checked on the
+      // Mac and carries the state found now — words that authorize no removal ("sim", "pode decidir por mim…") too,
+      // with the server saying so to the bot and to the owner (INSP-R13fol R2-1)
+      const diskNotice = item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind === "text" && !answerRemoves(answer, keyFolders(item.key)) ? DISK_NOT_AUTHORIZED_NOTICE : undefined;
+      if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
         // in turn with a routine's pass: the item read after it, gone if that pass replaced it
         const check = await diskItemTurn(async () => {
           const now = autonomy.ownerPendingById(bot.id, item.id);
@@ -26130,7 +26160,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         else autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, threadId: target, resolved: 0 });
+        return json(res, 202, { ok: true, threadId: target, resolved: 0, ...(diskNotice ? { notice: diskNotice } : {}) });
       }
       if (!resolve) {
         // the item stays open and waits on the bot: what the bot must do next rides in
@@ -26146,7 +26176,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: false, queued: true, queueId: queued.id });
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0 });
+        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0, ...(diskNotice ? { notice: diskNotice } : {}) });
       }
       let receipt: Awaited<ReturnType<typeof startOrQueueDirectMessage>>;
       try {
@@ -26159,7 +26189,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id, by: "owner" }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation
-      return json(res, 202, { ...receipt, text, resolved: done.length });
+      return json(res, 202, { ...receipt, text, resolved: done.length, ...(diskNotice ? { notice: diskNotice } : {}) });
 
       function ownerAnswerFailed(botId: string, id: string, what: typeof answer, error: unknown) {
         const message = error instanceof Error ? error.message : String(error);

@@ -748,9 +748,11 @@ export function decisionNotice(item: Pick<NeedsYouItem, "options" | "botName" | 
 /** What the screen says after the person's own words were sent — or, when the
  * same words had already gone, the server's notice (INSP-R12F r6 D2). */
 export function replyNotice(item: Pick<NeedsYouItem, "botName" | "title">, resolve: boolean, result: unknown): string {
-  const info = (result as { info?: unknown } | undefined)?.info;
+  const { info, notice } = (result ?? {}) as { info?: unknown; notice?: unknown };
   if (typeof info === "string" && info) return info;
-  return t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title });
+  const sent = t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title });
+  // what the server says of the answer, after it was sent (INSP-R13fol R2-1)
+  return typeof notice === "string" && notice ? `${sent} ${notice}` : sent;
 }
 
 /** What the screen says after "Lembrar": sent, already on its way, or — in

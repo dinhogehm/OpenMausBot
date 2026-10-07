@@ -380,13 +380,15 @@ export function releasedScopeLine(repoName: string, plan: ReleasedPlan, tag: str
 }
 
 /** The folders not listed, in one parenthesis: "(e mais 188 pequenas, abaixo de 200 MB, e 1 que não consegui medir, não listadas)" (INSP-R13fol #11). */
-function notListed(small: number, unmeasured: number, min: string): string {
-  if (!small && !unmeasured) return "";
+function notListed(small: number, unmeasured: number, min: string, empty = 0): string {
+  if (!small && !unmeasured && !empty) return "";
   const parts = [
     small ? `mais ${small} pequena${small === 1 ? "" : "s"}, abaixo de ${min}` : "",
-    unmeasured ? `${small ? "" : "mais "}${unmeasured} que não consegui medir` : "",
+    // an empty folder is measured, 0 KB: said as such, never "não consegui medir" (R13-resilience R13-3)
+    empty ? `${small ? "" : "mais "}${empty} ${empty === 1 ? "vazia" : "vazias"}` : "",
+    unmeasured ? `${small || empty ? "" : "mais "}${unmeasured} que não consegui medir` : "",
   ].filter(Boolean);
-  return ` (e ${parts.join(", e ")}, não listada${small + unmeasured === 1 ? "" : "s"})`;
+  return ` (e ${parts.join(", e ")}, não listada${small + unmeasured + empty === 1 ? "" : "s"})`;
 }
 
 /** The idle folders outside the tag, biggest first, for a person: each with
@@ -397,7 +399,8 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   const shown = sorted.filter((each) => (each.sizeKb ?? 0) >= minKb);
   // not measured is not small (INSP-U r1 U2): counted apart
   const unmeasured = sorted.filter((each) => each.sizeKb === undefined || each.sizeKb === null).length;
-  const small = sorted.length - shown.length - unmeasured;
+  const empty = sorted.filter((each) => each.sizeKb === 0).length;
+  const small = sorted.length - shown.length - unmeasured - empty;
   if (!shown.length) return null;
   const totalKb = shown.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
   const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone, day: "2-digit", month: "2-digit" });
@@ -406,7 +409,7 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
   return {
     chip: `Disco: ${shown.length} pasta(s) parada(s) há mais de 72 h fora da tag, ${total} — informação para o dono, nada foi removido`,
-    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${notListed(small, unmeasured, sizeLabel(minKb))}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
+    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${notListed(small, unmeasured, sizeLabel(minKb), empty)}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
   };
 }
 
@@ -417,12 +420,14 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
 export function staleFoldersLogLine(stale: readonly StaleFolder[], minKb = STALE_MIN_KB): string {
   const measured = (each: StaleFolder) => each.sizeKb !== undefined && each.sizeKb !== null;
   const shown = stale.filter((each) => measured(each) && each.sizeKb! >= minKb).sort((a, b) => b.sizeKb! - a.sizeKb!);
-  const small = stale.filter((each) => measured(each) && each.sizeKb! < minKb).length;
+  const small = stale.filter((each) => measured(each) && each.sizeKb! > 0 && each.sizeKb! < minKb).length;
+  const empty = stale.filter((each) => each.sizeKb === 0).length;
   const unmeasured = stale.filter((each) => !measured(each));
   const totalKb = shown.reduce((sum, each) => sum + each.sizeKb!, 0);
   return [
     `${shown.length} folder(s) of ${sizeLabel(minKb)} or more, ~${shown.length ? sizeLabel(totalKb) : "0 MB"}${shown.length ? `: ${shown.map((each) => `${each.path} (${sizeLabel(each.sizeKb!)})`).join(", ")}` : ""}`,
     small ? `${small} smaller, not listed` : "",
+    empty ? `${empty} empty (0 KB)` : "",
     unmeasured.length ? `${unmeasured.length} not measured: ${unmeasured.slice(0, 5).map((each) => each.path).join(", ")}${unmeasured.length > 5 ? ", …" : ""}` : "",
   ].filter(Boolean).join("; ");
 }
@@ -447,6 +452,9 @@ export function diskAlertText(
   const head = `Pouco espaço em disco: ${String(drop.freeGiB).replace(".", ",")} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar.`;
   const rule = "Não remova nada por conta própria, nem node_modules: o que sai do disco é decisão do dono. Leve a ele o que ocupa espaço, com tamanho e comando, e espere o OK.";
   const big = [...(stale?.folders ?? [])].filter((each) => (each.sizeKb ?? 0) >= minKb).sort((a, b) => (b.sizeKb ?? 0) - (a.sizeKb ?? 0));
+  // an empty folder is measured (0 KB), never "unsized": counted on its own line (R13-resilience R13-3)
+  const empty = (stale?.folders ?? []).filter((each) => each.sizeKb === 0).length;
+  const emptyLine = empty ? ` E mais ${empty} ${empty === 1 ? "vazia" : "vazias"} (0 KB), que não liberam espaço.` : "";
   if (!stale || !big.length) {
     // du failed on some: not measured is not small (INSP-U r1 U2)
     const unsized = (stale?.folders ?? []).filter((each) => each.sizeKb === undefined || each.sizeKb === null);
@@ -455,7 +463,7 @@ export function diskAlertText(
       : stale
       ? "Na última medição do servidor não havia pasta grande parada há mais de 72 h fora da tag: veja caches de build e o $TMPDIR (du -sh) e diga ao dono o que achou."
       : "O servidor ainda não mediu as pastas paradas fora da tag (o relatório de worktrees sai a cada 6 h e avalia para remoção só as contidas na tag): não diga ao dono que nada pode ser removido; meça com du -sh e diga o que achou.";
-    return { chip: head, report: `${head} ${rule} ${unmeasured}` };
+    return { chip: head, report: `${head} ${rule} ${unmeasured}${emptyLine}` };
   }
   const totalKb = big.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
   const when = new Date(stale.at).toLocaleString("pt-BR", { timeZone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -465,7 +473,7 @@ export function diskAlertText(
   const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
   return {
     chip: `${head.replace(/\. Worktrees, CI local.*$/, "")} — ~${sizeLabel(totalKb)} em ${big.length} pasta(s) parada(s) fora da tag, para o dono decidir`,
-    report: `${head} ${rule} Medido pelo servidor em ${when}: ${big.length} pasta(s) parada(s) há mais de 72 h, fora da tag e ${nobodyIn(shown)}, ~${sizeLabel(totalKb)} no total — "nenhuma worktree pode ser removida" vale só para as contidas na tag, não para estas. As maiores${more ? ` (e mais ${more})` : ""}:\n${lines.join("\n")}\nOs comandos não usam --force; uma pessoa confere antes.${trash}`,
+    report: `${head} ${rule} Medido pelo servidor em ${when}: ${big.length} pasta(s) parada(s) há mais de 72 h, fora da tag e ${nobodyIn(shown)}, ~${sizeLabel(totalKb)} no total — "nenhuma worktree pode ser removida" vale só para as contidas na tag, não para estas. As maiores${more ? ` (e mais ${more})` : ""}:\n${lines.join("\n")}\nOs comandos não usam --force; uma pessoa confere antes.${trash}${emptyLine}`,
   };
 }
 

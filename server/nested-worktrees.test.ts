@@ -838,10 +838,17 @@ describe("the stale folders' log line (R13-followup #5)", () => {
     ];
     const told = staleFoldersReport(stale)!;
     expect(told.chip).toBe("Disco: 1 pasta(s) parada(s) há mais de 72 h fora da tag, ~271 MB — informação para o dono, nada foi removido");
-    expect(told.report).toContain("(e mais 188 pequenas, abaixo de 200 MB, e 1 que não consegui medir, não listadas)");
+    // 63 of 8 KB, 125 empty (0 KB: measured, never "não consegui medir"), 1 unmeasured
+    expect(told.report).toContain("(e mais 63 pequenas, abaixo de 200 MB, e 125 vazias, e 1 que não consegui medir, não listadas)");
     expect(staleFoldersReport([stale[0]!, stale.at(-1)!])!.report).toContain("(e mais 1 que não consegui medir, não listada)");
+    expect(staleFoldersReport([stale[0]!, stale[2]!])!.report).toContain("(e mais 1 vazia, não listada)");
+    // R13-resilience R13-3: the low-disk alert never counts an empty folder as unsized, and says the empty ones apart
+    const alert = diskAlertText({ freeGiB: 7, path: "/Users/osvaldo/Projetos", band: 8 }, { at: Date.parse("2026-10-07T02:10:15Z"), folders: stale.slice(1) });
+    expect(alert.report).toContain("Na última medição do servidor havia 1 pasta(s) parada(s) há mais de 72 h fora da tag cujo tamanho não consegui medir");
+    expect(alert.report).toContain("E mais 125 vazias (0 KB), que não liberam espaço.");
+    expect(diskAlertText({ freeGiB: 7, path: "/p", band: 8 }, { at: 0, folders: stale }).report).toContain("E mais 125 vazias (0 KB), que não liberam espaço.");
     const line = staleFoldersLogLine(stale);
-    expect(line).toBe(`1 folder(s) of 200 MB or more, ~271 MB: ${tw("b427dc32")} (271 MB); 188 smaller, not listed; 1 not measured: ${tw("timeout")}`);
+    expect(line).toBe(`1 folder(s) of 200 MB or more, ~271 MB: ${tw("b427dc32")} (271 MB); 63 smaller, not listed; 125 empty (0 KB); 1 not measured: ${tw("timeout")}`);
     expect(line).not.toContain("? KB");
   });
 });

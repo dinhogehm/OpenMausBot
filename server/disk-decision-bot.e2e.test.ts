@@ -99,8 +99,11 @@ it("a bot's own disk item is the server's; the owner's answer allows only what i
   ].join("\n");
   f.plan([
     { steps: [{ tool: "owner_pending", arguments: o28 }], reply: "Atualizei o item de disco." },
-    { expectContextIncludes: ["Não remova nada ainda."], reply: "Certo, não removo." },
+    { expectContextIncludes: ["Não remova nada ainda.", "[Servidor: conferido no Mac em ", "este texto não autoriza remover nenhuma pasta"], reply: "Certo, não removo." },
+    { expectContextIncludes: ["pode decidir por mim", "este texto não autoriza remover nenhuma pasta"], reply: "Não removo: preciso que você escolha." },
     { expectContextIncludes: ["Pode remover todos", "Push primeiro", "PROIBIDO remover qualquer outra pasta", keen], reply: "Faço o push primeiro." },
+    // the turn that carried "Pode remover todos" ended with the commit still only here: said once, after THAT turn
+    { expectContextIncludes: ["[Servidor: push conferido no remoto]", dirty], reply: "O push ainda não foi; não removo." },
     { expectContextIncludes: ["Push e remover", "ANTES de remover"], reply: "Vou fazer o push." },
     { expectContextIncludes: ["[Servidor: push conferido no remoto]", dirty], reply: "O push ainda não foi; não removo." },
     { reply: reply2310 },
@@ -121,15 +124,24 @@ it("a bot's own disk item is the server's; the owner's answer allows only what i
   expect(f.ledger().ownerPending.map((each: any) => each.key)).toEqual([`disk-decision:${dirty}`]);
   const current = f.ledger().ownerPending[0];
   expect(current.diskKept).toEqual(expect.arrayContaining([`${local} (há um processo vivo dentro dela)`, expect.stringMatching(new RegExp(`^${keen} \\(o próprio item dizia:`))]));
-  // "Não remova nada ainda.": no authorization, no line of the server
+  // R2-1: "Não remova nada ainda." and the owner's real answer of 06/10 11:47 are checked on the Mac, carry the state,
+  // and say to the bot that they authorize nothing — and to the owner that they were not read as an authorization
   const no = await f.reply(f.bot.id, current.id, { text: "Não remova nada ainda." });
   expect(no.status, await no.clone().text()).toBeLessThan(300);
+  expect(await no.json()).toMatchObject({ notice: "O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas." });
   await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(2);
-  expect((await f.said("Não remova nada ainda.")).text).not.toContain("[Servidor:");
+  const noText = (await f.said("Não remova nada ainda.")).text as string;
+  expect(noText).toContain("[Servidor: conferido no Mac em ");
+  expect(noText).toContain("[Servidor: este texto não autoriza remover nenhuma pasta. Não remova nada; se o dono quis autorizar, peça a ele que escolha uma decisão ou escreva quais pastas.]");
+  const real = await f.reply(f.bot.id, current.id, { text: "pode decidir por mim e fazer o que é necessario" });
+  expect(await real.json()).toMatchObject({ notice: expect.stringContaining("não leu isto como autorização") });
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
   // "Pode remover todos": no --force, the commits only here pushed first, every other folder forbidden
   const all = await f.reply(f.bot.id, current.id, { text: "Pode remover todos" });
   expect(all.status, await all.clone().text()).toBeLessThan(300);
-  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
+  expect((await all.json()).notice).toBeUndefined();
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(5);
+  expect(f.ledger().diskPushChecks ?? []).toEqual([]);
   const text = (await f.said("Pode remover todos")).text as string;
   expect(text).toContain(`Push primeiro: faça push da branch e confirme o commit no remoto ANTES de remover; sem isso, não remova (o dono não escreveu que os commits locais podem se perder): ${dirty} (branch ${dirty}).`);
   expect(text).toMatch(new RegExp(`PROIBIDO remover qualquer outra pasta, inclusive as que o item manteve: .*${local} \\(há um processo vivo dentro dela\\).*${keen} \\(o próprio item dizia:`));
@@ -138,18 +150,46 @@ it("a bot's own disk item is the server's; the owner's answer allows only what i
   // "Push e remover": push first; after the bot's turn the server looks at the remote and tells it the commit is not there
   const decided = await f.reply(f.bot.id, current.id, { option: 0, label: "Push e remover" });
   expect(decided.status, await decided.clone().text()).toBeLessThan(300);
-  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(5);
+  // kept in the ledger until the turn that carries the answer ends
+  expect(f.ledger().diskPushChecks).toEqual([expect.objectContaining({ botId: f.bot.id, threadId: f.bot.activeTaskId, folders: [expect.objectContaining({ name: dirty, branch: dirty })] })]);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(7);
+  expect(f.ledger().diskPushChecks ?? []).toEqual([]);
   expect((await f.said("Push e remover") ?? await f.said("push da branch")).text).toContain("ANTES de remover");
   const chips = ((await f.api(`/api/threads/${f.bot.activeTaskId}/messages?limit=200`, undefined, "GET")).messages as any[]).map((message) => String(message.tool?.name ?? ""));
   expect(chips).toContain(`Disco: push ainda não está no remoto — ${dirty}`);
   // 23:10: a reply that leaves two worktrees to the owner, "vazias", with the commands — an item, with the size measured
   await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "Relatório de disco.");
-  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(6);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(8);
   await expect.poll(() => (f.ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 15_000 }).toContain(`disk-decision:${n1},${n1b}`);
   const n1Item = f.ledger().ownerPending.find((each: any) => each.key?.startsWith(`disk-decision:${n1},${n1b}`));
   expect(n1Item.title).toMatch(new RegExp(`^Decidir o destino de 2 worktrees paradas \\(~\\d+ (?:MB|KB)\\): ${n1}, ${n1b}$`));
   expect(n1Item.why.startsWith("A remoção dessas worktrees é sua; o servidor conferiu cada uma no Mac.")).toBe(true);
 }), 150_000);
+
+// INSP-R13fol R2-3, as the o1 URGENTE of 05/10: a rm -rf of task-workspaces and,
+// beside it, a `git worktree remove`. The bot's item keeps its rm -rf; the
+// removal goes to the server's disk item, and its command leaves the bot's item.
+it("a mixed item keeps its other ask; its worktree removal goes to the server's item beside it", () => diskFixture(async (f) => {
+  f.plan([{ steps: [{ tool: "owner_pending", arguments: {
+    action: "add", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando", why: "O disco caiu para 4 GiB durante o release.",
+    steps: [
+      { text: "Apagar as pastas de trabalho paradas do Eng (2,2 GB)", command: "rm -rf ~/.openmausbot/task-workspaces/82feff85*/fa9d2302*" },
+      { text: `Opcional: remover a worktree ${dirty} (848 MB)`, command: `git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${dirty}` },
+    ],
+    options: [{ label: "Apaguei as duas", reply: "Apaguei as pastas paradas e a worktree, confira o disco.", recommended: true, why: "Volta a ~11 GiB livres." }, { label: "Só as pastas", reply: "Apaguei só as pastas paradas." }],
+  } }], reply: "Abri o item." }]);
+  await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "O disco está acabando.");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "owner_pending")).toContain("A remoção de worktrees deste item vai pelo item de disco do servidor, conferido no Mac");
+  const open = f.ledger().ownerPending as any[];
+  const own = open.find((each) => !each.key);
+  const disk = open.find((each) => each.key?.startsWith("disk-decision:"));
+  expect(own.title).toBe("URGENTE: liberar disco, 4 GiB livres com release de produção rodando");
+  expect(own.steps[0].command).toBe("rm -rf ~/.openmausbot/task-workspaces/82feff85*/fa9d2302*");
+  expect(own.steps[1].command).toBeUndefined();
+  expect(own.steps[1].text).toContain("a remoção vai pelo item de disco do servidor");
+  expect(disk.key).toBe(`disk-decision:${dirty}`);
+}), 120_000);
 
 // INSP-R13fol #6: a bot that asks "Quer que eu remova…?" is asked by the
 // server to open the item with replacesAsk — that item is the server's disk
