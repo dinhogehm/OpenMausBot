@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
-  cliDependencyLine, cliWorktreePlan, prepareCliWorktree, pruneDanglingLinks, type OwnPlan,
+  cliDependencyLine, cliWorktreePlan, prepareCliWorktree, pruneDanglingLinks, SEEDED_START_MAX_MS, seededStartChain, type OwnPlan,
 } from "./own-worktrees.ts";
 import { ccTurnArgs } from "./cc-sessions.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -649,6 +649,58 @@ describe("a headless session's worktree, seeded like the app's (R13-gate G2)", (
 
 // R13-dispatch R13-2(d): 06/10, 13 aliases in ~/Projetos/.omb-worktree-links/
 // nuria-platform/ pointed at worktrees removed by hand (the 9032 ones among them).
+// INSP-R13dis 3 and R2-1: the seeded starts spawn in the order they came,
+// and a start that hangs (a clone stuck, git waiting) holds the next ones for
+// SEEDED_START_MAX_MS at most: then it goes the old way and the queue moves.
+describe("the seeded headless starts: in order, each with a deadline (R2-1)", () => {
+  /** Timers run by hand: the deadline fires when the test says. */
+  function clock() {
+    const pending = new Map<number, { run: () => void; ms: number }>();
+    let next = 0;
+    return {
+      timers: { set: (run: () => void, ms: number) => { pending.set(++next, { run, ms }); return next; }, clear: (timer: unknown) => { pending.delete(timer as number); } },
+      fire: () => { for (const [id, each] of pending) { pending.delete(id); each.run(); } },
+      pending: () => [...pending.values()].map((each) => each.ms),
+    };
+  }
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("a start that hangs gives way at its deadline: it goes the old way, sees itself late, and the next one spawns", async () => {
+    const c = clock();
+    const enqueue = seededStartChain(SEEDED_START_MAX_MS, c.timers);
+    const log: string[] = [];
+    let hungLive: () => boolean = () => true;
+    // 1st: hangs forever (a clone that never ends)
+    void enqueue((live) => { hungLive = live; log.push("hung started"); return new Promise<void>(() => {}); }, (why) => log.push(`hung late: ${why}`));
+    // 2nd: a P2 behind it, quick
+    const second = enqueue(async (live) => { log.push(`second spawned (live ${live()})`); }, (why) => log.push(`second late: ${why}`));
+    await tick();
+    expect(log).toEqual(["hung started"]);
+    expect(c.pending()).toEqual([180_000]);
+    expect(hungLive()).toBe(true);
+    c.fire(); // 3 min pass
+    await second;
+    expect(log).toEqual(["hung started", "hung late: a preparação da worktree passou de 180 s", "second spawned (live true)"]);
+    // the hung one, should it ever end, knows it must spawn nothing
+    expect(hungLive()).toBe(false);
+    expect(c.pending()).toEqual([]);
+  });
+
+  it("keeps the order of the starts (a P1 first stays first), and a throw is the old way too, the next going on", async () => {
+    const c = clock();
+    const enqueue = seededStartChain(SEEDED_START_MAX_MS, c.timers);
+    const log: string[] = [];
+    const slow = (name: string) => async () => { await tick(); await tick(); log.push(name); };
+    void enqueue(slow("P1 #9906"), () => log.push("P1 late"));
+    void enqueue(() => { throw new Error("git: not found"); }, (why) => log.push(`P2 late: ${why}`));
+    const last = enqueue(async () => { log.push("P2 #9905"); }, () => log.push("P2 #9905 late"));
+    await last;
+    expect(log).toEqual(["P1 #9906", "P2 late: git: not found", "P2 #9905"]);
+    // every deadline cleared once its start ended
+    expect(c.pending()).toEqual([]);
+  });
+});
+
 describe("the aliases whose worktree is gone (R13-2d)", () => {
   it("are removed, and only they: a live alias, a session's own, a plain folder or file, another repository's stay", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "omb-links-")));

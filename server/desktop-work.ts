@@ -854,7 +854,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       deps.ledger.save();
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
-        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}), trustClicks: pending.trustClicks ?? 0 })
+        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}), trustClicks: pending.trustClicks ?? 0, branch: own.branch })
         : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);

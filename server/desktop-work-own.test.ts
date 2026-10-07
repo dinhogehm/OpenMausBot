@@ -106,7 +106,7 @@ describe("a create with a worktree of the server's", () => {
     await runDesktopWork(h.deps, h.state);
     expect(h.steps.create).not.toHaveBeenCalled();
     // with the worktree's own path, by which a "trust this workspace" prompt is judged ours
-    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function), trustClicks: 0 });
+    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function), trustClicks: 0, branch: "omb/9353-comprar-assentos" });
     expect(session.desktop!.sentAt).toBe(h.now);
   });
 

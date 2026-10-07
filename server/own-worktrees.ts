@@ -709,6 +709,41 @@ export async function prepareCliWorktree(repo: string, name: string, io: { add: 
   return { ok: true, plan, caches };
 }
 
+/** How long one seeded headless start may hold the ones after it. */
+export const SEEDED_START_MAX_MS = 180_000;
+
+/** The seeded headless starts, one after another in the order they came (a
+ * P1 the queue opened first spawns first — INSP-R13dis 3), each with a
+ * deadline: past it, its `late` runs (the old way, -w) and the next start
+ * goes on; the slow one sees `live()` false from then on and must spawn
+ * nothing (INSP-R13dis R2-1). A throw before the deadline is `late` too. */
+export function seededStartChain(deadlineMs = SEEDED_START_MAX_MS, timers: { set: (run: () => void, ms: number) => unknown; clear: (timer: unknown) => void } = { set: (run, ms) => setTimeout(run, ms), clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) }) {
+  let chain: Promise<void> = Promise.resolve();
+  return (start: (live: () => boolean) => Promise<void>, late: (why: string) => void): Promise<void> => {
+    chain = chain.then(() => new Promise<void>((resolve) => {
+      let over = false;
+      const finish = (why: string | null) => {
+        if (over) return;
+        over = true;
+        timers.clear(timer);
+        if (why !== null) {
+          try { late(why); } catch { /* the next start goes on all the same */ }
+        }
+        resolve();
+      };
+      const timer = timers.set(() => finish(`a preparação da worktree passou de ${Math.round(deadlineMs / 1000)} s`), deadlineMs);
+      let running: Promise<void>;
+      try {
+        running = start(() => !over);
+      } catch (error) {
+        running = Promise.reject(error);
+      }
+      running.then(() => finish(null), (error: unknown) => finish(failureText(error)));
+    }));
+    return chain;
+  };
+}
+
 /** The line a headless session's first brief carries about its dependencies:
  * cloned and checked — do not install; otherwise install before anything,
  * and above all before the gate (ci:local, pr:merge). */
@@ -888,6 +923,7 @@ function missedCause(reason: string): string {
   if (/New Session did not show a new session's screen/i.test(reason)) return "a sessão nova pelo jeito antigo também não apareceu (a tela mostrou uma conversa)";
   if (/no empty task field/i.test(reason)) return "o link do app não abriu uma sessão nova (a tela mostrou uma conversa, sem o campo vazio de tarefa)";
   if (/does not show the folder|shows another folder in its chips/i.test(reason)) return "a sessão nova mostrou outra pasta nos chips (a da sessão anterior), não a worktree do OMB";
+  if (/could not read the new session's folder chip/i.test(reason)) return "não deu para ler o chip da pasta na sessão nova (nenhum nome de pasta legível na tela)";
   if (/cut short to a start that another worktree/i.test(reason)) return "o nome da pasta nos chips veio cortado e serve para mais de uma worktree; não dá para saber se é a do OMB";
   if (/again after the server clicked it once/i.test(reason)) return "o app pediu de novo para confiar no workspace depois do clique do servidor";
   if (/scratch folder/i.test(reason)) return "a sessão nova mostrou uma pasta de rascunho (scratch) do app";

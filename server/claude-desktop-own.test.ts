@@ -410,9 +410,10 @@ describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous
     return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} [info] ${text}`;
   };
   const screenFrom = (seen: string) => seen.split(" | ");
-  const ocr = (seen: string) => screenFrom(seen).map((text) => ({ x: 600, y: 800, w: 200, h: 16, text }));
+  const ocr = (seen: string) => screenFrom(seen).map((text, i) => ({ x: 600, y: 700 + i * 30, w: 200, h: 16, text }));
   const names = (paths: readonly string[]) => paths.map((path) => path.split("/").pop()!);
-  const chipOf = ([at, , folder, seen]: [string, string, string, string]) => folderChip(ocr(seen), folder, () => names(world(folder, at).listed));
+  // with the branch the server gives each worktree (omb/<folder>): the branch chip corroborates a cut (R2-3)
+  const chipOf = ([at, , folder, seen]: [string, string, string, string]) => folderChip(ocr(seen), folder, () => names(world(folder, at).listed), `omb/${folder}`);
 
   it("are 16: in 4 the chip is ours (cut, and no other worktree starts so), in 2 the cut is ambiguous (035161dc with 472b5524's worktree there), in 10 another folder", () => {
     expect(REAL_TRUST_16).toHaveLength(16);
@@ -458,6 +459,37 @@ describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous
     const [at2, , folder2, seen2] = REAL_TRUST_16[5]!;
     expect(seen2).toContain("9378-supervisor-do-ate");
     expect(folderChip(ocr(seen2), folder2, () => names(world(folder2, at2).listed))).toBe("none");
+  });
+
+  it("no folder chip read at all (OCR, or not drawn yet) is not \"another folder\": a plain miss to try again — no cli, no breaker; the 16 keep their way (R2-2)", async () => {
+    // the 16: each had a folder chip read, so none of them is "unread" (the table above stands)
+    expect(REAL_TRUST_16.map((row) => chipOf(row)).filter((chip) => chip === "unread")).toEqual([]);
+    const [at, , folder] = REAL_TRUST_16[8]!;
+    const { ours, listed } = world(folder, at);
+    for (const blind of [
+      ["Confiar no workspace", "• Local", "2º omb/9337-sobrecarga-d1-no-e... 1O worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Automático"],
+      ["• Local", "|O worktree", "Descreva uma tarefa ou faça uma pergunta", "Médio"],
+      ["Descreva uma tarefa ou faça uma pergunta", "• nuria-platform"],
+    ]) {
+      expect(folderChip(blind.map((text, i) => ({ x: 600, y: 700 + i * 30, w: 200, h: 16, text })), folder, () => names(listed))).toBe("unread");
+      const app = fakeApp([blind]);
+      const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed });
+      expect(step).toMatchObject({ ok: false, miss: true, retry: true });
+      expect((step as { previousFolder?: boolean }).previousFolder).toBeUndefined();
+      expect((step as { cliNow?: boolean }).cliNow).toBeUndefined();
+      expect(!step.ok && step.reason).toContain("could not read the new session's folder chip");
+      expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+    }
+  });
+
+  it("the branch chip corroborates a cut: the 4 real cuts fit their omb/ branch, and a cut whose branch chip is another one is ambiguous (R2-3)", () => {
+    const [at, , folder, seen] = REAL_TRUST_16[0]!;
+    const listed = names(world(folder, at).listed);
+    expect(folderChip(ocr(seen), folder, () => listed, `omb/${folder}`)).toBe("cut");
+    expect(folderChip(ocr(seen.replace("omb/9378-supervisor-do-aten...", "omb/9378-supervisor-papel-b...")), folder, () => listed, `omb/${folder}`)).toBe("ambiguous");
+    expect(folderChip(ocr(seen.replace("omb/9378-supervisor-do-aten...", "omb/9378-supervisor-do-atendimento-x")), folder, () => listed, `omb/${folder}`)).toBe("ambiguous");
+    // no branch chip read: the cut stands on the worktree list alone
+    expect(folderChip(ocr(seen.replace("2º omb/9378-supervisor-do-aten... ", "")), folder, () => listed, `omb/${folder}`)).toBe("cut");
   });
 
   it("our chip (472b5524, 16:00): the log or the prompt naming ANOTHER folder since the link — no click, named; the X3-2 git check still asked", async () => {

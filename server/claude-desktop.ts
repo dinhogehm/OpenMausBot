@@ -563,22 +563,50 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
  * start of it that no other worktree git lists for the repository (`others`,
  * their folder names) also starts with; "ambiguous" — that start fits
  * another one too (05/10 18:37Z: "9378-supervisor-do-ate…." fit both
- * …-035161, asked for, and 472b5524's worktree, the folder before); or
- * "none" (INSP-R13dis 2). */
-export function folderChip(lines: OcrLine[], name: string, others: () => readonly string[]): "exact" | "cut" | "ambiguous" | "none" {
+ * …-035161, asked for, and 472b5524's worktree, the folder before), or the
+ * branch chip ("omb/…", cut too) that does not start `branch`, ours (R2-3);
+ * "none" — a chip of ANOTHER folder was read; "unread" — no folder chip at
+ * all could be read (OCR, or the chips not drawn yet): not "another folder"
+ * (INSP-R13dis 2, R2-2). */
+export function folderChip(lines: OcrLine[], name: string, others: () => readonly string[], branch?: string): "exact" | "cut" | "ambiguous" | "none" | "unread" {
   const wanted = name.toLowerCase();
+  const strip = (raw: string) => raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
+  const uncut = (word: string) => word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
   let cutSeen: string | null = null;
   for (const line of lines) {
     for (const raw of line.text.toLowerCase().split(/\s+/)) {
-      const word = raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
+      const word = strip(raw);
       if (word === wanted) return "exact";
-      const cut = word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
+      const cut = uncut(word);
       if (cut !== word && cut.length >= 10 && wanted.startsWith(cut)) cutSeen = cut;
     }
   }
-  if (!cutSeen) return "none";
+  if (!cutSeen) {
+    // a folder chip of another folder: one word of its own (a bullet before it at most) above the empty field —
+    // "• nuria-platform", "• 9337-sobrecarga-d1-no-...", "9378-supervisor-papel-..."; not "• Local", a branch, the worktree option
+    const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+    const above = field ? lines.filter((line) => line.y < field.y) : lines;
+    const folder = above.some((line) => {
+      const text = line.text.trim().replace(/^[•·]\s*/, "");
+      return /^[A-Za-z0-9][\w.-]*(?:…|\.{2,})?[.,·'"]*$/.test(text) && text.length >= 3 && !/^local$/i.test(text) && !/worktree/i.test(text);
+    });
+    return folder ? "none" : "unread";
+  }
   const prefix = cutSeen;
-  return others().some((other) => other.toLowerCase() !== wanted && other.toLowerCase().startsWith(prefix)) ? "ambiguous" : "cut";
+  if (others().some((other) => other.toLowerCase() !== wanted && other.toLowerCase().startsWith(prefix))) return "ambiguous";
+  // the branch chip, when read, must fit ours too ("2º omb/9378-supervisor-do-aten..." for omb/9378-supervisor-do-atendimento)
+  if (branch) {
+    const ownBranch = branch.toLowerCase();
+    for (const line of lines) {
+      for (const raw of line.text.toLowerCase().split(/\s+/)) {
+        const word = strip(raw);
+        if (!word.startsWith("omb/")) continue;
+        const shown = uncut(word);
+        if (shown === word ? shown !== ownBranch : !ownBranch.startsWith(shown)) return "ambiguous";
+      }
+    }
+  }
+  return "cut";
 }
 
 /**
@@ -591,7 +619,7 @@ export function folderChip(lines: OcrLine[], name: string, others: () => readonl
  * outside .claude/worktrees: the app maps folders inside it back to the
  * repository root); `folderName` is what its chip shows.
  */
-export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[]; trustLog?: () => string; trustClicks?: number }): Promise<DesktopStep> {
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[]; trustLog?: () => string; trustClicks?: number; branch?: string }): Promise<DesktopStep> {
   if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
   return withScreen(driver, async (screen) => {
     const opened = Date.now();
@@ -614,7 +642,9 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       // says (it follows the composer: 06/10 03:31:25 checkTrust of the folder
       // before), and no second try — no click fixes a link that reuses the
       // folder before; the create goes on in the cli (INSP-R13dis 1, 2, 7).
-      const chip = folderChip(lines, input.folderName, () => registered().map((path) => path.split("/").filter(Boolean).pop() ?? path));
+      const chip = folderChip(lines, input.folderName, () => registered().map((path) => path.split("/").filter(Boolean).pop() ?? path), input.branch);
+      // no folder chip read at all: a miss to try again, never "another folder" — not the cli, not the breaker (R2-2)
+      if (chip === "unread") return { ok: false, reason: `could not read the new session's folder chip (expected ${input.folderName}); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
       if (chip === "none" || chip === "ambiguous") {
         return { ok: false, reason: chip === "none" ? `the new session shows another folder in its chips (the folder before), not ${input.folderName}; nothing was clicked or typed` : `the new session's folder chip is cut short to a start that another worktree of the repository shares, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, previousFolder: true, seen: seenText(lines.slice(-8)) };
       }
