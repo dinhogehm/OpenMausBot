@@ -259,6 +259,8 @@ export interface OwnerPending {
   rowChecks?: RowCheck[];
   /** A disk item's folders kept out, each "name (why)" (INSP-R13fol #8). */
   diskKept?: string[];
+  /** A bot's mixed item: the folders whose removal was taken to the server's disk item — an answer naming them authorizes nothing (R5-1). */
+  diskMoved?: string[];
 }
 
 /** One answer of the person to an item (J18). */
@@ -1616,7 +1618,7 @@ export class BotAutonomy {
    * item ("pedido há 2 min") until the bot updates it. */
   /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
    * ("Talvez já resolvido"). An undefined value clears the field. */
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "supersededBy" | "rowChecks">>): OwnerPending | null {
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "supersededBy" | "rowChecks" | "diskMoved">>): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {

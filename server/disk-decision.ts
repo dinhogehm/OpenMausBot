@@ -115,7 +115,45 @@ export function botItemAsk(input: { title: string; command?: string; steps?: Rea
  * with a removal is never rewritten: cutting `remove X || rm -rf X` left an
  * unconditional `rm -rf X` (INSP-R13fol R4-1). */
 export function onlyRemoval(command: string): boolean {
-  return /^\s*git\s+(?:-C\s+\S+\s+)?worktree\s+remove(?:\s+(?:--force|-f))*\s+[^\s;&|()$`<>]+\s*$/.test(command);
+  // `-C` takes one plain path too: no `;`, `$`, quotes or the like (INSP-R13fol R5-3)
+  return /^\s*git\s+(?:-C\s+[^\s;&|()$`<>'"]+\s+)?worktree\s+remove(?:\s+(?:--force|-f))*\s+[^\s;&|()$`<>'"]+\s*$/.test(command);
+}
+
+/** A bot's decision that removes a worktree: a command, words of removal
+ * with "worktree"/"pasta", or the name of a folder taken to the server
+ * (R5-1: "Pode remover a worktree da 9378…", "Pode limpar 1 e 2"). */
+export function optionRemoves(option: { label: string; reply: string }, moved: readonly string[], folders: readonly string[]): boolean {
+  const said = `${option.label}\n${option.reply}`;
+  if (/worktree\s+remove/.test(said)) return true;
+  const removes = /(?<![\p{L}])(?:remov|apag|limp|exclu|descart)\p{L}*/iu.test(said);
+  if (removes && /(?<![\p{L}])(?:worktrees?|pastas?)(?![\p{L}])/iu.test(said)) return true;
+  // a folder taken to the server named — unless the decision only keeps it ("Mantenha a worktree da 9378")
+  const keeps = !removes && /(?<![\p{L}])(?:mant\p{L}*|preserv\p{L}*|guard\p{L}*|deix\p{L}*)/iu.test(said);
+  return !keeps && namedFolders(said, folders, true).some((name) => moved.includes(name));
+}
+
+/** The words of an answer that touch folders taken to the server: a moved folder named, or "worktree"/"pasta" (R5-1). */
+export function answerTouchesMoved(text: string, moved: readonly string[], folders: readonly string[]): boolean {
+  return namedFolders(text, folders, true).some((name) => moved.includes(name)) || /(?<![\p{L}])(?:worktrees?|pastas?)(?![\p{L}])/iu.test(text);
+}
+
+/** The removal commands of a bot's item that name no worktree the server checks
+ * (another repository, `nuria-platform/.worktrees/`, R5-2): out of the item,
+ * whole, the step saying so. Null when it has none. */
+export function stripUncheckedRemovals<S extends { text: string; command?: string }, O extends { label: string; reply: string }>(input: { steps?: readonly S[]; options?: readonly O[] }): { steps: S[]; options?: O[]; count: number } | null {
+  const steps = input.steps ?? [];
+  const removing = steps.filter((step) => step.command && /worktree\s+remove/.test(step.command)).length + (input.options ?? []).filter((option) => /worktree\s+remove/.test(option.reply)).length;
+  if (!removing) return null;
+  const note = "(comando retirado: remove uma worktree que o servidor não confere; a remoção precisa de um item de disco do servidor ou do dono no terminal)";
+  return {
+    steps: steps.map((step) => {
+      if (!step.command || !/worktree\s+remove/.test(step.command)) return step;
+      const { command: _command, ...rest } = step;
+      return { ...rest, text: `${step.text} ${note}`.slice(0, 500) } as S;
+    }),
+    ...(input.options ? { options: input.options.map((option) => (/worktree\s+remove/.test(option.reply) ? { ...option, reply: `${option.label}: a remoção de worktree não vai por este item; o servidor não confere essa pasta.`.slice(0, 500) } : option)) } : {}),
+    count: removing,
+  };
 }
 
 /** The size the text says right after a folder's name ("8891-503-diag e 8891-inbox-503 (215 MB cada)"), never one said before it (R3-5). */
@@ -169,8 +207,10 @@ export function splitMixedRemoval<S extends { text: string; command?: string }, 
     steps,
     mixedCommands,
     ...(input.options ? {
-      options: input.options.map((option) => (/worktree\s+remove/.test(option.reply)
-        ? { ...option, reply: `${option.label}: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac; por este item, não remova nenhuma worktree.`.slice(0, 500) }
+      // every decision that removes, in a command or in words ("Pode remover a worktree da 9378…", "Pode limpar 1 e 2…"),
+      // or that names a folder taken to the server: only the server's buttons remove (INSP-R13fol R3-3, R5-1)
+      options: input.options.map((option) => (optionRemoves(option, names, folders)
+        ? { ...option, reply: `${option.label}: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.`.slice(0, 500) }
         : option)),
     } : {}),
   };

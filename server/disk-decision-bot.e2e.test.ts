@@ -154,7 +154,7 @@ it("a bot's own disk item is the server's; only its buttons authorize a removal"
   await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(6);
   expect(pushLine ?? (await f.said("push da branch de cada uma")).text).toMatch(new RegExp(`PROIBIDO remover qualquer outra pasta, inclusive as que o item manteve: .*${local} \\(há um processo vivo dentro dela\\).*${keen} \\(o próprio item dizia:`));
   expect(f.ledger().diskPushChecks ?? []).toEqual([]);
-  expect((await f.said("Push e remover") ?? await f.said("push da branch")).text).toContain("ANTES de remover");
+  expect((await f.said("push da branch de cada uma")).text).toContain("ANTES de remover");
   const chips = ((await f.api(`/api/threads/${f.bot.activeTaskId}/messages?limit=200`, undefined, "GET")).messages as any[]).map((message) => String(message.tool?.name ?? ""));
   expect(chips).toContain(`Disco: push ainda não está no remoto — ${dirty}`);
   // 23:10: a reply that leaves two worktrees to the owner, "vazias", with the commands — an item, with the size measured
@@ -177,7 +177,9 @@ it("a mixed item keeps its other ask; its worktree removal goes to the server's 
       { text: `Opcional: remover a worktree ${dirty} (848 MB)`, command: `git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${dirty}` },
     ],
     options: [{ label: "Apaguei as duas", reply: "Apaguei as pastas paradas e a worktree, confira o disco.", recommended: true, why: "Volta a ~11 GiB livres." }, { label: "Só as pastas", reply: "Apaguei só as pastas paradas." }],
-  } }], reply: "Abri o item." }]);
+  } }], reply: "Abri o item." },
+  // R5-1: the owner's words about the worktree taken to the server reach the bot saying they authorize nothing
+  { expectContextIncludes: ["Pode remover a 503 também", "texto livre não autoriza remover nenhuma pasta"], reply: "Não removo por este item." }]);
   await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "O disco está acabando.");
   await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(1);
   expect(toolResult(f.turns()[0], "owner_pending")).toContain("A remoção de worktrees deste item vai pelo item de disco do servidor, conferido no Mac");
@@ -189,6 +191,15 @@ it("a mixed item keeps its other ask; its worktree removal goes to the server's 
   expect(own.steps[1].command).toBeUndefined();
   expect(own.steps[1].text).toContain("a remoção vai pelo item de disco do servidor");
   expect(disk.key).toBe(`disk-decision:${dirty}`);
+  // R5-1: the bot's decisions that removed in words point to the server's item; the folders taken there are kept on the item
+  expect(own.options.map((option: any) => option.reply)).toEqual([
+    "Apaguei as duas: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
+    "Só as pastas: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
+  ]);
+  expect(own.diskMoved).toEqual([dirty]);
+  const said = await f.reply(f.bot.id, own.id, { text: "Pode remover a 503 também" });
+  expect(said.status, await said.clone().text()).toBeLessThan(300);
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(2);
 }), 120_000);
 
 // INSP-R13fol R3-4: a push check whose turn is never seen (the answer edited,

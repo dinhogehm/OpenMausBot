@@ -136,7 +136,7 @@ import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
-import { asksOwnerToDecide, botDiskItemFolders, busyNote, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskTextNotice, keepsFolders, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
+import { answerTouchesMoved, asksOwnerToDecide, botDiskItemFolders, botItemAsk, busyNote, DISK_NOT_AUTHORIZED, stripUncheckedRemovals, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskTextNotice, keepsFolders, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
 import { checkItemRows, fixedRowWarning, RowCheckBackoff, supersededItems, supersededLine, supersedeRefs } from "./owner-pending-guard.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -15211,15 +15211,22 @@ function openDiskDecisionFromReply(botId: string, threadId: string, text: string
  * `git worktree remove` next to a `rm -rf`): the server's disk item opened
  * beside it for those folders, and the bot's steps without the removal
  * commands. Null when the item is not mixed or names no worktree. */
-async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: string, input: { title: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): Promise<{ steps: OwnerPendingStep[]; options?: OwnerPendingOption[]; message: string } | null> {
+async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: string, input: { title: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): Promise<{ steps: OwnerPendingStep[]; options?: OwnerPendingOption[]; moved?: string[]; message: string } | null> {
   let names: string[];
-  try { names = readdirSync(NURIA_WORKTREES); } catch { return null; }
+  try { names = readdirSync(NURIA_WORKTREES); } catch { names = []; }
   const split = splitMixedRemoval(input, names);
-  if (!split) return null;
+  if (!split) {
+    // a removal of a worktree the server does not check (another repository, .worktrees/): out of the item, whole (R5-2)
+    if (botItemAsk(input) === "other") return null;
+    const unchecked = stripUncheckedRemovals(input);
+    if (!unchecked) return null;
+    console.log(`[disk] ${bot.name}'s item: ${unchecked.count} removal(s) of a worktree the server does not check taken out`);
+    return { steps: unchecked.steps, ...(unchecked.options ? { options: unchecked.options } : {}), message: `Tirei do seu item ${unchecked.count === 1 ? "o comando" : `${unchecked.count} comandos`} de remoção de uma worktree que o servidor não confere (fora de nuria-platform/.claude/worktrees): não a remova por este item; peça ao dono que a remova no terminal.` };
+  }
   const opened = await serverDiskItem(bot, threadId, input, undefined, split.folders);
   // a command that mixed the removal with other steps left whole: the bot writes the other part on its own (INSP-R13fol R4-1)
   const mixed = split.mixedCommands ? ` ${split.mixedCommands === 1 ? "Um comando seu misturava" : `${split.mixedCommands} comandos seus misturavam`} remoção de worktree com outros passos e saiu inteiro: se a outra parte ainda vale, reescreva-a num passo próprio, sem remoção de worktree.` : "";
-  return { steps: split.steps, ...(split.options ? { options: split.options } : {}), message: `${opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor."}${mixed}` };
+  return { steps: split.steps, ...(split.options ? { options: split.options } : {}), moved: split.folders.map((folder) => folder.name), message: `${opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor."}${mixed} As decisões deste item que removiam worktree agora apontam para o item do servidor.` };
 }
 
 async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending, beside?: LeftFolder[]): Promise<{ message: string; opened?: OwnerPending } | null> {
@@ -22011,6 +22018,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const beside = await mixedRemovalBeside(bot, threadId, { title, ...structured });
           const own = beside ? { ...structured, steps: beside.steps, ...(beside.options ? { options: beside.options } : {}) } : structured;
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...own });
+          // the folders taken to the server: an answer naming them authorizes nothing (R5-1)
+          if (beside?.moved?.length) autonomy.patchOwnerPending(bot.id, item.id, { diskMoved: beside.moved });
           if (promotion) {
             autonomy.linkAskPromotion(promotion, item);
             refreshBotRow(bot.id);
@@ -22051,6 +22060,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const beside = current.key ? null : await mixedRemovalBeside(bot, current.threadId, { title: patch.title ?? current.title, ...(current.command ? { command: current.command } : {}), steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
           const item = autonomy.updateOwnerPending(bot.id, id, beside ? { ...patch, steps: beside.steps, ...(beside.options ? { options: beside.options } : {}) } : patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
+          if (beside?.moved?.length) autonomy.patchOwnerPending(bot.id, id, { diskMoved: [...new Set([...(item.diskMoved ?? []), ...beside.moved])] });
           refreshBotRow(bot.id);
           const shape = practical(item);
           const superseding = markSuperseded(bot, item);
@@ -26144,6 +26154,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       // a superseded item's words and asks reach its bot saying so: its commands must not run (INSP-R13fol #16)
       if (item.supersededBy) text = `${text}\n\n[Servidor: ${supersededLine(item.supersededBy)}]`;
+      // a bot's mixed item whose removal went to the server's item: an answer about those folders authorizes nothing (R5-1)
+      if (!item.key && item.diskMoved?.length && answer.kind !== "ask" && answerTouchesMoved(answer.text, item.diskMoved, item.diskMoved)) text = `${text}\n\n${DISK_NOT_AUTHORIZED}`;
       try {
         assertWithinBudget(cfg, DATA_DIR);
       } catch (error) {

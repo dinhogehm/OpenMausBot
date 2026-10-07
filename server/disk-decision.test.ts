@@ -698,6 +698,21 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     expect(split9378.folders.map((each) => each.name)).toEqual([w9378]);
     expect(split9378.steps.map((step) => step.command)).toEqual([item9378.steps[0]!.command, undefined, "rm -rf /tmp/graft-9378-aside"]);
     expect(split9378.mixedCommands).toBe(0);
+    // R5-1: its real decisions — "Pode remover" authorized in words; "Removi eu" too; "Manter" stays
+    const decided9378 = d.splitMixedRemoval({ ...item9378, options: [
+      { label: "Pode remover", reply: "Pode remover a worktree da 9378 e o cache /tmp/graft-9378-aside." },
+      { label: "Removi eu", reply: "Removi a worktree da 9378 eu mesmo." },
+      { label: "Manter", reply: "Mantenha a worktree da 9378." },
+    ] }, [...folders, w9378])!;
+    expect(decided9378.options!.map((option) => option.reply)).toEqual([
+      "Pode remover: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
+      "Removi eu: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
+      "Mantenha a worktree da 9378.",
+    ]);
+    // an answer to the bot's item about the folders taken to the server authorizes nothing
+    expect(d.answerTouchesMoved("pode remover a 9378 também", [w9378], [w9378])).toBe(true);
+    expect(d.answerTouchesMoved(`Remova ${w9378}`, [w9378], [w9378])).toBe(true);
+    expect(d.answerTouchesMoved("Apaguei o cache do graft.", [w9378], [w9378])).toBe(false);
     // the item of 05/10 16:31: its rm -rf stays; the plain removal goes
     const free = { ...urgent, title: "Liberar espaço em disco: 9 GiB livres (abaixo de 10)", steps: [urgent.steps[0]!, urgent.steps[1]!, { text: "Me responder aqui; eu confiro o df" }] };
     const splitFree = d.splitMixedRemoval(free, folders)!;
@@ -742,7 +757,7 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     // "rm -rf .turbo && git worktree remove …": out whole, said so; the bot rewrites the cache part on its own
     expect(split.steps[0]!.command).toBeUndefined();
     expect(split.mixedCommands).toBe(1);
-    expect(split.options![0]).toEqual({ label: "Rode você", reply: "Rode você: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac; por este item, não remova nenhuma worktree." });
+    expect(split.options![0]).toEqual({ label: "Rode você", reply: "Rode você: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree." });
     expect(split.options![1]).toEqual(both.options[1]);
   });
 
@@ -759,6 +774,26 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     expect(split.folders.map((each) => `${each.name}[${each.size}]`)).toEqual(["release-lote-p[2,2G]", "8891-503-diag[215M]", "8891-inbox-503[215M]"]);
     expect(split.steps[0]!.command).toBe("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo");
     expect(split.steps[1]!.command).toBeUndefined();
+    // R5-1: its real decision "Pode limpar 1 e 2" removed the worktrees in words: it points to the server's item; "Eu cuido" stays
+    const decided = d.splitMixedRemoval({ ...item, options: [
+      { label: "Pode limpar 1 e 2", reply: "Chief, pode apagar o .turbo da raiz (quando não houver ci:local nem release rodando) e remover as 5 worktrees limpas." },
+      { label: "Eu cuido", reply: "Eu libero o espaço." },
+    ] }, names)!;
+    expect(decided.options![0]!.reply).toBe("Pode limpar 1 e 2: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.");
+    expect(decided.options![1]!.reply).toBe("Eu libero o espaço.");
+  });
+
+  it("a worktree the server does not check leaves the bot's item whole (R5-2); -C takes one plain path (R5-3)", () => {
+    // the lot-t-release of 04/10 lived in nuria-platform/.worktrees/; another repository's too
+    const outside = { steps: [{ text: "Remova", command: "git -C /Users/osvaldo/Projetos/nuria-platform worktree remove .worktrees/lot-t-release" }, { text: "Outro repo", command: "git -C ~/Projetos/OpenMausBot worktree remove ~/Projetos/OpenMausBot-r13fol" }, { text: "Leia", command: "du -sh ~/Projetos" }], options: [{ label: "Pode remover", reply: "pode remover a lot-t-release" }] };
+    const stripped = d.stripUncheckedRemovals(outside)!;
+    expect(stripped.count).toBe(2);
+    expect(stripped.steps.map((step) => step.command)).toEqual([undefined, undefined, "du -sh ~/Projetos"]);
+    expect(stripped.steps[0]!.text).toContain("(comando retirado: remove uma worktree que o servidor não confere");
+    expect(d.stripUncheckedRemovals({ steps: [{ text: "Leia", command: "du -sh ~" }] })).toBeNull();
+    expect(d.onlyRemoval("git -C /r;rm${IFS}-rf${IFS}~ worktree remove X")).toBe(false);
+    expect(d.onlyRemoval("git -C '/r x' worktree remove X")).toBe(false);
+    expect(d.onlyRemoval("git -C /r worktree remove X")).toBe(true);
   });
 
   it("a folder with HEAD detached is offered \"Criar branch e push\", never \"Push e remover\" (R2-4)", () => {
