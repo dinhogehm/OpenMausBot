@@ -723,6 +723,33 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
     expect(routineOwnerAsks(text, ctx)).toEqual([]);
   });
 
+  // INSP-R13VIS C1: the 9 phrases round 2 opened and round 3 dropped
+  it.each([
+    ["O Chief concordou com isso, e a decisão sobre a #9400 fica com você."],
+    ["O Chief concordou com tudo, e a escala do Lead depende da sua decisão."],
+    ["O Chief concordou, mas o merge da #9400 é decisão sua."],
+    ["A #9400 continua com você, então não mexi; preciso do seu GO para o merge, que já passou no gate."],
+    ["A #9400 continua com você, então não mexi; aguardo seu OK, já que o gate passou."],
+    ["Como combinado, preciso do seu GO para a #9400, que já está pronta."],
+    ["Como combinado, aguardo sua aprovação para a #9400, já com o gate verde."],
+    ["A linha 192 fica com você, não mexi: decida se entra hoje, já que a Marluce cobrou."],
+    ["Como você pediu, a #9400 depende de você: o merge já pode sair."],
+  ])("C1: an ask is not taken back by \"já que\", \"já com\", \"já pode\" nor by another clause after \"concordou\": %s", (text) => {
+    expect(routineOwnerAsks(text, ctx)).toHaveLength(1);
+  });
+
+  it("C1: titles of those asks name what is asked, not who agreed", () => {
+    expect(titles("O Chief concordou com tudo, e a escala do Lead depende da sua decisão.")).toEqual([expect.stringMatching(/\| Decidir: a escala do Lead$/)]);
+  });
+
+  it("C2: a one-word label leaves no \"depende de você\" in the title", () => {
+    const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    expect(title("Jev: liberar push da #9295 depende de você.")).toEqual(["Liberar push da #9295 (Jev)"]);
+    expect(title("Planilha: gravar a nota da #9032 na H192 depende de você.")).toEqual(["Gravar a nota da #9032 na H192 (Planilha)"]);
+    expect(title("Recomendo: aprovar o merge da #9400 ainda hoje, isso depende de você.")).toEqual(["Aprovar o merge da #9400 ainda hoje"]);
+  });
+
   it("B1: agreeing to a plan, in another clause, still leaves the decision asked", () => {
     expect(titles("O Chief concordou com o plano, e a decisão sobre a #9400 fica com você.")).toEqual(["routine-ask:issue:9400 | Decidir: #9400"]);
   });
@@ -743,8 +770,8 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
     expect(title("Decisão sua: Recomendo: ajustar o corredor C1 para aceitar as colunas da linha 185.")[0]).toMatch(/^Decidir: ajustar o corredor C1/);
     // a fact the bot told of an item it names by title (06/10 07:39)
     expect(title("Precisa de você: atualizei o item já existente o19 (\"Decidir o destino de 17 worktrees paradas\") com a lista nova e o espaço livre, sem criar item repetido.")).toEqual(["Decidir o destino de 17 worktrees paradas"]);
-    // the vocative is who, not what (01/10 18:07)
-    expect(title("Osvaldo, a #9314 (https://github.com/dinhogehm/nuria-platform/pull/9314) (9295) travou e precisa de você para seguir.")).toEqual(["Ver: #9314"]);
+    // the vocative is who, not what (01/10 18:07); the article the bot used is kept (INSP-R13VIS C3)
+    expect(title("Osvaldo, a #9314 (https://github.com/dinhogehm/nuria-platform/pull/9314) (9295) travou e precisa de você para seguir.")).toEqual(["Ver: a #9314"]);
   });
 
   it("an explicit ask in the same paragraph still opens it, titled with its subject", () => {
@@ -779,7 +806,7 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
     for (const scope of ["o mesmo escopo de antes", "é o mesmo das outras tentativas"]) {
       expect(title(`Pedido: ${scope}, com o padrão "sem limite". Ela não faz o merge sem o meu OK, porque o valor padrão ainda depende do Osvaldo.`)).toEqual(["Ver: porque o valor padrão (ela não faz o merge sem o meu OK)"]);
     }
-    expect(title("Quando essa publicação terminar, a sessão envia de novo, roda o CI e publica o gate. Ela não faz o merge sem o meu OK, e o valor padrão \"sem limite\" ainda depende do Osvaldo.")[0]).toMatch(/^Ver: e o valor padrão "sem limite"/);
+    expect(title("Quando essa publicação terminar, a sessão envia de novo, roda o CI e publica o gate. Ela não faz o merge sem o meu OK, e o valor padrão \"sem limite\" ainda depende do Osvaldo.")[0]).toMatch(/^Ver: o valor padrão "sem limite"/);
     expect(title("Abri então uma sessão do Claude Code com prioridade Reprovado: \"8204 Reprovado sidebar da fila não reflete no atendimento\". Ela roda sem o app, porque o app está preso reaproveitando uma worktree, e isso já está com o Osvaldo como pendência.")[0]).not.toMatch(/abri/i);
     expect(title("Osvaldo, o Redator KB Nuria mandou o levantamento do que entrou em produção. Ele ainda não consegue publicar artigo nem cadastrar entradas no changelog porque falta acesso, e só você pode liberar.")[0]).toMatch(/^Ver: o Redator KB Nuria ainda não consegue publicar/);
     expect(title("A linha 185 da planilha ainda está incompleta. Isso depende de você no item o1 de \"Precisa de você\": ajustar o corredor (recomendo) ou gravar as três células à mão.")).toEqual(["Ajustar o corredor (recomendo) ou gravar as três células à mão (linha 185)"]);

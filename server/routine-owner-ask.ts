@@ -191,13 +191,18 @@ function reportsDecision(sentence: string, owner: ReturnType<typeof ownerByName>
 /** What follows an ask in its clause and takes it back: already done ("…que você já mandou às 11:10", "…e isso já
  * está registrado") or only under a condition ("…apenas se mudar algo"). It only keeps a report a report: a
  * decision taken or what the routine left alone is not reopened by such an ask (INSP-R13VIS B2). */
-const ASK_TAKEN_BACK = /(?<![\p{L}])(?:j[áa]|(?:s[óo]|apenas|somente)\s+se)(?![\p{L}])/iu;
+// "já" only with a verb that says the ask itself is done — never "já que", "já com", "já pode", "que já passou no
+// gate", which tell of something else (INSP-R13VIS C1)
+const ASK_TAKEN_BACK = /(?<![\p{L}])(?:(?:voc[êe]\s+)?j[áa]\s+(?:mandou|enviou|respondeu|aprovou|resolveu|deu|fez|registrou|liberou|mandei|enviei|respondi|resolvi|registrei)|j[áa]\s+(?:foi|foram|est[áa]|est[ãa]o|ficou|ficaram)\s+(?:enviad|aprovad|registrad|resolvid|respondid|feit|dad|atendid|liberad|encaminhad)\p{L}*|(?:s[óo]|apenas|somente)\s+se)(?![\p{L}])/iu;
+/** An imperative or a question: asked whatever follows it. */
+const NEVER_TAKEN_BACK = /^(?:decida|confirme|responda|aprove|escolha|libere|me\s+(?:diga|avise|confirme|responda|passe)|\?)$/iu;
 /** The owner is asked for something in so many words, and the clause does not take it back. */
 function explicitAsk(text: string): boolean {
   for (const match of text.matchAll(new RegExp(EXPLICIT_REQUEST.source, "giu"))) {
+    if (NEVER_TAKEN_BACK.test(match[0])) return true;
     const rest = text.slice(match.index! + match[0].length);
     const clause = rest.slice(0, rest.search(/[;.!]|$/));
-    if (match[0] === "?" || !ASK_TAKEN_BACK.test(clause)) return true;
+    if (!ASK_TAKEN_BACK.test(clause)) return true;
   }
   return false;
 }
@@ -205,7 +210,7 @@ function explicitAsk(text: string): boolean {
 const LEFT_ALONE = /(?<![\p{L}])(?:continua|continuam|fica|ficam|segue|seguem)\s+com\s+voc[êe](?![\p{L}])[^.!?]*?(?<![\p{L}])(?:n[ãa]o\s+(?:mexi|mexo|mexerei|vou\s+mexer|toquei|toco|alterei|altero)|deixei\s+como\s+est(?:á|a|ava))(?![\p{L}])/iu;
 /** The owner asked for something in so many words: an imperative, "preciso que", "preciso do seu GO", "aguardo seu
  * OK", "falta o seu GO", "falta você aprovar", "depende de você", a question (INSP-R13VIS A2). */
-const EXPLICIT_REQUEST = /(?<![\p{L}])(?:preciso\s+que|precisamos\s+que|(?:preciso|precisamos|precisa|precisam)\s+d[oa]\s+(?:seu|sua)|aguardo\s+(?:o\s+|a\s+)?(?:seu|sua)|falta(?:m)?\s+(?:o\s+seu|a\s+sua|voc[êe])|depende(?:m)?\s+(?:s[óo]\s+)?de\s+voc[êe]|decida|confirme|responda|aprove|escolha|libere|me\s+(?:diga|avise|confirme|responda|passe)|pode\s+(?:me\s+)?(?:confirmar|dizer|decidir|aprovar|responder|liberar))(?![\p{L}])|\?/iu;
+const EXPLICIT_REQUEST = /(?<![\p{L}])(?:preciso\s+que|precisamos\s+que|(?:preciso|precisamos|precisa|precisam)\s+d[oa]\s+(?:seu|sua)|aguardo\s+(?:o\s+|a\s+)?(?:seu|sua)|falta(?:m)?\s+(?:o\s+seu|a\s+sua|voc[êe])|depende(?:m)?\s+(?:s[óo]\s+)?(?:de\s+voc[êe]|d[ao]\s+(?:sua|seu))|decis[ãa]o\s+(?:sua|sobre|de\s+voc[êe])|(?:a\s+)?sua\s+decis[ãa]o|decida|confirme|responda|aprove|escolha|libere|me\s+(?:diga|avise|confirme|responda|passe)|pode\s+(?:me\s+)?(?:confirmar|dizer|decidir|aprovar|responder|liberar))(?![\p{L}])|\?/iu;
 /** A pronoun and nothing else ("ela", "Isso"). */
 const BARE_PRONOUN = /^\s*(?:el[ae]s?|isso|isto|aquilo|ess[ae]s?|est[ae]s?)\s*$/iu;
 /** A sentence whose subject is a pronoun ("Ela continua com você, então não mexi."): what it is about was said before it. */
@@ -433,13 +438,19 @@ function askTitle(ask: RoutineAsk): string {
   const told = /^([^:]{3,70}):\s+(\S.*)$/su.exec(said);
   if (told && PAST_CLAUSE.test(told[1]!)) said = told[2]!;
   // a fact told in the past is no title: the subject it names, if any (INSP-R13VIS A4); else routineAskItem says whose message it is
-  if (toldFact(said) && ask.subject.label) return `${ask.decide ? "Decidir" : "Ver"}: ${ask.subject.label}`;
+  // with the article the bot used ("Ver: a #9314", INSP-R13VIS C3)
+  if (toldFact(said) && ask.subject.label) {
+    const opened = subjectLabel(said);
+    return `${ask.decide ? "Decidir" : "Ver"}: ${opened?.id && slug(opened.text).includes(slug(ask.subject.label)) ? lower(opened.text) : ask.subject.label}`;
+  }
   // a one-word tag before the colon is no subject ("o17: a worktree da #9378…", "Jev: liberar push…"): what follows
   // is, with the tag after it — never an item's own id, which the owner sees beside it already (INSP-R13VIS B5)
   const tag = /^\s*([\p{L}\d#_-]{1,12}):\s+(\S.*)$/su.exec(said);
   const itemId = Boolean(tag && /^o\d+$/iu.test(tag[1]!));
   if (tag && tag[2]!.trim().length > 8 && (itemId || (/\p{L}/u.test(tag[1]!) && ACTION_START.test(tag[2]!) && !STATEMENT_START.test(tag[2]!)))) {
-    const rest = askTitle({ ...ask, what: tag[2]!.trim(), sentence: tag[2]!.trim() });
+    // the words that leave it with the owner are not the action ("liberar push da #9295 depende de você", INSP-R13VIS C2)
+    const action = withoutAsk(tag[2]!.trim()) || tag[2]!.trim();
+    const rest = askTitle({ ...ask, what: action, sentence: action });
     // the bot's own voice ("Recomendo:", "Sugiro:") names nothing; a cut title keeps its "…" last
     const voice = /^(?:recomendo|sugiro|proponho|prefiro|acho|ou|e)$/iu.test(tag[1]!);
     return itemId || voice || rest.endsWith("…") || slug(rest).includes(slug(tag[1]!)) ? rest : `${rest.replace(/\.$/, "")} (${tag[1]})`;
@@ -479,7 +490,9 @@ function askedNoun(text: string): string {
   const parts = splitOutsideParens(text).map((each) => each.trim()).filter(Boolean);
   const kept = parts.filter((each, at) => !(at < parts.length - 1 && (/^(?:at[ée]|desde|hoje|ontem|agora|ainda|tamb[ée]m|por enquanto|nesta|neste|de novo|mais uma vez)(?![\p{L}])/iu.test(each)
     // another thing, said to be done ("a o12 segue resolvida e a o2 …"), is not what is asked
-    || RESOLVED.test(each))));
+    || RESOLVED.test(each)
+    // someone's agreement told before it ("o Chief concordou com tudo, e a escala do Lead…") is how, not what
+    || /(?<![\p{L}])concord(?:ou|aram)(?![\p{L}])/iu.test(each))));
   const main = kept.at(-1) ?? text;
   const lead = kept.slice(0, -1).join(", ");
   // a short noun phrase leads; a long one is the whole thing already
@@ -496,7 +509,8 @@ function splitOutsideParens(text: string): string[] {
     if (char === "(") depth++;
     else if (char === ")") depth = Math.max(0, depth - 1);
     if (depth) continue;
-    const cut = /^(?:,\s+|\s+e\s+)/.exec(text.slice(at));
+    // ", e a escala…" is one cut, never one that leaves the "e" leading a part
+    const cut = /^(?:,\s+e\s+(?=[oa]s?\s)|,\s+|\s+e\s+)/u.exec(text.slice(at));
     if (cut) { parts.push(text.slice(start, at)); at += cut[0].length - 1; start = at + 1; }
   }
   parts.push(text.slice(start));
@@ -519,7 +533,7 @@ const STATEMENT_START = /^\s*(?:lugar|par|mar|bar|ser|ter|ir|vir|estar|haver|pod
 function withoutAsk(text: string): string {
   return text
     .replace(/,?\s*(?:que\s+)?(?:ainda\s+|também\s+|tamb[ée]m\s+)?(?:continua|continuam|fica|ficam|est[áa]|est[ãa]o|segue|seguem)\s+(?:(?:aguardando|esperando)\s+(?:por\s+)?|com\s+)(?:(?:o|a)\s+)?(?:voc[êe]|\p{Lu}\p{Ll}+)(?![\p{L}]).*$/u, "")
-    .replace(/,?\s*(?:ainda\s+|tamb[ée]m\s+|s[óo]\s+)?(?:depende|dependem|precisa|precisam)\s+(?:de\s+voc[êe]|d[ao]\s+(?:sua|seu)\s+\p{L}+|d[oa]\s+\p{Lu}\p{Ll}+).*$/u, "")
+    .replace(/,?\s*(?:(?:isso|isto)\s+)?(?:ainda\s+|tamb[ée]m\s+|s[óo]\s+)?(?:depende|dependem|precisa|precisam)\s+(?:de\s+voc[êe]|d[ao]\s+(?:sua|seu)\s+\p{L}+|d[oa]\s+\p{Lu}\p{Ll}+).*$/u, "")
     .replace(/[\s,;:–—-]+$/, "")
     .trim();
 }

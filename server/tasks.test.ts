@@ -128,6 +128,12 @@ describe("tasks", () => {
     for (const said of ["네", "Pode"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId)).toBeNull();
     // INSP-R13VIS B4: a "yes", "OK" or "thanks" in Chinese or Japanese is the "Pode" of those languages
     for (const said of ["はい", "了解", "好的", "はい！", "ありがとうございます", "わかりました。", "没问题"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
+    // INSP-R13VIS C4: every form of a thanks or "got it", and a three-character ask
+    for (const said of ["ありがとうございました", "收到了谢谢", "收到，谢谢！", "谢谢你啊", "好的，谢谢！", "どうもありがとう", "了解しました！"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
+    for (const said of ["写测试", "部署吧", "直して"]) {
+      const task = store.createTask(bot.id)!;
+      expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)?.title, said).toBe(said);
+    }
   });
 
   it("returns the task it named, so a caller knows which title it may replace", async () => {

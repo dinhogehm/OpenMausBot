@@ -345,15 +345,21 @@ export function threadTitleFrom(title?: string): string {
 }
 
 /** A task's name, taken from the first thing you asked it to do. */
+/** The words of a "yes", "OK", "got it" or "thanks" in Chinese and Japanese, and the particles around them. */
+const CJK_ACK = /ありがとう|ありがと|ございました|ございます|どうも|はい|了解|承知|しました|かしこまりました|わかりました|分かりました|大丈夫|です|ます|お願いします|よろしく|谢谢|謝謝|多谢|多謝|感谢|感謝|收到|好的|没问题|沒問題|没事|知道了|明白|可以|[好行嗯了啊吧呢哦呀你的ねよなぁ]/gu;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
 /** A first message too short to name what the conversation is about: one
  * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
  * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
-const CJK_ACKS = new Set(["ありがとう", "ありがとうございます", "わかりました", "分かりました", "了解です", "了解しました", "承知しました", "かしこまりました", "大丈夫です", "お願いします", "没问题", "没有问题", "好的谢谢", "谢谢你", "非常感谢", "知道了吗", "可以的", "好的好的"]);
 export function tooShortToTitle(text: string): boolean {
-  // a script written without spaces (Chinese, Japanese) counts its characters: four name it ("修复登录"), fewer are
-  // a "yes" ("はい", "了解", "好的"), and so is a longer thanks or OK; Korean is spaced like pt-BR (INSP-R13VIS A7, B4)
-  const cjk = text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) ?? [];
-  if (cjk.length >= 4) return CJK_ACKS.has(text.trim().replace(/[\s\p{P}]+/gu, ""));
+  // a script written without spaces (Chinese, Japanese) counts its characters: three name it ("写测试", "直して");
+  // a "yes", "OK", "got it" or "thanks" in any of its forms ("はい", "ありがとうございました", "收到了谢谢") never does.
+  // Korean is spaced like pt-BR (INSP-R13VIS A7, B4, C4)
+  const cjk = text.match(CJK) ?? [];
+  if (cjk.length) {
+    if (!(text.replace(CJK_ACK, "").match(CJK) ?? []).length) return true;
+    if (cjk.length >= 3) return false;
+  }
   return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
 }
 
