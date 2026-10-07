@@ -115,8 +115,11 @@ describe("fixed sheet rows in an item's commands (R13-intake #1)", () => {
     // an empty range has no "values": empty, as the Sheets API says it; past the last filled row too
     expect(jsonRows('{"range":"Atendimento!A900:Z900"}', 900, 900)!.get(900)).toEqual([]);
     expect(jsonRows(real, 120, 121)!.get(121)).toEqual([]);
-    // the --plain output (columns aligned with spaces, no tabs) and garbage are not read
-    expect(jsonRows(`${" ".repeat(96)}Matheus   Osvaldo   15/09/2026 01:18   Publicado\n`, 120, 120)).toBeNull();
+    // the real --plain output of the same row (the inspector's read: columns aligned with spaces, no tabs, the cell's line break splitting it) and garbage are not read
+    const plain = readFileSync(join(import.meta.dirname, "fixtures", "gog-sheets-get-atendimento-row120.plain.txt"), "utf8");
+    expect(plain).not.toContain("\t");
+    expect(plain).toContain("Matheus");
+    expect(jsonRows(plain, 120, 120)).toBeNull();
     expect(jsonRows('{"values":[["a"]]}', 120, 120)).toBeNull();
     expect(jsonRows("", 120, 120)).toBeNull();
   });
