@@ -326,6 +326,42 @@ function colonOutsideQuotes(text: string): number {
   return -1;
 }
 
+/** The bot says, in so many words, that it opened no item ("Não abri item para essas pastas"). */
+const NO_ITEM_OPENED = /(?<![\p{L}])n[ãa]o\s+(?:abri|criei)\s+(?:o\s+|um\s+|nenhum\s+|novo\s+)?(?:item|pend[êe]ncia)(?![\p{L}])/iu;
+/** The bot points at an item that holds the ask: one it names by id ("já está no item o1", "a pendência é a o15",
+ * "no o20 falta…") — only when that item is open, any bot's — or one it says is where the owner decides ("é lá que
+ * você decide", "use o item em Precisa de você"). */
+const ITEM_BY_ID = /(?:(?<![\p{L}])(?:no\s+item|no|na\s+pend[êe]ncia|(?:a\s+)?pend[êe]ncia\s+é\s+a|j[áa]\s+est[áa]\s+no\s+item|item)\s+|\()(o\d+)(?![\p{L}\d])/giu;
+const ITEM_WHERE_DECIDED = /(?<![\p{L}])(?:é\s+l[áa]\s+que\s+voc[êe]\s+decide|use\s+o\s+item\s+(?:em|no)\s+["“]?Precisa de voc[êe])/iu;
+/** Where the ask of `index` is said: a list's item with the lines that lead it (less indented, above it in its
+ * paragraph); else the paragraph's lines that are no list's items. It says the ask has an item, or that none was
+ * opened: no item from it (INSP-R13VIS E2, real 02/10 17:10, 05/10 17:22, 06/10 09:57). Another item of the same
+ * list ("- Quando terminar de usar a VM, devolva o controle." beside "- … (item o3 em Precisa de você)") is its own. */
+function paragraphPointsAtItem(lines: readonly string[], index: number, itemIds: readonly string[]): boolean {
+  let start = index;
+  while (start > 0 && lines[start - 1]!.trim()) start--;
+  let end = index;
+  while (end + 1 < lines.length && lines[end + 1]!.trim()) end++;
+  const indent = (line: string) => /^\s*/.exec(line)![0].length;
+  const scope: string[] = [];
+  if (LIST_ITEM.test(lines[index]!)) {
+    scope.push(lines[index]!);
+    let depth = indent(lines[index]!);
+    for (let at = index - 1; at >= start; at--) {
+      const each = lines[at]!;
+      const leads = !LIST_ITEM.test(each) || indent(each) < depth;
+      if (leads) { scope.push(each); depth = Math.min(depth, LIST_ITEM.test(each) ? indent(each) : -1); }
+      if (depth < 0) break;
+    }
+  } else {
+    for (let at = start; at <= end; at++) if (!LIST_ITEM.test(lines[at]!)) scope.push(lines[at]!);
+  }
+  const paragraph = unquoted(scope.map(plainLine).join(" "));
+  if (NO_ITEM_OPENED.test(paragraph) || ITEM_WHERE_DECIDED.test(paragraph)) return true;
+  const open = new Set(itemIds.map((id) => id.toLowerCase()));
+  return [...paragraph.matchAll(ITEM_BY_ID)].some((match) => open.has(match[1]!.toLowerCase()));
+}
+
 /** What the routine's reply leaves with the owner: one ask per pendency —
  * one per item of a list it leads ("Ainda dependem de você: - abrir… -
  * responder… - aprovar…") — never a denial, a condition, a quote, an echo
@@ -377,6 +413,8 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
   for (let index = 0; index < lines.length; index++) {
     const line = plainLine(lines[index]!);
     const sentences = splitSentences(line);
+    // the paragraph says the ask already has its item, or that the bot opened none: an echo, or a report (INSP-R13VIS E2)
+    if (paragraphPointsAtItem(lines, index, context.itemIds ?? [])) continue;
     sentences.forEach((original, at) => {
       const sentence = unquoted(original);
       if (!asks(sentence, sentences[at + 1], owner)) return;
@@ -472,6 +510,10 @@ function askTitle(ask: RoutineAsk): string {
   let said = /^\s*(?:fica|ficam|continua|continuam)\s+com\s+voc[êe]\s+(\p{L}+(?:ar|er|ir)(?![\p{L}]).*)$/iu.exec(clause)?.[1] ?? clause;
   // "Osvaldo, a #9314 travou…": the vocative is who, not what
   said = said.replace(/^\s*\p{Lu}\p{Ll}+,\s+(?=[oa]s?\s|#)/u, "");
+  // "O Chief concordou, e cabe a você aprovar a #9389" → "Aprovar a #9389" (INSP-R13VIS E3)
+  said = said.replace(/^\s*(?:[^,.;:]{1,60},\s*(?:e\s+)?)?cabe\s+a\s+voc[êe]\s+(?=\p{L}+(?:ar|er|ir)(?![\p{L}]))/iu, "");
+  // "Essa decisão de produto é sua" → "a decisão de produto" (INSP-R13VIS E3)
+  said = said.replace(/^\s*(?:essa|esta)\s+(decis[ãa]o\s+(?:de|do|da|dos|das)\s+[^,.;:]+?)\s+é\s+sua(?![\p{L}])[.!]?\s*$/iu, "a $1");
   // "Como combinado, aguardo seu OK…": the decision taken is how it was said, not what is asked
   said = said.replace(/^\s*(?:como|conforme)\s+(?:voc[êe]\s+)?(?:combinado|combinamos|pediu|decidiu|definiu)[^,]{0,30},\s*/iu, "");
   // "O Chief concordou: a linha da Marluce (#9389) fica com você" — a fact told before the colon is no label: what follows is the subject (R13-visual N26, real o16)
@@ -497,6 +539,10 @@ function askTitle(ask: RoutineAsk): string {
     const voice = /^(?:recomendo|sugiro|proponho|prefiro|acho|ou|e)$/iu.test(tag[1]!);
     return itemId || voice || rest.endsWith("…") || slug(rest).includes(slug(tag[1]!)) ? rest : `${rest.replace(/\.$/, "")} (${tag[1]})`;
   }
+  // "A decisão sobre a escala do Lead ficou com você: ele cobre 24/7…?" → "Decidir: a escala do Lead" (INSP-R13VIS E3)
+  // — "a decisão de produto da #9356" keeps its words: only "sobre" gives way to what it is about
+  const leftDecision = /^\s*(?:a|essa|esta)\s+decis[ãa]o\s+sobre\s+(.+?)\s+(?:fica|ficou|continua|segue|é)\s+(?:com\s+voc[êe]|sua)(?![\p{L}])/iu.exec(said);
+  if (leftDecision) return `Decidir: ${lower(clipTitle(leftDecision[1]!, 90))}`;
   // already an action for the owner: a question to decide ("Posso escrever…?"), or a verb ("Abrir a issue…", "Aprovar a #9370")
   if (ask.decide && (ask.what || /\?\s*$/.test(said)) && !/^\s*decid/iu.test(said)) return `Decidir: ${lower(clipTitle(said, 100))}`;
   if (ACTION_START.test(said) && !STATEMENT_START.test(said)) return clipTitle(said.charAt(0).toLocaleUpperCase("pt-BR") + said.slice(1));
@@ -902,6 +948,9 @@ export function routineReplyText(messages: ReadonlyArray<{ role: string; kind: s
 /** What applyRoutineAsks needs of the ledger (BotAutonomy). */
 export interface RoutineAskLedger {
   ownerPendingOf(botId: string): OwnerPending[];
+  /** Every bot's open items: a routine pointing at another bot's item ("a pendência é a o15, e quem a abriu foi o
+   * Chief") echoes it (INSP-R13VIS E2). */
+  allOwnerPending?(): OwnerPending[];
   resolvedOwnerPendingOf(botId?: string): ResolvedOwnerPending[];
   addOwnerPending(botId: string, threadId: string, input: { title: string; key: string; link?: string; why: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string }): OwnerPending;
   resolveOwnerPending(match: { botId?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[];
@@ -948,7 +997,8 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
   const demoted: OwnerPending[] = [];
   const promoted: OwnerPending[] = [];
   const open = ledger.ownerPendingOf(run.botId);
-  const itemIds = open.flatMap((item) => [item.id, ...(item.aliases ?? [])]);
+  // the ids of every bot's open items, not only its own: "no item o15" is an echo whoever opened the o15 (INSP-R13VIS E2)
+  const itemIds = (ledger.allOwnerPending?.() ?? open).flatMap((item) => [item.id, ...(item.aliases ?? [])]);
   for (const ask of routineOwnerAsks(run.text, { ownerName: run.ownerName, knownNames: run.knownNames, itemIds })) {
     const mine = ledger.ownerPendingOf(run.botId);
     // the bot's own item already asks it: it names the subject, or reads like it

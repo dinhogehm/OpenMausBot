@@ -9,9 +9,16 @@
 // the thing asked done in the passive and no one named ("…a resposta final, que já foi enviada"), or "só se".
 //
 // "detector": the conversation detector (ownerAskIndex, bot-autonomy.ts) does not read an ask in it — the same
-// on df13caa18; not this file's filter. "eco": a pronoun with nothing it can point to, read as an echo — the same
-// on df13caa18.
-export type CorpusRound = "R1" | "R2" | "R3" | "R4";
+// on df13caa18; not this file's filter. A reading of its own for routines ("falta você aprovar", "aguarda sua
+// aprovação", "a decisão … é sua") was tried and reverted (662ceaf59, INSP-R13VIS round 5): over the 409 routine
+// replies of 7 days it opened as many asks as the base (14 against 14), and 9 of the 23 narrations of R5 below
+// opened false items. These stay 0 until a reading that holds both. "eco": a pronoun with nothing it can point
+// to, read as an echo — the same on df13caa18.
+//
+// R5: narrations that carry an ask's words and ask nothing — someone else's words, a sheet's or ticket's status, the
+// bot's own report, a denial — never an item, whatever reads them; and a reply that points at the item that already
+// holds its ask ("no item o1", "(o2)", "é lá que você decide") or says it opened none ("Não abri item").
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5";
 export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco"]> = [
   ["R1", "Como você decidiu ontem, preciso agora da sua aprovação para fazer o merge da #9400.", [], "detector"],
   ["R1", "Como você decidiu ontem, a #9400 está pronta. Preciso da sua aprovação para o merge.", ["Ver: preciso da sua aprovação para o merge"]],
@@ -131,4 +138,40 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   ["R4", "Como você decidiu às 11:05, a decisão sobre a #9389 ficou registrada.", [], "detector"],
   ["R4", "A #9389 continua com você, então não mexi; a decisão sobre o prazo foi sua, ontem.", []],
   ["R4", "Como você pediu, registrei a sua decisão na #9389.", [], "detector"],
+  ["R5", "A Marluce disse no Chat: \"falta você aprovar meu acesso\", mas era para o Chief, que já resolveu.", []],
+  ["R5", "O Matheus reclamou que falta você responder ao cliente dele; respondi por você às 10:02.", []],
+  ["R5", "Segundo o Roberto, falta só o seu OK no orçamento, mas isso é com o comercial, não com você.", []],
+  ["R5", "O cliente escreveu que falta você liberar o acesso; encaminhei ao suporte N1, que liberou.", []],
+  ["R5", "A Daiane respondeu: \"cabe a você decidir se reabre\", falando com o atendente dela.", []],
+  ["R5", "O cliente disse ao atendente que cabe a você escolher o plano.", []],
+  ["R5", "Planilha, linha 192: Status \"Aguarda sua aprovação\" (texto padrão da coluna).", []],
+  ["R5", "A coluna E da linha 185 mostra \"aguarda sua revisão\", que é o valor padrão do formulário.", []],
+  ["R5", "O ticket 142515 está com o status \"Aguarda seu retorno\" para o cliente.", []],
+  ["R5", "A automação marca como \"aguarda você\" todo ticket sem resposta em 24 h.", []],
+  ["R5", "Relatei ao Chief que a linha 192 aguarda sua decisão.", []],
+  ["R5", "Repassei ao Matheus que falta o seu OK na #9400.", []],
+  ["R5", "Notifiquei a Marluce de que a #9400 precisa que você aprove.", []],
+  ["R5", "Documentei na #9400 que falta você decidir o prazo.", []],
+  ["R5", "Registrei no Chat que cabe a você aprovar a #9400.", []],
+  ["R5", "No comentário da #9400 eu expliquei que a decisão sobre o prazo é sua.", []],
+  ["R5", "Escrevi para a Marluce que a linha 192 aguarda sua decisão.", []],
+  ["R5", "Hoje não há nada em que falte você aprovar.", []],
+  ["R5", "Não tem mais nenhum caso em que a decisão sobre o prazo é sua.", []],
+  ["R5", "Nenhuma das três linhas da planilha ainda aguarda sua decisão.", []],
+  ["R5", "Não é verdade que falta você aprovar a #9400; já aprovei com o Chief.", []],
+  ["R5", "Agora já não falta o seu OK na #9400: o Chief aprovou.", []],
+  ["R5", "Já não cabe a você aprovar a #9400.", []],
+  ["R5", "Falta você aprovar a #9400.", [], "detector"],
+  ["R5", "A linha 192 aguarda sua decisão.", [], "detector"],
+  ["R5", "Cabe a você aprovar a #9400.", [], "detector"],
+  // an ask whose item already exists, said in its paragraph (real 02/10 07:37, 05/10 14:50 and 20:52; INSP-R13VIS E2)
+  ["R5", "**Precisa de você (o11):** feche a #9326. Tentei fechar com um comentário com essa prova, mas o Jev barrou o comando e não tentei de novo.", []],
+  ["R5", "**Decisão sua (item o1 em \"Precisa de você\"):**\n- **Recomendo:** ajustar o corredor C1 para aceitar as colunas B, C e E numa linha nova da aba Atendimento.\n- **Ou:** você grava à mão a B185, a C185 e a E185. O comando está no item.", []],
+  ["R5", "Continua com você a linha 190 da #9384, que o Jev barrou. O comando está em \"Precisa de você\" (o1).", []],
+  ["R5", "Para destravar, falta você criar a trava; a pendência é a o15, e quem a abriu foi o Chief.", []],
+  // the bot opened none, or says where the owner decides (real 05/10 21:26, 06/10 09:57)
+  ["R5", "Nenhuma está na tag de produção, então a decisão sobre elas é sua. Não abri item para essas pastas porque liberam pouco espaço.", []],
+  ["R5", "Fora essas, a rotina de medição monta o item \"Decidir o destino de N worktrees paradas\" com os comandos, e é lá que você decide. Isso depende de você.", []],
+  // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
+  ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
 ];

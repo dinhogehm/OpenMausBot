@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
 import { ROUTINE_ASK_CORPUS } from "./routine-owner-ask.corpus.ts";
-import { applyRoutineAsks, keepRoutineAsk, routineAskItem, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { type RoutineAsk, applyRoutineAsks, keepRoutineAsk, routineAskItem, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
 const MONITOR_0510 = [
@@ -172,6 +172,15 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
     now = new Date(2026, 9, 5, 9, 0).getTime();
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  // INSP-R13VIS E2: the Monitor pointing at the Chief's item opened a second item for the same pendency
+  it("an item another bot opened is an echo too: the routine pointing at it opens nothing", () => {
+    const ledger = make();
+    const chiefs = ledger.addOwnerPending("chief", "chief-thread", { title: "Criar a linha 190 da #9384" });
+    expect(run(ledger, `Continua com você a linha 190 da #9384, que a pendência é a ${chiefs.id}.`).opened).toEqual([]);
+    // an id no bot has open is no echo: the ask opens its item
+    expect(run(ledger, "Continua com você a linha 191 da #9385, que a pendência é a o99.").opened).toHaveLength(1);
+  });
 
   it("the hourly repetition refreshes the one item: same id, same title, why says since when and the last time", () => {
     const ledger = make();
@@ -841,9 +850,25 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
   });
 });
 
+// INSP-R13VIS E3: titles of asks the conversation detector does not read today — kept right for when it does
+describe("titles of a decision or an action left with the owner", () => {
+  const ask = (sentence: string, decide: boolean, subject: RoutineAsk["subject"] = { kind: "frase", id: "x", label: "" }): RoutineAsk => ({ sentence, decide, subject });
+  it.each([
+    ["Essa decisão de produto é sua.", true, undefined, "Decidir: a decisão de produto"],
+    ["A decisão sobre a escala do Lead ficou com você: ele cobre 24/7 ou só no expediente?", true, undefined, "Decidir: a escala do Lead"],
+    ["Cabe a você aprovar a #9400.", false, { kind: "issue", id: "9400", label: "#9400" }, "Aprovar a #9400"],
+    ["O Chief concordou, e cabe a você aprovar a #9389.", false, { kind: "issue", id: "9389", label: "#9389" }, "Aprovar a #9389"],
+    // "a decisão de produto da #9356" keeps its words (real 03/10 22:32)
+    ["A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.", true, { kind: "issue", id: "9356", label: "#9356" }, "Decidir: a decisão de produto da #9356"],
+  ] as const)("%s", (sentence, decide, subject, title) => {
+    expect(routineAskTitle(ask(sentence, decide, subject))).toBe(title);
+  });
+});
+
 // INSP-R13VIS rounds 1-4: every attack phrase, with the items it must open (server/routine-owner-ask.corpus.ts)
 describe("the attack corpus", () => {
-  const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: [] };
+  // the items open in the real replies the R5 phrases come from, any bot's (o1, o3, o11, o15)
+  const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: ["o1", "o3", "o11", "o15"] };
   const origin = { botName: "Monitor", routineName: "Atendimento", firstAt: 0, lastAt: 0 };
   it.each(ROUTINE_ASK_CORPUS.map(([round, text, expected, note]) => [round, note ?? "", text, expected] as const))("%s %s: %s", (_round, _note, text, expected) => {
     expect(routineOwnerAsks(text, corpusCtx).map((ask) => routineAskItem(ask, origin).title)).toEqual(expected);
