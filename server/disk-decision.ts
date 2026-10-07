@@ -26,8 +26,9 @@ export function diskRoutine(name: string, text: string): boolean {
 }
 
 // "deixei uma para você decidir" (08:22), "alguém pode remover essas pastas
-// manualmente" (11:38), "Posso conferir isso PR por PR e remover…" (13:38)
-const ASKS = /para voc[eê] decidir|decis[aã]o sua|sua decis[aã]o|sua escolha|sua autoriza[cç][aã]o|cabe a voc[eê]|algu[eé]m (?:pode|precisa) remov|manualmente|precisa(?:m)? de voc[eê]|posso (?:conferir|remover|apagar)|quer que eu (?:remova|apague)/i;
+// manualmente" (11:38), "Posso conferir isso PR por PR e remover…" (13:38);
+// "a remoção fica com você. Se quiser apagá-las:" (06/10 23:10, R13-followup #4)
+const ASKS = /para voc[eê] decidir|decis[aã]o sua|sua decis[aã]o|sua escolha|sua autoriza[cç][aã]o|cabe a voc[eê]|algu[eé]m (?:pode|precisa) remov|manualmente|precisa(?:m)? de voc[eê]|posso (?:conferir|remover|apagar)|quer que eu (?:remova|apague)|(?:remo[cç][aã]o|decis[aã]o) fica com voc[eê]|se quiser (?:apag|remov)/i;
 
 /** The run's words leave a choice to the owner: remove folders, or decide. */
 export function asksOwnerToDecide(text: string): boolean {
@@ -67,7 +68,82 @@ export function diskDecisionFolders(text: string, folders: readonly string[]): L
     }
   }
   const chosen = named.length ? left.filter((folder) => named.includes(folder.name)) : left;
+  // a removal command left to the owner names its folder, table or not ("Se quiser apagá-las:
+  // git … worktree remove …/9032-…", 06/10 23:10): its size is measured on the Mac (R13-followup #4)
+  for (const name of commandFolders(text, folders)) if (!chosen.some((folder) => folder.name === name)) chosen.push({ name, size: "?", reason: "comando de remoção deixado no texto" });
   return chosen.filter((folder) => !notForOwner(folder.reason));
+}
+
+/** The folders a `git … worktree remove <path>` in the text points to. */
+export function commandFolders(text: string, folders: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(/worktree\s+remove\s+(?:--force\s+|-f\s+)*['"`]?([^\s'"`]+)/g)) {
+    const name = resolveFolder(match[1]!.replace(/\/+$/, "").split("/").at(-1) ?? "", folders);
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+/** A bot's own "Precisa de você" item about removing worktrees (06/10: the
+ * Chief kept o28, "Decidir o destino de 15 worktrees paradas", by itself,
+ * and the server's check never ran — R13-followup #2): what it is about, by
+ * its content (worktree paths, "worktree remove", removing or deciding the
+ * fate of worktrees), and the folders it names with what it says of each —
+ * size and words, so "em uso agora (lsof)" or "Sessão ativa (manter)" keeps
+ * a folder out whatever the Mac says. Empty when it is not such an item. */
+export function botDiskItemFolders(input: { title: string; why?: string; command?: string; steps?: ReadonlyArray<{ text: string; command?: string }>; options?: ReadonlyArray<{ label: string; reply: string }> }, folders: readonly string[]): LeftFolder[] {
+  const lines = [input.title, input.why ?? "", input.command ?? "", ...(input.steps ?? []).flatMap((step) => [step.text, step.command ?? ""]), ...(input.options ?? []).flatMap((option) => [option.label, option.reply])].filter(Boolean);
+  const all = lines.join("\n");
+  const about = /worktree\s+remove|\.claude\/worktrees\/|\.worktrees\//i.test(all) || (/\bworktrees?\b/i.test(all) && /remov|apag|descart|destino|limp|liber/i.test(all));
+  if (!about) return [];
+  const out = new Map<string, LeftFolder>();
+  for (const line of lines) {
+    // "Sessão ativa (manter): A 2,8G limpa; B 2,7G limpa" — the head is said of every folder after it
+    const head = /^([^:;]{3,80}):\s/.exec(line)?.[1] ?? "";
+    for (const segment of line.split(/;|\n/)) {
+      // a folder's name has a hyphen: "#9378" or "2,2G" never names one
+      for (const match of segment.matchAll(/[A-Za-z0-9][\w.…-]{2,}/g)) {
+        if (!match[0].includes("-")) continue;
+        const name = resolveFolder(match[0], folders);
+        if (!name) continue;
+        const size = /(\d+(?:,\d+)?\s?[KMGT])\b/.exec(segment.slice(match.index! + match[0].length))?.[1] ?? "";
+        const said = `${head && !segment.startsWith(head) ? `${head}: ` : ""}${segment}`.replace(/\s+/g, " ").trim();
+        const known = out.get(name);
+        if (!known) out.set(name, { name, size: size.replace(/\s+/g, "") || "?", reason: said });
+        else if (known.size === "?" && size) known.size = size.replace(/\s+/g, "");
+        // what the item says against removing it, wherever it says it
+        if (known && botKeeps(said) && !botKeeps(known.reason)) known.reason = said;
+      }
+    }
+  }
+  return [...out.values()];
+}
+
+/** The bot's own words keep a folder: a session on it, in use, or "manter". */
+const botKeeps = (said: string) => {
+  // "sem sessão ativa" (9337-…-2f6a57 on o28) is the opposite
+  const plain = said.replace(/\b(?:sem|fora de|nenhuma)\s+sess[aã]o\s+(?:ativa|que est[aá])/gi, "");
+  return notForOwner(plain) || /\bmanter\b|\blsof\b/i.test(plain);
+};
+
+/** The facts, with a folder the bot itself said is in use or to keep held
+ * as in use — the Mac may not see what the bot saw (o28: "keen-agnesi: em
+ * uso agora (lsof)"; "hook-v2-4" under "Sessão ativa (manter)"). */
+export function withBotKeeps(folders: readonly LeftFolder[], facts: ReadonlyMap<string, FolderFacts>): Map<string, FolderFacts> {
+  const out = new Map(facts);
+  for (const folder of folders) {
+    const fact = out.get(folder.name);
+    if (!fact || fact.inUse || !botKeeps(folder.reason)) continue;
+    out.set(folder.name, { ...fact, inUse: `o próprio item dizia: «${folder.reason.slice(0, 90)}»` });
+  }
+  return out;
+}
+
+/** A size from `du -sk`, as a routine writes it ("2,2G", "263M", "8K"). */
+export function duSize(kb: number): string {
+  if (kb >= 1024 * 1024) return `${(kb / 1024 / 1024).toFixed(1).replace(".", ",")}G`;
+  if (kb >= 1024) return `${Math.round(kb / 1024)}M`;
+  return `${kb}K`;
 }
 
 /** What the server found on the Mac about one folder (index.ts openDiskDecision). */
@@ -356,6 +432,39 @@ export function diskStateLine(folders: readonly string[], facts: ReadonlyMap<str
   return `[Servidor: conferido no Mac em ${when} — ${each.join("; ")}. Reconfira no Mac antes de remover qualquer pasta: o estado pode mudar até você executar. Segredos ignorados são apagados pela remoção; copie-os antes.]`;
 }
 
+/** What the bot may remove after the owner's answer to a disk item, and
+ * nothing else (R13-followup #2: on 06/10 18:53 "Pode remover todos" had the
+ * Chief run `git worktree remove --force` on 10 folders, among them one the
+ * item said was in use and one under "manter"). The folders free now — of
+ * the option's own folders when the answer is a decision — with what each
+ * loses; those with secrets only once copied; every other folder forbidden,
+ * naming the ones the item kept out. */
+export function diskAllowedLine(folders: readonly string[], facts: ReadonlyMap<string, FolderFacts>, answer: { kind: string; text?: string }, kept: string): string {
+  const scope = answer.kind === "option" && answer.text ? folders.filter((name) => answer.text!.includes(name)) : [...folders];
+  const free = scope.filter((name) => facts.get(name) && !facts.get(name)!.inUse);
+  const plain = free.filter((name) => !facts.get(name)!.secrets?.length);
+  const secret = free.filter((name) => facts.get(name)!.secrets?.length);
+  const loses = (name: string) => {
+    const fact = facts.get(name)!;
+    const lost = [fact.dirty !== false ? "alterações não commitadas ou estado desconhecido" : "", fact.unpushed !== false ? "commits que não estão no GitHub" : ""].filter(Boolean);
+    return lost.length ? `${name} (a remoção perde: ${lost.join(" e ")})` : name;
+  };
+  // a decision says how (push first, never discard); only the owner's own words for the whole list allow --force on known changes
+  const forced = answer.kind === "option" ? [] : plain.filter((name) => facts.get(name)!.dirty !== false);
+  return [
+    plain.length ? `[Servidor: o dono autorizou remover agora, e só estas: ${plain.map(loses).join("; ")}.` : "[Servidor: nenhuma pasta deste item pode ser removida com esta resposta.",
+    secret.length ? `Só depois de copiar os segredos para fora e o dono confirmar a cópia: ${secret.map((name) => `${name} (${facts.get(name)!.secrets!.join(", ")})`).join("; ")}.` : "",
+    `PROIBIDO remover qualquer pasta fora desta lista${kept ? `, inclusive as que o item manteve: ${kept}` : ""}; um «todos» vale só para a lista.`,
+    forced.length ? `--force só em ${forced.join(", ")}, as que têm alteração conhecida e o dono autorizou; nas outras, sem --force.` : "Sem --force.",
+    "Antes de cada remoção, reconfira lsof e segredos na hora; se mudou, pare e me diga.]",
+  ].filter(Boolean).join(" ");
+}
+
+/** The folders an item kept out, as its why says them ("Não mexer (fora deste item): A (…); B (…)."). */
+export function keptOutOf(why: string | undefined): string {
+  return /Não mexer \(fora deste item\): (.+?)(?:\.(?:\s|$)|$)/.exec(why ?? "")?.[1] ?? "";
+}
+
 const RECHECK ="Antes de remover qualquer uma, reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h; pule as que tiverem e me diga quais.";
 
 /** The one item for the owner, keyed by the folders it asks about. Folders
@@ -364,7 +473,7 @@ const RECHECK ="Antes de remover qualquer uma, reconfira que nenhuma tem sessão
  * offered only "Push e remover"; only a folder proved clean and pushed is
  * offered for removal, and never with --force (INSP-R12F F1). Null when no
  * folder is left to decide. */
-export function diskDecisionItem(folders: readonly LeftFolder[], facts: ReadonlyMap<string, FolderFacts>, root: string, text: string): {
+export function diskDecisionItem(folders: readonly LeftFolder[], facts: ReadonlyMap<string, FolderFacts>, root: string, text: string, opts: { who?: string; kept?: string } = {}): {
   key: string;
   title: string;
   why: string;
@@ -396,12 +505,18 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
     ].filter(Boolean).join(" ");
   };
   const removing = (list: readonly LeftFolder[]) => [copyFirst(list), RECHECK].filter(Boolean).join(" ");
-  const kept = busy.length ? ` Não mexer (fora deste item): ${busy.map((each) => `${each.name} (${each.busy})`).join("; ")}.` : "";
+  // what an item checked again had kept out stays said: the folders the bot itself held, above all (R13-followup #2)
+  const before = (opts.kept ? opts.kept.split("; ") : []).filter((entry) => !folders.some((folder) => entry.startsWith(`${folder.name} (`)));
+  const keptList = [...busy.map((each) => `${each.name} (${each.busy})`), ...before];
+  const kept = keptList.length ? ` Não mexer (fora deste item): ${keptList.join("; ")}.` : "";
+  // a "todos" never covers a folder with secrets: they are copied first (R13-followup #2)
+  const withSecrets = asked.filter((folder) => facts.get(folder.name)?.secrets?.length);
+  const secretNote = withSecrets.length ? ` Não mexer sem copiar antes os segredos: ${withSecrets.map((folder) => `${folder.name} (${facts.get(folder.name)!.secrets!.slice(0, 3).join(", ")})`).join("; ")}.` : "";
   return {
     // the folders, and which are offered for removal: a change in either is another item (INSP-R12F r2 R2-1)
     key: `${DISK_DECISION_KEY_PREFIX}${names.join(",")}${clean.length ? `${CLEAN_MARK}${words(clean).replace(/ /g, ",")}` : ""}`,
     title: `Decidir o destino de ${asked.length} worktree${asked.length === 1 ? "" : "s"} parada${asked.length === 1 ? "" : "s"} (${total}): ${names.join(", ")}`.slice(0, 200),
-    why: `A rotina de disco não pode removê-las sozinha. Juntas ocupam ${total}${free ? `; o disco está com ${free} GiB livres e o release exige 8` : ""}.${pending.length ? ` ${pending.length} ${pending.length === 1 ? "tem" : "têm"} trabalho que só existe neste Mac.` : ""}${kept}`.slice(0, 400),
+    why: `${opts.who ?? "A rotina de disco não pode removê-las sozinha."} Juntas ocupam ${total}${free ? `; o disco está com ${free} GiB livres e o release exige 8` : ""}.${pending.length ? ` ${pending.length} ${pending.length === 1 ? "tem" : "têm"} trabalho que só existe neste Mac.` : ""}${kept}${secretNote}`.slice(0, 1_500),
     steps: [
       { text: RECHECK },
       ...shown.map((folder) => ({
@@ -417,4 +532,11 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
       { label: DISK_KEEP_LABEL, reply: `Mantenha as worktrees ${words(asked)} e não as remova. Elas só voltam a ser perguntadas daqui a 7 dias, se ainda estiverem no disco.` },
     ],
   };
+}
+
+/** A bot's reply that leaves worktrees to the owner ("a remoção fica com
+ * você. Se quiser apagá-las:" and the commands, 06/10 23:10): an item, as a
+ * disk routine's run would open (R13-followup #4). */
+export function replyLeavesDiskToOwner(text: string): boolean {
+  return /\bworktrees?\b/i.test(text) && asksOwnerToDecide(text);
 }

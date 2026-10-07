@@ -131,12 +131,12 @@ import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
 import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-language.ts";
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
-import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
+import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleLogLine, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
-import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
+import { asksOwnerToDecide, botDiskItemFolders, busyNote, diskAllowedLine, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, duSize, filesBelow, goneDiskItem, keepsFolders, keptOutOf, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -497,7 +497,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersLogLine, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8171,6 +8171,8 @@ bus.subscribe((event: RuntimeEvent) => {
         }
         // the bot's reply says a routine's item is resolved: it closes (R12-visual N22)
         if (terminal?.text && bot) closeRoutineAsksSaid(bot.id, terminal.text);
+        // a reply that leaves worktrees to the owner in text only opens the disk item (R13-followup #4); a routine's run is openDiskDecision's
+        if (terminal?.text && bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId && !store.groupByThread(event.threadId)) openDiskDecisionFromReply(bot.id, event.threadId, terminal.text);
         // and the owner's words that started it may have dealt with one (INSP-N22 r2 F2) — never in a routine's own run
         if (bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId) closeRoutineAsksOwnerSaid(bot.id, event.threadId);
       }
@@ -9241,11 +9243,18 @@ async function checkPower(): Promise<void> {
  * desk, with the list (R12-followup #1). Only the desktop app's server looks
  * (OMB_PIPELINE_IDLE=1 lets a test's server look too), every 10 min. */
 const PIPELINE_IDLE_FILE = join(DATA_DIR, "pipeline-idle.json");
-const pipelineIdle: { state: PipelineIdleState | null; lastAt: number; running: boolean } = { state: null, lastAt: 0, running: false };
-function ghJson(args: string[]): Promise<string | null> {
+const pipelineIdle: { state: PipelineIdleState | null; lastAt: number; running: boolean; lastWhy?: string } = { state: null, lastAt: 0, running: false };
+/** `gh` with JSON out, or why it failed (said in the log, R13-followup #5). */
+function ghJson(args: string[]): Promise<{ out: string | null; error?: string }> {
   return new Promise((resolve) => {
-    execFileCc("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => resolve(error ? null : String(stdout)));
+    execFileCc("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout, stderr) => resolve(error ? { out: null, error: `gh ${args.slice(0, 2).join(" ")} falhou: ${(String(stderr ?? "").trim().split("\n").at(-1) || error.message).slice(0, 160)}` } : { out: String(stdout) }));
   });
+}
+/** A look's why, logged when it changed. */
+function logPipelineIdleWhy(why: string): void {
+  const line = pipelineIdleLogLine(pipelineIdle.lastWhy, why);
+  pipelineIdle.lastWhy = why;
+  if (line) console.log(line);
 }
 async function checkPipelineIdle(): Promise<void> {
   const enabled = process.env.OMB_PIPELINE_IDLE === "1" || (DESKTOP_MANAGED && !process.env.VITEST);
@@ -9261,24 +9270,27 @@ async function checkPipelineIdle(): Promise<void> {
     }
     const stopped = existsSync(NURIA_STOP_FILE);
     const prs = stopped ? null : await ghJson(idlePrsArgs(PRODUCTION_REPO));
-    const openPrs = stopped ? 0 : prs === null ? null : parseOpenPrCount(prs, Date.now());
+    const openPrs = stopped ? 0 : prs?.out == null ? null : parseOpenPrCount(prs.out, Date.now());
+    let unknown = prs?.error ?? (prs?.out != null && openPrs === null ? "gh pr list ilegível" : undefined);
     let releaseInFlight: boolean | null = false;
     if (!stopped && openPrs === 0) {
       await refreshReleaseHold();
       // read now by this call or another: anything older, or still being read, is unknown (INSP-R12F F4)
       releaseInFlight = releaseInFlightOf(releaseHold, Date.now(), 2 * RELEASE_HOLD_EVERY_MS);
+      if (releaseInFlight === null) unknown = "release ainda não lido";
     }
     const now = Date.now();
     let candidates: IdleCandidate[] = [];
     if (!stopped && openPrs === 0 && releaseInFlight === false) {
       const issues = await ghJson(idleIssuesArgs(PRODUCTION_REPO));
-      const parsed = issues === null ? null : parseIdleIssues(issues);
-      if (parsed === null) return;
+      const parsed = issues.out === null ? null : parseIdleIssues(issues.out);
+      if (parsed === null) return logPipelineIdleWhy(`estado desconhecido (${issues.error ?? "gh issue list ilegível"})`);
       // a bot named it in the last day, or an open "Precisa de você" item waits on the owner for it
       const taken = new Set([...mentionedNumbers(botTextsWithRefsSince(now - PIPELINE_IDLE_QUIET_MS)), ...heldByOwner(store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)))]);
       candidates = idleCandidates(parsed, ccLedger.all(), taken, now);
     }
-    const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now });
+    const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now, ...(unknown ? { unknown } : {}) });
+    logPipelineIdleWhy(step.why);
     if (!step.wake) return;
     const desk = chiefDeskThread(chief);
     // "told" is kept only once the report is on the Chief's desk (INSP-R12F F5)
@@ -10593,9 +10605,13 @@ function foldersInUse(opts: { quietWorkspaces?: Map<string, string> } = {}): str
   return folders;
 }
 const canonPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
-/** A folder's size in KB (`du -sk`, at most 2 min), or null. */
+/** A folder's size in KB (`du -sk`, at most 2 min), or null. An empty
+ * folder is 0 KB, not unmeasured (R13-followup #5: ~190 "(? KB)"). */
 const duKb = (path: string) => new Promise<number | null>((resolve) => {
-  execFileCc("/usr/bin/du", ["-sk", path], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? null : Number(/^(\d+)/.exec(String(stdout).trim())?.[1]) || null));
+  execFileCc("/usr/bin/du", ["-sk", path], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+    const kb = /^(\d+)/.exec(String(stdout).trim())?.[1];
+    resolve(error || kb === undefined ? null : Number(kb));
+  });
 });
 async function cleanReleasedWorktrees(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
@@ -10664,7 +10680,8 @@ async function cleanReleasedWorktrees(): Promise<void> {
       // every one measured (du, 2 min each at most), so the report orders by size, not by disk order (INSP-J r1 #7b)
       for (const each of stale) each.sizeKb = await duKb(each.path);
       releasedCleanup.lastStale = { at: Date.now(), folders: stale };
-      console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
+      // said as the chip says it: the listed ones, the small and the unmeasured counted (R13-followup #5)
+      console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${staleFoldersLogLine(stale)}`);
     }
     if (!stale.length) releasedCleanup.lastStale = { at: Date.now(), folders: [] };
     const staleTold = staleNews ? staleFoldersReport(stale) : null;
@@ -14885,15 +14902,19 @@ async function diskFolderFacts(path: string, used: readonly string[], processCwd
  * folder that came into use or is no longer clean changes the item to what
  * holds now; with none left, it is closed with why. Folders gone from the
  * disk drop out. */
-async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string): Promise<{ outcome: "keep" | "replace" | "close"; line: string; note?: string }> {
+async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string, answer?: { kind: string; text?: string }): Promise<{ outcome: "keep" | "replace" | "close"; line: string; note?: string }> {
   const folders = openItemFolders(item).filter((folder) => existsSync(join(NURIA_WORKTREES, folder.name)));
   const facts = new Map<string, FolderFacts>();
   for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
   // what the Chief reads under the owner's answer: the state found just now (INSP-R12F r3 R3-2)
   const line = diskStateLine(openItemFolders(item).map((folder) => folder.name), facts, Date.now());
-  const fresh = folders.length ? diskDecisionItem(folders, facts, NURIA_WORKTREES, text) : null;
+  // checked again, it keeps what it said of its origin and of the folders it kept out
+  const kept = keptOutOf(item.why);
+  const who = item.why?.split(" Juntas ocupam ")[0];
+  const fresh = folders.length ? diskDecisionItem(folders, facts, NURIA_WORKTREES, text, { ...(who ? { who } : {}), ...(kept ? { kept } : {}) }) : null;
   const result = diskDecisionRecheck(item.key!, fresh, folders.length ? busyNote(folders.map((folder) => folder.name), facts) : "as pastas não existem mais");
-  if (result.action === "keep") return { outcome: "keep", line };
+  // under the owner's answer, the exact folders that may go now and every other one forbidden (R13-followup #2)
+  if (result.action === "keep") return { outcome: "keep", line: answer ? `${line}\n${diskAllowedLine(folders.map((folder) => folder.name), facts, answer, keptOutOf(item.why))}` : line };
   autonomy.resolveOwnerPending({ botId: item.botId, key: item.key!, by: "server", note: result.action === "replace" ? DISK_REPLACED_NOTE : result.note });
   if (result.action === "replace") {
     const opened = autonomy.addOwnerPending(item.botId, item.threadId, result.item);
@@ -14990,28 +15011,93 @@ async function openDiskDecisionNow(run: RoutineRun, routineName: string, threadI
       for (const item of openItems) await recheckDiskItem(item, used, processCwds, text);
     }
     if (!asksOwnerToDecide(text)) return;
-    let names: string[];
-    try { names = readdirSync(NURIA_WORKTREES); } catch { return; }
-    const folders = diskDecisionFolders(text, names);
-    if (!folders.length) return;
-    // checked on the Mac, not taken from the routine's words
-    const used = foldersInUse();
-    const processCwds = await allProcessCwds();
-    const facts = new Map<string, FolderFacts>();
-    for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
-    const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text);
-    if (!item) return;
-    const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(botId), autonomy.resolvedOwnerPendingOf(botId), Date.now());
-    if (!plan.add) return;
-    for (const key of plan.replace) autonomy.resolveOwnerPending({ botId, key, by: "server", note: "substituído pela lista nova da rotina de disco" });
-    const known = autonomy.ownerPendingOf(botId).some((open) => open.key === item.key);
-    const opened = autonomy.addOwnerPending(botId, threadId, item);
-    if (!known) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}): ${item.title}`, 240), ok: true } });
-    refreshBotRow(botId);
-    console.log(`[disk] the routine left ${folders.length} folder(s) to the owner: ${known ? "item refreshed" : `item ${opened.id} opened`} (${item.key})`);
+    await openDiskDecisionFromText(botId, threadId, text, "the routine");
   } catch (error) {
     console.error(`[disk] decision item: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** The folders' facts on the Mac now; a size the text did not give is measured (du). */
+async function diskFactsFor(folders: LeftFolder[]): Promise<Map<string, FolderFacts>> {
+  const used = foldersInUse();
+  const processCwds = await allProcessCwds();
+  const facts = new Map<string, FolderFacts>();
+  for (const folder of folders) {
+    const path = join(NURIA_WORKTREES, folder.name);
+    facts.set(folder.name, await diskFolderFacts(path, used, processCwds));
+    // "As duas estão vazias" of two 2,2G worktrees (06/10 23:10): the Mac says the size (R13-followup #4)
+    if (folder.size === "?") {
+      const kb = await duKb(path);
+      if (kb !== null) folder.size = duSize(kb);
+    }
+  }
+  return facts;
+}
+
+/** A text that leaves worktrees to the owner — a disk routine's run, or a
+ * bot's reply ("a remoção fica com você. Se quiser apagá-las:" with the
+ * commands, 06/10 23:10, R13-followup #4) — opens ONE item, checked on the Mac. */
+async function openDiskDecisionFromText(botId: string, threadId: string, text: string, said: string): Promise<void> {
+  let names: string[];
+  try { names = readdirSync(NURIA_WORKTREES); } catch { return; }
+  const folders = diskDecisionFolders(text, names);
+  if (!folders.length) return;
+  // checked on the Mac, not taken from the routine's words
+  const facts = await diskFactsFor(folders);
+  const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text, said === "the routine" ? {} : { who: "A remoção dessas worktrees é sua; o servidor conferiu cada uma no Mac." });
+  if (!item) return;
+  const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(botId), autonomy.resolvedOwnerPendingOf(botId), Date.now());
+  if (!plan.add) return;
+  for (const key of plan.replace) autonomy.resolveOwnerPending({ botId, key, by: "server", note: "substituído pela lista nova da rotina de disco" });
+  const known = autonomy.ownerPendingOf(botId).some((open) => open.key === item.key);
+  const opened = autonomy.addOwnerPending(botId, threadId, item);
+  if (!known) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}): ${item.title}`, 240), ok: true } });
+  refreshBotRow(botId);
+  console.log(`[disk] ${said} left ${folders.length} folder(s) to the owner: ${known ? "item refreshed" : `item ${opened.id} opened`} (${item.key})`);
+}
+
+/** A bot's reply that leaves worktrees to the owner, in text only: the item it did not open. */
+function openDiskDecisionFromReply(botId: string, threadId: string, text: string): void {
+  if (!replyLeavesDiskToOwner(text)) return;
+  void diskItemTurn(() => openDiskDecisionFromText(botId, threadId, text, "a bot's reply")).catch((error) => console.error(`[disk] decision item: ${error instanceof Error ? error.message : String(error)}`));
+}
+
+/** A bot's own "Precisa de você" item about removing worktrees (the Chief's
+ * o28 on 06/10) is the server's disk item: the folders it names checked on
+ * the Mac — use, secrets, nested worktrees — and what the bot itself said
+ * keeps one ("em uso agora (lsof)", "manter"); its steps and decisions are
+ * the server's, and the owner's answer is checked again (R13-followup #2).
+ * Null when the item is not about removing worktrees; otherwise what the
+ * bot reads back. `replacing` is the bot's item it rewrote (update). */
+async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending): Promise<string | null> {
+  let names: string[];
+  try { names = readdirSync(NURIA_WORKTREES); } catch { return null; }
+  const folders = botDiskItemFolders(input, names);
+  if (!folders.length) return null;
+  return diskItemTurn(async () => {
+    const facts = withBotKeeps(folders, await diskFactsFor(folders));
+    const text = [input.title, input.why ?? "", ...(input.steps ?? []).map((step) => step.text)].join("\n");
+    const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text, { who: `${bot.name} não remove worktrees sem você; o servidor conferiu cada uma no Mac.` });
+    const dropped = replacing ? autonomy.resolveOwnerPending({ botId: bot.id, id: replacing.id, by: "server", note: "trocado pelo item de disco do servidor, conferido no Mac" }) : [];
+    const was = dropped.length ? ` Fechei o seu ${replacing!.id}.` : "";
+    if (!item) {
+      refreshBotRow(bot.id);
+      console.log(`[disk] ${bot.name}'s item about worktrees: none may go now (${folders.map((folder) => folder.name).join(", ")})`);
+      return `O servidor conferiu essas pastas no Mac agora e nenhuma pode sair: ${busyNote(folders.map((folder) => folder.name), facts)}. Não abri o item.${was} Diga isso ao dono em uma linha, sem comandos de remoção.`;
+    }
+    const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(bot.id), autonomy.resolvedOwnerPendingOf(bot.id), Date.now());
+    if (!plan.add) {
+      refreshBotRow(bot.id);
+      return `O servidor já tem um item de disco com essas pastas, ou o dono decidiu sobre elas há menos de 7 dias: não abri outro.${was} Veja owner_pending list.`;
+    }
+    for (const key of plan.replace) autonomy.resolveOwnerPending({ botId: bot.id, key, by: "server", note: "substituído pela lista nova conferida no Mac" });
+    const opened = autonomy.addOwnerPending(bot.id, threadId, item);
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}), conferido no Mac: ${item.title}`, 240), ok: true } });
+    refreshBotRow(bot.id);
+    const kept = keptOutOf(item.why);
+    console.log(`[disk] ${bot.name}'s own item about worktrees is the server's now: ${opened.id} (${item.key})${kept ? `; kept out: ${kept}` : ""}`);
+    return `O servidor conferiu as pastas no Mac e abriu o item de disco dele no lugar do seu: ${opened.id}: ${item.title}.${was}${kept ? ` Fora do item, não mexer: ${kept}.` : ""} Os passos e as decisões são do servidor, que reconfere o item a cada passada da rotina de disco e na resposta do dono: não o reescreva. A resposta do dono chega com a lista exata do que pode sair; remova só essas.`;
+  });
 }
 
 /** Upsert one durable lifecycle card per run. Replaying the same transition,
@@ -21743,6 +21829,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // born practical: why and steps, or refused with what is missing (J17)
           const incomplete = practicalMissing(structured);
           if (incomplete) return json(res, 400, { error: incomplete });
+          // removing worktrees is the server's disk item, checked on the Mac, whoever opens it (R13-followup #2)
+          if (body.replacesAsk === undefined) {
+            const disk = await serverDiskItem(bot, threadId, { title, ...structured });
+            if (disk) return json(res, 200, { message: disk });
+          }
           // the one link that lets an item take a bare question's place: the Ref of the server's request (INSP-J2b #1)
           const replaces = body.replacesAsk === undefined ? null : parseReplacesAsk(body.replacesAsk);
           if (body.replacesAsk !== undefined && !replaces) return json(res, 400, { error: "replacesAsk deve ser o Ref do pedido do servidor, no formato <conversa>@<número> (ex.: 9f3c…@1791066754187)." });
@@ -21780,6 +21871,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!current) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           const incomplete = practicalMissing({ why: structured.why ?? current.why, steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
           if (incomplete) return json(res, 400, { error: incomplete });
+          // the server's disk item is not rewritten by a bot; a bot's item that turns out to be about removing worktrees becomes it (R13-followup #2)
+          if (current.key?.startsWith(DISK_DECISION_KEY_PREFIX)) {
+            if (patch.title !== undefined || structured.why !== undefined || structured.steps !== undefined || structured.options !== undefined) {
+              return json(res, 200, { message: `O ${current.id} é o item de disco do servidor, conferido no Mac: não o reescrevi. Ele é reconferido a cada passada da rotina de disco e na resposta do dono.` });
+            }
+          } else if (!current.key) {
+            const disk = await serverDiskItem(bot, current.threadId, { title: patch.title ?? current.title, why: structured.why ?? current.why, steps: structured.steps ?? current.steps, options: structured.options ?? current.options }, current);
+            if (disk) return json(res, 200, { message: disk });
+          }
           const item = autonomy.updateOwnerPending(bot.id, id, patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
@@ -25839,7 +25939,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // in turn with a routine's pass: the item read after it, gone if that pass replaced it
         const check = await diskItemTurn(async () => {
           const now = autonomy.ownerPendingById(bot.id, item.id);
-          if (now && now.key === item.key) return recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "");
+          if (now && now.key === item.key) return recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "", answer);
           // settled by the pass before: what that pass did to it, said as it is (INSP-R12F r5 #1)
           const settled = autonomy.resolvedOwnerPendingOf(bot.id).findLast((each) => each.id === item.id && each.key === item.key);
           return goneDiskItem(settled?.resolvedNote);

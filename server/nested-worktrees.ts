@@ -385,7 +385,9 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   // the big ones are the news: biggest first, the small ones counted (INSP-J r1 #7)
   const sorted = [...stale].sort((a, b) => (b.sizeKb ?? -1) - (a.sizeKb ?? -1) || a.idleSince - b.idleSince);
   const shown = sorted.filter((each) => (each.sizeKb ?? 0) >= minKb);
-  const small = sorted.length - shown.length;
+  // not measured is not small (INSP-U r1 U2): counted apart
+  const unmeasured = sorted.filter((each) => each.sizeKb === undefined || each.sizeKb === null).length;
+  const small = sorted.length - shown.length - unmeasured;
   if (!shown.length) return null;
   const totalKb = shown.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
   const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone, day: "2-digit", month: "2-digit" });
@@ -394,8 +396,25 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
   return {
     chip: `Disco: ${shown.length} pasta(s) parada(s) há mais de 72 h fora da tag, ${total} — informação para o dono, nada foi removido`,
-    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${small ? ` (e mais ${small} pequena(s), abaixo de ${sizeLabel(minKb)}, não listada(s))` : ""}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
+    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${small ? ` (e mais ${small} pequena(s), abaixo de ${sizeLabel(minKb)}, não listada(s))` : ""}${unmeasured ? ` (e ${unmeasured} cujo tamanho não consegui medir)` : ""}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
   };
+}
+
+/** The log line of the same measurement, told as the chip tells it (R13-followup
+ * #5: on 06/10 23:10 the chip said "1 pasta(s) … ~271 MB" while the log listed
+ * ~190 task-workspaces, nearly all "(? KB)" — an empty folder, 0 KB, read as
+ * unmeasured): the listed ones with their size, the small and the unmeasured counted. */
+export function staleFoldersLogLine(stale: readonly StaleFolder[], minKb = STALE_MIN_KB): string {
+  const measured = (each: StaleFolder) => each.sizeKb !== undefined && each.sizeKb !== null;
+  const shown = stale.filter((each) => measured(each) && each.sizeKb! >= minKb).sort((a, b) => b.sizeKb! - a.sizeKb!);
+  const small = stale.filter((each) => measured(each) && each.sizeKb! < minKb).length;
+  const unmeasured = stale.filter((each) => !measured(each));
+  const totalKb = shown.reduce((sum, each) => sum + each.sizeKb!, 0);
+  return [
+    `${shown.length} folder(s) of ${sizeLabel(minKb)} or more, ~${shown.length ? sizeLabel(totalKb) : "0 MB"}${shown.length ? `: ${shown.map((each) => `${each.path} (${sizeLabel(each.sizeKb!)})`).join(", ")}` : ""}`,
+    small ? `${small} smaller, not listed` : "",
+    unmeasured.length ? `${unmeasured.length} not measured: ${unmeasured.slice(0, 5).map((each) => each.path).join(", ")}${unmeasured.length > 5 ? ", …" : ""}` : "",
+  ].filter(Boolean).join("; ");
 }
 
 /** How many idle folders a low-disk alert names: the biggest. */

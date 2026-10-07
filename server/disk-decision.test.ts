@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { nestedWorktrees, parseWorktreeList } from "./nested-worktrees.ts";
+import * as d from "./disk-decision.ts";
 import {
   asksOwnerToDecide,
   diskChangedText,
@@ -469,5 +470,141 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     const item = diskDecisionItem([{ name: "x-1", size: "1M", reason: "r" }], new Map([["x-1", { inUse: null, unpushed: false, ...state }]]), ROOT, "")!;
     expect(item.options[0]!.reply).toContain("pode haver mais segredos não listados; confira a pasta inteira antes de remover");
     expect(porcelainState("!! .claude/\n", () => filesBelow("/w/.claude", readdir)).secrets).toEqual([".claude/deep/.dev.vars"]);
+  });
+});
+
+// R13-followup #2 and #4, with the texts of 06/10: the Chief's own o28 (updated at
+// 18:39), the owner's "Pode remover todos" at 18:53, and the reply of 23:10.
+describe("a bot's own disk item and a reply that leaves worktrees (R13-followup)", () => {
+  const names = [
+    "9378-supervisor-papel-base-gerente-2d197f", "9382-mesclar-tickets-retorna-500-1137fe", "9386-9337-sobrecarga-d1-envio-do-agente-b2d01a",
+    "9384-hook-v2-7-c2b-append-atendimento-b-1d2b3f", "9392-ticket-sem-e-mail-do-contato-vincul-9a6bc4", "hook-v2-4-corredores-de-operacao-61af7a",
+    "9386-9337-sobrecarga-d1-envio-do-agen", "9386-9337-sobrecarga-d1-envio-do-agen-4b3994", "9392-ticket-sem-e-mail-do-contato-vin",
+    "9337-sobrecarga-d1-no-envio-do-agente-2f6a57", "keen-agnesi-80191d", "503-atendimento-helpdesk-2785c8", "merge-deploy-open-prs-00664b",
+    "agent-a492b70af0b5210db", "chat-wait-time-issue-21f481", "9032-equipe-em-massa-tickets-n1", "9032-equipe-em-massa-tickets-n1-7d8a26",
+  ];
+  // the owner_pending update the Chief sent at 18:39:42 (messages.db e8d06dd1)
+  const o28 = {
+    title: "Decidir o destino de 15 worktrees paradas",
+    why: "Há 23 GiB livres em /Users/osvaldo/Projetos (meta: 25 GiB). Nada foi removido. Nenhuma worktree cumpre todos os critérios para remoção segura agora (limpa, parada há mais de 24 h, HEAD no GitHub e fora de sessão ativa).",
+    steps: [
+      { text: "Sessão ativa (manter): 9378-…-2d197f 2,8G limpa; 9382-…-1137fe 2,7G limpa; 9386-…-b2d01a 2,8G limpa, HEAD só local; 9384-…-1d2b3f 850M c/ alteração; 9392-…-9a6bc4 851M c/ alteração; hook-v2-4-…-61af7a 848M c/ alteração (03/10)" },
+      { text: "Limpas, mas mexidas hoje (06/10), com HEAD na main (sem sessão): 9386-9337-sobrecarga-d1-envio-do-agen 2,2G; 9386-…-4b3994 2,2G; 9392-ticket-sem-e-mail-do-contato-vin 2,2G. Viram candidatas após 24 h." },
+      { text: "9337-sobrecarga-d1-no-envio-do-agente-2f6a57: 2,9G, limpa, 06/10, sem sessão ativa, mas o HEAD NÃO está no GitHub (commits só locais)." },
+      { text: "keen-agnesi-80191d: 2,2G, limpa, em uso agora (lsof), HEAD na main." },
+      { text: "Com alterações não commitadas, paradas há dias: 503-atendimento-helpdesk-2785c8 848M (02/10, HEAD só local); merge-deploy-open-prs-00664b 592M (02/10, HEAD só local); agent-a492b70af0b5210db 2,5G (03/10); chat-wait-time-issue-21f481 8K (22/09)." },
+      { text: "Cache do turbo na raiz (.turbo): 39M." },
+      { text: "Para remover uma worktree que você decidir descartar (sem --force; falha se houver alteração)", command: "git -C /Users/osvaldo/Projetos/nuria-platform worktree remove <caminho>" },
+    ],
+  };
+  // what the Mac says: the six with a session are in use; the three touched today too; the rest free
+  const busy = new Set([names[0], names[1], names[2], names[3], names[4], names[6], names[7], names[8]]);
+  const fact = (name: string): import("./disk-decision.ts").FolderFacts => {
+    if (busy.has(name)) return { inUse: name.includes("9386-9337-sobrecarga-d1-envio-do-agen") || name.endsWith("-vin") ? "mudou nas últimas 24 h" : "uma conversa ou sessão trabalha nela", dirty: false, unpushed: false };
+    if (name === "9337-sobrecarga-d1-no-envio-do-agente-2f6a57") return { inUse: null, dirty: false, unpushed: true };
+    if (name === "agent-a492b70af0b5210db") return { inUse: null, dirty: true, unpushed: false, secrets: [".dev.vars"] };
+    // the Mac does not see the app's lsof on keen-agnesi, nor the archived-to-be hook-v2-4's session
+    return { inUse: null, dirty: ["503-atendimento-helpdesk-2785c8", "merge-deploy-open-prs-00664b", "chat-wait-time-issue-21f481", "hook-v2-4-corredores-de-operacao-61af7a"].includes(name), unpushed: false };
+  };
+
+  it("reads o28 as an item about removing worktrees, with what it says of each folder", () => {
+    const folders = d.botDiskItemFolders(o28, names);
+    expect(folders.map((each) => each.name).sort()).toEqual(names.filter((name) => !name.startsWith("9032")).sort());
+    const by = (name: string) => folders.find((each) => each.name === name)!;
+    expect(by("keen-agnesi-80191d")).toMatchObject({ size: "2,2G", reason: "keen-agnesi-80191d: 2,2G, limpa, em uso agora (lsof), HEAD na main." });
+    expect(by("hook-v2-4-corredores-de-operacao-61af7a")).toMatchObject({ size: "848M", reason: "Sessão ativa (manter): hook-v2-4-…-61af7a 848M c/ alteração (03/10)" });
+    expect(by("9386-9337-sobrecarga-d1-envio-do-agen-4b3994").size).toBe("2,2G");
+    // a title without folders, about the N1 tickets, is not a disk item
+    expect(d.botDiskItemFolders({ title: "Decidir a alteração em massa da equipe dos tickets do N1 (#9032, pedido da Marluce)", why: "A Marluce pediu.", steps: [{ text: "Leia o ensaio da #9032" }] }, names)).toEqual([]);
+    // a worktree named, but nothing about removing it, is not either
+    expect(d.botDiskItemFolders({ title: "Abrir no app a sessão da keen-agnesi-80191d", why: "Destrava o app.", steps: [{ text: "Abra o app" }] }, names)).toEqual([]);
+  });
+
+  it("keeps out what the Mac or the bot itself says is in use, and offers no --force", () => {
+    const folders = d.botDiskItemFolders(o28, names);
+    const facts = d.withBotKeeps(folders, new Map(folders.map((each) => [each.name, fact(each.name)])));
+    // the bot's own words hold keen-agnesi and hook-v2-4; "sem sessão ativa" does not hold 9337
+    expect(facts.get("keen-agnesi-80191d")!.inUse).toBe("o próprio item dizia: «keen-agnesi-80191d: 2,2G, limpa, em uso agora (lsof), HEAD na main.»");
+    expect(facts.get("hook-v2-4-corredores-de-operacao-61af7a")!.inUse).toContain("Sessão ativa (manter)");
+    expect(facts.get("9337-sobrecarga-d1-no-envio-do-agente-2f6a57")!.inUse).toBeNull();
+    const item = d.diskDecisionItem(folders, facts, ROOT, [o28.title, o28.why, ...o28.steps.map((step) => step.text)].join("\n"), { who: "Chief of Staff não remove worktrees sem você; o servidor conferiu cada uma no Mac." })!;
+    expect(item.key).toBe(`${DISK_DECISION_KEY_PREFIX}503-atendimento-helpdesk-2785c8,9337-sobrecarga-d1-no-envio-do-agente-2f6a57,agent-a492b70af0b5210db,chat-wait-time-issue-21f481,merge-deploy-open-prs-00664b`);
+    expect(item.why.startsWith("Chief of Staff não remove worktrees sem você; o servidor conferiu cada uma no Mac.")).toBe(true);
+    expect(item.why).toContain("keen-agnesi-80191d (o próprio item dizia: «keen-agnesi-80191d: 2,2G, limpa, em uso agora (lsof), HEAD na main.»)");
+    expect(item.why).toContain("hook-v2-4-corredores-de-operacao-61af7a (o próprio item dizia:");
+    expect(item.why).toContain("Não mexer sem copiar antes os segredos: agent-a492b70af0b5210db (.dev.vars).");
+    expect(d.keptOutOf(item.why)).toContain("keen-agnesi-80191d");
+    expect(d.keptOutOf(item.why)).not.toContain("agent-a492");
+    for (const option of item.options) expect(option.reply).not.toMatch(/--force(?!\.)(?! )|remove --force/);
+    expect(JSON.stringify(item.options)).not.toContain("keen-agnesi");
+  });
+
+  it("answers \"Pode remover todos\" with the exact folders that may go, and forbids every other", () => {
+    const folders = d.botDiskItemFolders(o28, names);
+    const facts = d.withBotKeeps(folders, new Map(folders.map((each) => [each.name, fact(each.name)])));
+    const item = d.diskDecisionItem(folders, facts, ROOT, "")!;
+    const asked = d.keyFolders(item.key);
+    const line = d.diskAllowedLine(asked, facts, { kind: "text", text: "Pode remover todos" }, d.keptOutOf(item.why));
+    expect(line).toContain("o dono autorizou remover agora, e só estas: 503-atendimento-helpdesk-2785c8 (a remoção perde: alterações não commitadas ou estado desconhecido); 9337-sobrecarga-d1-no-envio-do-agente-2f6a57 (a remoção perde: commits que não estão no GitHub); chat-wait-time-issue-21f481 (a remoção perde: alterações não commitadas ou estado desconhecido); merge-deploy-open-prs-00664b (a remoção perde: alterações não commitadas ou estado desconhecido).");
+    expect(line).toContain("Só depois de copiar os segredos para fora e o dono confirmar a cópia: agent-a492b70af0b5210db (.dev.vars).");
+    expect(line).toContain("PROIBIDO remover qualquer pasta fora desta lista, inclusive as que o item manteve: ");
+    expect(line).toContain("keen-agnesi-80191d (o próprio item dizia:");
+    expect(line).toContain("--force só em 503-atendimento-helpdesk-2785c8, chat-wait-time-issue-21f481, merge-deploy-open-prs-00664b, as que têm alteração conhecida e o dono autorizou; nas outras, sem --force.");
+    // a decision covers its own folders only: "Remover as limpas" names none here, "Push e remover" names them all
+    const push = item.options.find((option) => option.label === "Push e remover")!;
+    expect(d.diskAllowedLine(asked, facts, { kind: "option", text: push.reply }, "")).toContain("o dono autorizou remover agora, e só estas: 503-");
+    // a decision never allows --force: "Push e remover" says not to discard anything
+    expect(d.diskAllowedLine(asked, facts, { kind: "option", text: push.reply }, "")).toContain(" Sem --force.");
+    expect(d.diskAllowedLine(asked, facts, { kind: "option", text: "Remova as worktrees chat-wait-time-issue-21f481 com git worktree remove, sem --force." }, "")).toMatch(/só estas: chat-wait-time-issue-21f481 \(a remoção perde: [^)]+\)\. PROIBIDO/);
+    // nothing free: nothing may go
+    expect(d.diskAllowedLine(["keen-agnesi-80191d"], new Map([["keen-agnesi-80191d", { inUse: "há um processo vivo dentro dela", dirty: false, unpushed: false }]]), { kind: "text", text: "pode" }, "")).toContain("nenhuma pasta deste item pode ser removida com esta resposta.");
+  });
+
+  it("turns the 23:10 reply — \"vazias\", the removal with the owner, two commands — into an item with the real size", () => {
+    const reply = [
+      "O servidor mandou o relatório de disco e pastas de trabalho. Não removi nada. O disco tem 29 GiB livres e a meta é 25 GiB, então nada precisa sair agora.",
+      "",
+      "- **Pastas já em produção:** o servidor avaliou só uma, a `omb-seed`, e ela não pode sair porque está bloqueada. As outras 9 ele não avaliou.",
+      "- **Duas pastas da #9032 sem uso** (`9032-equipe-em-massa-tickets-n1` e `9032-equipe-em-massa-tickets-n1-7d8a26`): são das duas sessões que não abriram no app e que eu já arquivei. Eu tinha pedido que o arquivamento removesse as pastas, mas elas ficaram, provavelmente porque as sessões nunca abriram. As duas estão vazias e não guardam trabalho nenhum. Pela sua regra, a remoção fica com você. Se quiser apagá-las:",
+      "  - `git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/9032-equipe-em-massa-tickets-n1`",
+      "  - `git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/9032-equipe-em-massa-tickets-n1-7d8a26`",
+      "- **Pasta antiga do Lead PRODEV:** ocupa 271 MB e está parada desde 29/09. Ocupa pouco espaço, então não abro item para ela enquanto o disco estiver acima da meta.",
+    ].join("\n");
+    // why it opened nothing at 23:10: not a routine's run, no ask the server knew, no table with sizes
+    expect(d.replyLeavesDiskToOwner(reply)).toBe(true);
+    expect(d.commandFolders(reply, names)).toEqual(["9032-equipe-em-massa-tickets-n1", "9032-equipe-em-massa-tickets-n1-7d8a26"]);
+    const folders = diskDecisionFolders(reply, names);
+    expect(folders).toEqual([
+      { name: "9032-equipe-em-massa-tickets-n1", size: "?", reason: "comando de remoção deixado no texto" },
+      { name: "9032-equipe-em-massa-tickets-n1-7d8a26", size: "?", reason: "comando de remoção deixado no texto" },
+    ]);
+    // the server measures them (du): 2,2G each, not "vazias"
+    for (const folder of folders) folder.size = d.duSize(2.2 * 1024 * 1024);
+    const clean = { inUse: null, dirty: false, unpushed: false };
+    const item = diskDecisionItem(folders, new Map(folders.map((each) => [each.name, clean])), ROOT, reply, { who: "A remoção dessas worktrees é sua; o servidor conferiu cada uma no Mac." })!;
+    expect(item.title).toBe("Decidir o destino de 2 worktrees paradas (~4,4 GiB): 9032-equipe-em-massa-tickets-n1, 9032-equipe-em-massa-tickets-n1-7d8a26");
+    expect(item.steps[1]!.text).toBe("Veja 9032-equipe-em-massa-tickets-n1 (2,2G; limpa e no GitHub)");
+    expect(item.options[0]!.label).toBe("Remover as limpas");
+    // a reply that only reports, or says nothing to the owner about worktrees, opens nothing
+    expect(d.replyLeavesDiskToOwner("Osvaldo, removi 10 das 15 worktrees do o28. Agora há 29 GiB livres.")).toBe(false);
+    expect(d.replyLeavesDiskToOwner("A sessão da #9390 está parada de propósito, esperando a vez no gate.")).toBe(false);
+  });
+
+  it("measures sizes as a routine writes them", () => {
+    expect([d.duSize(0), d.duSize(8), d.duSize(271 * 1024), d.duSize(2.2 * 1024 * 1024)]).toEqual(["0K", "8K", "271M", "2,2G"]);
+  });
+});
+
+describe("an item checked again keeps what it kept out (R13-followup #2)", () => {
+  it("says again the folders the bot held, and its origin", () => {
+    const A = "503-atendimento-helpdesk-2785c8";
+    const B = "9337-sobrecarga-d1-no-envio-do-agente-2f6a57";
+    const kept = "keen-agnesi-80191d (o próprio item dizia: «keen-agnesi-80191d: 2,2G, limpa, em uso agora (lsof), HEAD na main.»)";
+    const folders = [{ name: A, size: "848M", reason: "" }, { name: B, size: "2,9G", reason: "" }];
+    const facts = new Map<string, d.FolderFacts>([[A, { inUse: null, dirty: true, unpushed: false }], [B, { inUse: "há um processo vivo dentro dela", dirty: false, unpushed: true }]]);
+    const item = diskDecisionItem(folders, facts, ROOT, "", { who: "Chief of Staff não remove worktrees sem você; o servidor conferiu cada uma no Mac.", kept: `${kept}; ${B} (mudou nas últimas 24 h)` })!;
+    expect(item.key).toBe(`${DISK_DECISION_KEY_PREFIX}${A}`);
+    expect(item.why).toBe(`Chief of Staff não remove worktrees sem você; o servidor conferiu cada uma no Mac. Juntas ocupam ~848 MB. 1 tem trabalho que só existe neste Mac. Não mexer (fora deste item): ${B} (há um processo vivo dentro dela); ${kept}.`);
+    expect(d.keptOutOf(item.why)).toBe(`${B} (há um processo vivo dentro dela); ${kept}`);
   });
 });

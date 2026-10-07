@@ -8,6 +8,7 @@ import {
   parseIdleIssues,
   parseOpenPrCount,
   PIPELINE_IDLE_PREFIX,
+  pipelineIdleLogLine,
   pipelineIdleReport,
   pipelineIdleStep,
   pipelineOrder,
@@ -161,5 +162,18 @@ describe("the pipeline standing still (R12-followup #1)", () => {
     const prs = JSON.stringify([{ number: 9100, isDraft: false, updatedAt: "2026-10-02T10:00:00Z" }]);
     expect(parseOpenPrCount(prs, now)).toBe(0);
     expect(parseOpenPrCount(JSON.stringify([{ number: 9379, isDraft: false, updatedAt: "2026-10-05T16:15:34Z" }]), now)).toBe(1);
+  });
+});
+
+// R13-followup #5: only a wake was logged, so a gh that always failed and a queue that never emptied looked the same.
+describe("the pipeline-idle why in the log (R13-followup #5)", () => {
+  it("is logged when it changes, with why something is unknown", () => {
+    const now = Date.parse("2026-10-06T23:00:00Z");
+    const unknown = pipelineIdleStep({}, { stopped: false, openPrs: null, releaseInFlight: false, candidates: [], now, unknown: "gh pr list falhou: HTTP 502" });
+    expect(unknown.why).toBe("estado desconhecido (gh pr list falhou: HTTP 502)");
+    expect(pipelineIdleStep({}, { stopped: false, openPrs: null, releaseInFlight: false, candidates: [], now }).why).toBe("estado desconhecido");
+    expect(pipelineIdleLogLine(undefined, "4 PR(s) na fila")).toBe("[pipeline-idle] 4 PR(s) na fila");
+    expect(pipelineIdleLogLine("4 PR(s) na fila", "4 PR(s) na fila")).toBeNull();
+    expect(pipelineIdleLogLine("4 PR(s) na fila", unknown.why)).toBe("[pipeline-idle] 4 PR(s) na fila -> estado desconhecido (gh pr list falhou: HTTP 502)");
   });
 });

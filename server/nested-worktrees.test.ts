@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
+  releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersLogLine, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 import { liveRecordFolders } from "./claude-desktop.ts";
 
@@ -823,5 +823,24 @@ describe("a conversation's folders for the disk report (R11-resilience D2)", () 
     ]);
     // nothing is removed: each is a command a person runs
     expect(listed.every((each) => each.command.startsWith("mv ") && each.command.endsWith(" ~/.Trash/"))).toBe(true);
+  });
+});
+
+// R13-followup #5: on 06/10 23:10 the chip said "1 pasta(s) … ~271 MB" and the log listed ~190 task-workspaces, nearly all "(? KB)":
+// du gives 0 KB for an empty one, which read as unmeasured. The log tells what the chip tells.
+describe("the stale folders' log line (R13-followup #5)", () => {
+  it("counts the small and the unmeasured, and lists only what the chip counts", () => {
+    const tw = (id: string) => `/Users/osvaldo/.openmausbot/task-workspaces/82feff85-aab2-4cb7-9f70-8969ec976979/${id}`;
+    const stale = [
+      { path: tw("b427dc32"), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: 277_540 },
+      ...Array.from({ length: 188 }, (_, i) => ({ path: tw(`empty-${i}`), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: i % 3 ? 0 : 8 })),
+      { path: tw("timeout"), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: null },
+    ];
+    const told = staleFoldersReport(stale)!;
+    expect(told.chip).toBe("Disco: 1 pasta(s) parada(s) há mais de 72 h fora da tag, ~271 MB — informação para o dono, nada foi removido");
+    expect(told.report).toContain("(e mais 188 pequena(s), abaixo de 200 MB, não listada(s)) (e 1 cujo tamanho não consegui medir)");
+    const line = staleFoldersLogLine(stale);
+    expect(line).toBe(`1 folder(s) of 200 MB or more, ~271 MB: ${tw("b427dc32")} (271 MB); 188 smaller, not listed; 1 not measured: ${tw("timeout")}`);
+    expect(line).not.toContain("? KB");
   });
 });
