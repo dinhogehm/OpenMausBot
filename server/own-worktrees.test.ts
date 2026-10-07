@@ -826,7 +826,15 @@ describe("the seeded headless starts: in order, each with a deadline (R2-1)", ()
 // that ignores it, and a copy that still writes after the TERM.
 describe.runIf(process.platform !== "win32")("the preparation's programs, stopped for real (INSP-R4-1, R4-3)", () => {
   const dirs: string[] = [];
-  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  // every test's controllers aborted at its end, and each program bounded by WAIT_MS (groupExec kills its group then):
+  // a "ready" that never comes leaves no detached child behind (INSP-R6-1)
+  const controllers: AbortController[] = [];
+  const ctl = () => { const controller = new AbortController(); controllers.push(controller); return controller; };
+  const WAIT_MS = 4_000;
+  afterEach(() => {
+    for (const controller of controllers.splice(0)) controller.abort();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
   const temp = () => { const dir = realpathSync(mkdtempSync(join(tmpdir(), "omb-group-"))); dirs.push(dir); return dir; };
   // No clock in these (INSP-R5-2: time-based tests stopped production at #9391): each child prints
   // "ready" once its trap is armed, the abort comes only after that line, and what is checked is
@@ -836,22 +844,22 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
 
   it("settles on close: a child still working after the SIGTERM is waited for — its last write is there when the promise settles", async () => {
     const dir = temp();
-    const controller = new AbortController();
-    const run = abortOnReady(controller)("/bin/sh", ["-c", `trap 'sleep 0.3; touch "${dir}/child-exited"; exit 1' TERM; echo ready; while :; do sleep 0.05; done`], { signal: controller.signal });
+    const controller = ctl();
+    const run = abortOnReady(controller)("/bin/sh", ["-c", `trap 'sleep 0.3; touch "${dir}/child-exited"; exit 1' TERM; echo ready; while :; do sleep 0.05; done`], { signal: controller.signal, timeoutMs: WAIT_MS });
     await expect(run).rejects.toMatchObject({ name: "AbortError" });
     expect(existsSync(join(dir, "child-exited"))).toBe(true);
   });
 
   it("waits for a grandchild that ignores the TERM and still holds the output (a git hook); a group deaf to TERM is killed (SIGKILL) before its end", async () => {
     const dir = temp();
-    const controller = new AbortController();
-    const run = abortOnReady(controller)("/bin/sh", ["-c", `(trap '' TERM; echo ready; sleep 0.3; touch '${dir}/hook-done') & wait`], { signal: controller.signal });
+    const controller = ctl();
+    const run = abortOnReady(controller)("/bin/sh", ["-c", `(trap '' TERM; echo ready; sleep 0.3; touch '${dir}/hook-done') & wait`], { signal: controller.signal, timeoutMs: WAIT_MS });
     await expect(run).rejects.toMatchObject({ name: "AbortError" });
     // settled only once the grandchild had finished
     expect(existsSync(join(dir, "hook-done"))).toBe(true);
     // deaf to the TERM: the SIGKILL ends it — it never reaches its last line
-    const deaf = new AbortController();
-    const stuck = abortOnReady(deaf, 100)("/bin/sh", ["-c", `trap '' TERM; echo ready; sleep 30; touch '${dir}/deaf-finished'`], { signal: deaf.signal });
+    const deaf = ctl();
+    const stuck = abortOnReady(deaf, 100)("/bin/sh", ["-c", `trap '' TERM; echo ready; sleep 30; touch '${dir}/deaf-finished'`], { signal: deaf.signal, timeoutMs: WAIT_MS });
     await expect(stuck).rejects.toMatchObject({ name: "AbortError" });
     expect(existsSync(join(dir, "deaf-finished"))).toBe(false);
   });
@@ -884,7 +892,7 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
     let ready: () => void = () => {};
     const isReady = new Promise<void>((resolve) => { ready = resolve; });
     const watching = groupExec(process.env, undefined, { output: (text) => { if (text.includes("ready")) ready(); } });
-    void enqueue((_live, signal) => watching("/bin/sh", ["-c", `trap 'sleep 0.3; touch "${dir}/child-exited"; exit 1' TERM; echo ready; while :; do sleep 0.05; done`], { signal }).then(() => {}), (_why, stopped) => log.push(`late (stopped ${stopped}; child exited ${existsSync(join(dir, "child-exited"))})`));
+    void enqueue((_live, signal) => watching("/bin/sh", ["-c", `trap 'sleep 0.3; touch "${dir}/child-exited"; exit 1' TERM; echo ready; while :; do sleep 0.05; done`], { signal, timeoutMs: WAIT_MS }).then(() => {}), (_why, stopped) => log.push(`late (stopped ${stopped}; child exited ${existsSync(join(dir, "child-exited"))})`));
     const next = enqueue(async () => { log.push(`next (child exited ${existsSync(join(dir, "child-exited"))})`); }, () => {});
     await isReady;
     for (const [key, each] of Array.from(timers)) if (each.ms === SEEDED_START_MAX_MS) { timers.delete(key); each.run(); }
@@ -900,7 +908,7 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
     mkdirSync(join(worktree, "web"), { recursive: true });
     writeFileSync(join(worktree, "package-lock.json"), LOCK);
     const seed: SeedState = { repo: root, path: seedPath, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", installMs: 60_000, dirs: [{ path: "node_modules", kb: 10 }, { path: "web/node_modules", kb: 10 }] };
-    const controller = new AbortController();
+    const controller = ctl();
     const group = abortOnReady(controller);
     const exec: Exec = (file, args, options = {}) => {
       if (file !== "/usr/bin/nice") return Promise.resolve("");
@@ -909,7 +917,7 @@ describe.runIf(process.platform !== "win32")("the preparation's programs, stoppe
       const script = dst.endsWith("web/node_modules.omb-clone")
         ? `mkdir -p '${dst}'; echo a > '${dst}/a'; trap "echo b > '${dst}/b-after-term'; sleep 0.3; echo c > '${dst}/c-after-term'; touch '${root}/copy-exited'; exit 1" TERM; echo ready; while :; do sleep 0.05; done`
         : `mkdir -p '${dst}'; echo a > '${dst}/a'`;
-      return group("/bin/sh", ["-c", script], { ...options, signal: controller.signal });
+      return group("/bin/sh", ["-c", script], { ...options, signal: controller.signal, timeoutMs: WAIT_MS });
     };
     const real = realCloneIo(exec, async () => "v22.19.0");
     // the order that matters: each temporary copy is taken back after its cp has exited
