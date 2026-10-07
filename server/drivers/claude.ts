@@ -41,6 +41,7 @@ import { newEventId, newId } from "../contracts.ts";
 import { askInputSummary, commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
 import { sessionIdlePolicy } from "./session-idle.ts";
+import { promptHalves } from "./prompt-split.ts";
 import { parseVersionTriple, versionAtLeast } from "./acp/core.ts";
 import {
   applyClaudeInject,
@@ -1125,6 +1126,65 @@ function withVolatileNote(text: string, volatile: string): string {
   return text ? `${note}\n\n${text}` : note;
 }
 
+/** How a new process receives the volatile half: in its first message, in
+ * the same reminder shape a mid-session change uses, so a relaunch keeps a
+ * system prompt the provider has already cached (see the launch below). A
+ * resumed session may hold an earlier copy in its history; this one wins. */
+export function withLaunchVolatile(text: string, volatile: string): string {
+  const note = `<system-reminder>\nThis part of your instructions changes from turn to turn, so it arrives here instead of in the system prompt. It replaces any earlier copy:\n\n${volatile.trim()}\n</system-reminder>`;
+  return text ? `${note}\n\n${text}` : note;
+}
+
+/** Which parts of a spawn contract differ, for the relaunch log: top-level
+ * fields, MCP servers by name with the env keys or fields that changed, and
+ * CLI flags by name. Names only — never a value, since the contract carries
+ * the system prompt and credentials. */
+export function argsKeyChanges(previous: string, next: string): string[] {
+  let before: Record<string, unknown>;
+  let after: Record<string, unknown>;
+  try {
+    before = JSON.parse(previous) as Record<string, unknown>;
+    after = JSON.parse(next) as Record<string, unknown>;
+  } catch {
+    return ["unreadable"];
+  }
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const record = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {});
+  const differing = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((key) => !same(a[key], b[key]));
+  const flags = (value: unknown) => {
+    const list = Array.isArray(value) ? value.map(String) : [];
+    const out: Record<string, string[]> = {};
+    list.forEach((token, index) => {
+      if (!token.startsWith("--")) return;
+      const following = list[index + 1];
+      (out[token] ??= []).push(following !== undefined && !following.startsWith("--") ? following : "");
+    });
+    return out;
+  };
+  const changes: string[] = [];
+  for (const key of differing(before, after)) {
+    if (key === "mcpServers") {
+      const a = record(before.mcpServers);
+      const b = record(after.mcpServers);
+      for (const name of differing(a, b)) {
+        if (!(name in a) || !(name in b)) {
+          changes.push(`mcpServers.${name}(${name in b ? "added" : "removed"})`);
+          continue;
+        }
+        const fields = differing(record(a[name]), record(b[name])).flatMap((field) =>
+          field === "env" ? differing(record(record(a[name]).env), record(record(b[name]).env)).map((env) => `env.${env}`) : [field]);
+        changes.push(`mcpServers.${name}(${fields.join(",")})`);
+      }
+    } else if (key === "args") {
+      changes.push(`args(${differing(flags(before.args), flags(after.args)).join(",")})`);
+    } else {
+      changes.push(key);
+    }
+  }
+  return changes;
+}
+
 function claudeUserMessage(
   text: string,
   images: readonly ClaudeImage[] | undefined,
@@ -1765,7 +1825,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         return { turnId };
       }
+      if (live && !turn.sessionReset && live.argsKey !== argsKey) {
+        console.warn(`[claude] ${threadId.slice(0, 8)} relaunch, spawn contract changed in: ${argsKeyChanges(live.argsKey, argsKey).join(", ")}`);
+      }
       if (live) closeSession(threadId, turn.sessionReset ? "context reset" : "spawn contract changed");
+      const launchHalves = promptHalves(turn);
+      const launchMsg = launchHalves.stable !== null && launchHalves.volatile.trim()
+        ? claudeUserMessage(withLaunchVolatile(turn.text, launchHalves.volatile), turn.images)
+        : promptMsg;
 
       // Until sessions.set() below, this turn owns every launch resource.
       // Any bind, private-config or synchronous spawn failure must release
@@ -1789,9 +1856,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       try {
         // Create the prompt file only for a new process. A compatible live
         // session has already consumed the same system prompt at launch.
-        if (turn.system) {
+        // A split prompt launches with its stable half alone; the volatile
+        // half rides this launch's first message (launchMsg). Baking it into
+        // the system prompt made every relaunch — idle close, a changed
+        // spawn contract, a server restart — open with a system prompt the
+        // provider had never cached, so --resume re-priced the whole history
+        // at the cache-write rate even when nothing stable had changed.
+        const launchSystem = launchHalves.stable ?? turn.system;
+        if (launchSystem) {
           systemPromptPath = join(mkdtempSync(join(tmpdir(), "omb-system-")), "prompt.txt");
-          writeFileSync(systemPromptPath, turn.system, { mode: 0o600 });
+          writeFileSync(systemPromptPath, launchSystem, { mode: 0o600 });
           args.push("--append-system-prompt-file", systemPromptPath);
         }
         // Only create a broker for a new process. A compatible retained
@@ -2494,7 +2568,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // prompt over stdin as a stream-json message — never argv (ARG_MAX).
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
-      if (!(await writeUser(session, threadId, promptMsg))) {
+      if (!(await writeUser(session, threadId, launchMsg))) {
         if (!session.turn?.stopRequested) settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }

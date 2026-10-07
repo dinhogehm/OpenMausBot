@@ -81,7 +81,8 @@ it("tells the bot when a promise passes its deadline unkept, and never for a kep
 it("carries what one conversation decided, and the owner's orders, into the bot's other conversations", () => fixture(async f => {
   f.save({ turns: [
     { reply: "Mergeei a PR #9313 pelo gate. Aguardo o carrier." },
-    { expectSystemIncludes: ["Estado das suas outras conversas", "Mergeei a PR #9313 pelo gate.", "Ordens do dono em vigor", "Não rode ci:local enquanto houver release"], reply: "Entendido, sigo a ordem." },
+    // the shared state is volatile: it rides the launch message, not the system prompt
+    { expectContextIncludes: ["Estado das suas outras conversas", "Mergeei a PR #9313 pelo gate.", "Ordens do dono em vigor", "Não rode ci:local enquanto houver release"], reply: "Entendido, sigo a ordem." },
   ] });
   await f.send("Não rode ci:local enquanto houver release. Faça o merge da #9313.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
@@ -94,7 +95,7 @@ it("carries what one conversation decided, and the owner's orders, into the bot'
 it("speaks to the owner in the one conversation they named, and shows there what was said to them elsewhere", () => fixture(async f => {
   f.save({ turns: [
     { reply: "Combinado: falo com você só por aqui." },
-    { expectSystemIncludes: ["Conversa com o dono:", "Não fale com o dono aqui"], reply: "Preciso de uma decisão sua: publico o carrier agora?" },
+    { expectContextIncludes: ["Conversa com o dono:", "Não fale com o dono aqui"], reply: "Preciso de uma decisão sua: publico o carrier agora?" },
   ] });
   await f.send("Use só esta conversa para falar comigo.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);

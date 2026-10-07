@@ -125,7 +125,7 @@ const createBot = async (name: string, instanceId: string) =>
     requireAvailableModel: true,
   })).body.bot;
 
-const readDump = (path: string) => (): { systemPrompt?: string; mcpConfig?: any } | undefined => {
+const readDump = (path: string) => (): { systemPrompt?: string; prompt?: unknown; mcpConfig?: any } | undefined => {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
@@ -270,8 +270,10 @@ describe("peer allow-list", () => {
       expect(systemPrompt).toContain(`- Quill — General assistant [id: ${quill.id}]`);
       expect(systemPrompt).toContain(`- Patch — General assistant [id: ${patch.id}]`);
       // Who is busy is its own line, outside the roster (peer-roster.test.ts
-      // pins that it sits in the volatile half).
-      expect(systemPrompt).toContain("Team availability: every teammate is available.");
+      // pins that it sits in the volatile half, which a launch delivers in its
+      // first message rather than the cached system prompt).
+      expect(systemPrompt).not.toContain("Team availability");
+      expect(JSON.stringify(dump.prompt)).toContain("Team availability: every teammate is available.");
       // Ordinary chats may coordinate bounded subwork, but never inherit a
       // Chief's authority or a teammate's permissions.
       expect(systemPrompt).toContain("Use coordinate_bots");

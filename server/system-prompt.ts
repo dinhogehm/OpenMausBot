@@ -5,6 +5,7 @@
 // orders them, drops the empty ones, and reports the size of each section.
 // The sentences that both the direct-turn and room-turn paths use live
 // here too, so neither path can drift from the other or from the preview.
+import { createHash } from "node:crypto";
 import { soulSystemPrompt } from "./bot-folder.ts";
 import { languagePrompt } from "./reply-language.ts";
 import { teammateAvailabilityPrompt, type RosterMember } from "./peer-roster.ts";
@@ -36,8 +37,36 @@ export const LANGUAGE_PROMPT = languagePrompt();
  * contract, which relaunched the CLI — and the provider then re-uploaded the
  * entire conversation at the cache-write rate. Mentions did the same on any
  * turn that tagged a bot, and recent work did it on every turn of an active
- * bot, because its "2h ago" labels drift even when nothing else changed. */
-const VOLATILE_SECTIONS = new Set(["memory", "mentions", "outstanding", "recent", "shared", "availability"]);
+ * bot, because its "2h ago" labels drift even when nothing else changed.
+ *
+ * The rest describe this one turn rather than the conversation, so they
+ * come and go with where the turn came from: the surface paragraph, which
+ * offers select_computer only on a person's own message; the teammate-task
+ * policy, present only on a coordinated request; the routine and webhook
+ * provenance; and the setup, skill and playbook blocks that the message's
+ * own words switch on. In the stable half each of them flipped the spawn
+ * contract whenever a person's message, a harness report and a teammate's
+ * request took turns in one conversation — 401 of the 402 cache misses
+ * between turns a few minutes apart in the 07/10 cost audit. */
+const VOLATILE_SECTIONS = new Set([
+  "memory", "mentions", "outstanding", "recent", "shared", "availability",
+  "plan", "assignment", "routine-execution", "webhook", "setup", "skill-instructions", "playbooks",
+]);
+
+/** Fingerprints of the stable sections, by id, for the diagnostic that
+ * names which of them changed between two turns of one conversation. */
+export function stableSectionDigests(sections: readonly PromptSection[]): Map<string, string> {
+  return new Map(sections
+    .filter((section) => !VOLATILE_SECTIONS.has(section.id))
+    .map((section) => [section.id, createHash("sha256").update(section.text).digest("hex")]));
+}
+
+/** The ids whose stable text differs between two fingerprint sets: added,
+ * removed or changed. Ids only, so a log line never carries prompt text. */
+export function changedStableSections(previous: ReadonlyMap<string, string>, next: ReadonlyMap<string, string>): string[] {
+  const ids = new Set([...previous.keys(), ...next.keys()]);
+  return [...ids].filter((id) => previous.get(id) !== next.get(id));
+}
 
 /** The team availability section, defined once for the direct turn, the room
  * turn and the preview. Its id is what puts it in the volatile half: a call

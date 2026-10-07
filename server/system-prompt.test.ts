@@ -25,8 +25,11 @@ import {
   ROUTINE_EXECUTION_PROMPT,
   WEBHOOK_PROMPT,
   SIGN_IN_PROMPT,
+  stableSectionDigests,
+  changedStableSections,
   type ComputerPromptKind,
 } from "./system-prompt.ts";
+import { surfacePrompt } from "./surface.ts";
 
 describe("resolveComputerPromptKind", () => {
   // One ladder for the settings preview, a direct turn, and a room turn,
@@ -115,6 +118,60 @@ describe("buildSystemPrompt", () => {
     expect(built.volatile).toContain("@Fig");
     expect(built.volatile).toContain("today 20:48");
     expect(built.volatile).not.toContain("Search past sessions");
+  });
+
+  it("gives a person's message, a harness report and a teammate's request one stable half", () => {
+    // The three kinds of turn that take turns in a Chief's conversation. The
+    // surface paragraph offers select_computer only on the person's own
+    // message, and the teammate-task policy rides only a coordinated request
+    // (index.ts). Both used to sit in the stable half, so each switch between
+    // these turns relaunched the CLI and re-priced the whole history.
+    const assignment = "\nComplete the current addressed teammate request in this conversation.";
+    const turn = (canSelect: boolean, coordinated: boolean) => buildSystemPrompt("You are Chief.", "Run the team.", [
+      { id: "plan", label: "Surface", text: surfacePrompt({ computer: null, browser: true }, { canSelect }) },
+      { id: "coordination", label: "Team", text: " Use coordinate_bots." },
+      { id: "assignment", label: "Teammate task", text: coordinated ? assignment : "" },
+      { id: "routine-execution", label: "Routine execution", text: "" },
+      { id: "memory", label: "Memory", text: " Your memory: likes tea." },
+    ]);
+    const owner = turn(true, false);
+    const report = turn(false, false);
+    const teammate = turn(false, true);
+
+    expect(report.stable).toBe(owner.stable);
+    expect(teammate.stable).toBe(owner.stable);
+    expect(owner.stable).toContain("Use coordinate_bots.");
+    expect(owner.stable).not.toContain("select_computer");
+
+    // nothing is lost: each turn's own instructions are in its volatile half,
+    // which the drivers deliver inside that turn's message
+    expect(owner.volatile).toContain("use select_computer with no arguments");
+    expect(report.volatile).not.toContain("select_computer");
+    expect(teammate.volatile).toContain("addressed teammate request");
+    expect(owner.volatile).not.toContain("addressed teammate request");
+    for (const built of [owner, report, teammate]) {
+      for (const section of built.sections) expect(built.text).toContain(section.text);
+    }
+
+    // the prompt-stable log names a changed stable section by id only
+    expect(changedStableSections(stableSectionDigests(owner.sections), stableSectionDigests(teammate.sections))).toEqual([]);
+    const renamed = buildSystemPrompt("You are Boss.", "Run the team.", []);
+    expect(changedStableSections(stableSectionDigests(owner.sections), stableSectionDigests(renamed.sections)))
+      .toEqual(["persona", "coordination"]);
+  });
+
+  it("puts the turn-specific provenance, setup, skill and playbook blocks in the volatile half", () => {
+    const built = buildSystemPrompt("You are Kiwi.", "", [
+      { id: "setup", label: "Setup", text: " Setup mode." },
+      { id: "routine-execution", label: "Routine execution", text: ROUTINE_EXECUTION_PROMPT },
+      { id: "webhook", label: "Webhook provenance", text: WEBHOOK_PROMPT },
+      { id: "skill-instructions", label: "Skill instructions", text: " <openmaus-skill>" },
+      { id: "playbooks", label: "Playbooks", text: " Playbook." },
+    ]);
+    expect(built.stable).toBe("You are Kiwi.");
+    for (const text of [" Setup mode.", ROUTINE_EXECUTION_PROMPT, WEBHOOK_PROMPT, " <openmaus-skill>", " Playbook."]) {
+      expect(built.volatile).toContain(text);
+    }
   });
 
   it("has an empty volatile half when nothing mid-conversation is present", () => {

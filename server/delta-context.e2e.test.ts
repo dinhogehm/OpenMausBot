@@ -13,6 +13,10 @@ import { request } from "../scripts/mcp-server.ts";
 import { waitForExit } from "./testing/cleanup.ts";
 
 const count = (text: string, needle: string) => text.split(needle).length - 1;
+// A launch's first message opens with the volatile half of the system prompt
+// (memory, recent work, outstanding teammate work) as a <system-reminder>;
+// what the harness replayed or the person typed is what follows it.
+const withoutContextNote = (text: string) => text.replace(/^<system-reminder>\n[\s\S]*?\n<\/system-reminder>\n\n/, "");
 const jsonl = (path: string) => existsSync(path)
   ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 
@@ -902,7 +906,7 @@ it("keeps resuming an ordinary turn after a soul change, as before", () => fixtu
   await f.send("Second message.");
   await f.wait();
   expect(f.launches().at(-1).resume).not.toBeNull();
-  expect(f.prompt(f.turns().at(-1))).toBe("Second message.");
+  expect(withoutContextNote(f.prompt(f.turns().at(-1)))).toBe("Second message.");
 }), 60_000);
 
 // ── Steers: never counted as received on output alone ──
@@ -1099,7 +1103,7 @@ it("gives a delegate_bot source today's fresh session and replay when its soul c
   // poll for it so a slow launch is not mistaken for a wrong resume.
   await expect.poll(() => f.launches().at(-1)?.resume, { timeout: 10_000 }).toBe(null);
   expect(f.prompt(third)).toContain("received an update outside your provider session");
-  expect(count(f.prompt(third), late)).toBe(1);
+  expect(count(withoutContextNote(f.prompt(third)), late)).toBe(1);
 }), 120_000);
 
 // ── Settings a resumed session cannot take on ──
