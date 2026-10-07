@@ -110,21 +110,12 @@ export function botItemAsk(input: { title: string; command?: string; steps?: Rea
   return other ? "mixed" : "remove";
 }
 
-/** A command without its worktree removals (R3-2): a `for … do … done` loop
- * that removes worktrees goes whole; of `A && git worktree remove X; B`, A
- * and B stay. Empty when nothing but removals (and a `cd`) is left. */
-export function withoutRemovals(command: string): string {
-  const loops = command.replace(/\bfor\s+\w+\s+in\b[\s\S]*?\bdone\b/g, (loop) => (/worktree\s+remove/.test(loop) ? " " : loop));
-  const parts = loops.split(/(\s*(?:&&|\|\||;)\s*)/);
-  const kept: string[] = [];
-  for (let index = 0; index < parts.length; index += 2) {
-    const part = parts[index]!.trim();
-    if (!part || /worktree\s+remove/.test(part)) continue;
-    if (kept.length) kept.push((parts[index - 1] ?? " && ").trim() === ";" ? "; " : ` ${(parts[index - 1] ?? "&&").trim()} `);
-    kept.push(part);
-  }
-  const rest = kept.join("");
-  return /^\s*(?:cd\s+\S+\s*)?$/.test(rest) ? "" : rest;
+/** A command that is ONE `git worktree remove` and nothing else: no
+ * operator, subshell, `bash -c`, loop, condition, pipe or heredoc. A command
+ * with a removal is never rewritten: cutting `remove X || rm -rf X` left an
+ * unconditional `rm -rf X` (INSP-R13fol R4-1). */
+export function onlyRemoval(command: string): boolean {
+  return /^\s*git\s+(?:-C\s+\S+\s+)?worktree\s+remove(?:\s+(?:--force|-f))*\s+[^\s;&|()$`<>]+\s*$/.test(command);
 }
 
 /** The size the text says right after a folder's name ("8891-503-diag e 8891-inbox-503 (215 MB cada)"), never one said before it (R3-5). */
@@ -144,12 +135,13 @@ function sizeAfter(text: string, name: string, folders: readonly string[]): stri
 
 /** The removal part of a mixed item (R2-3): the folders its `git worktree
  * remove` commands name (a `for w in A B; do … worktree remove …/$w` names
- * them in its list), with what its steps say of each; its steps with only
- * the removals out of their commands (R3-2), each saying the removal goes
- * through the server's disk item; and its decisions whose reply removes a
- * worktree rewritten to point there (R3-3). Null when it is not mixed or
- * names no folder of the worktrees. */
-export function splitMixedRemoval<S extends { text: string; command?: string }, O extends { label: string; reply: string }>(input: { title: string; command?: string; steps?: readonly S[]; options?: readonly O[] }, folders: readonly string[]): { folders: LeftFolder[]; steps: S[]; options?: O[] } | null {
+ * them in its list), with what its steps say of each; its steps without
+ * those commands — a command that removes a worktree leaves WHOLE, never
+ * rewritten (R4-1): one that also did something else is said so, for the
+ * bot to write that part on its own (`mixedCommands`); and its decisions
+ * whose reply removes a worktree rewritten to point to the server's item
+ * (R3-3). Null when it is not mixed or names no folder of the worktrees. */
+export function splitMixedRemoval<S extends { text: string; command?: string }, O extends { label: string; reply: string }>(input: { title: string; command?: string; steps?: readonly S[]; options?: readonly O[] }, folders: readonly string[]): { folders: LeftFolder[]; steps: S[]; options?: O[]; mixedCommands: number } | null {
   if (botItemAsk(input) !== "mixed") return null;
   const removing = [
     ...(input.steps ?? []).flatMap((step) => (step.command && /worktree\s+remove/.test(step.command) ? [step.command] : [])),
@@ -160,17 +152,22 @@ export function splitMixedRemoval<S extends { text: string; command?: string }, 
   const texts = [...(input.steps ?? []).map((step) => step.text), ...(input.options ?? []).map((option) => option.reply)];
   const said = (name: string) => texts.find((text) => text.includes(name)) ?? texts.find((text) => namedFolders(text, folders, true).includes(name)) ?? "";
   const note = "(o comando de remoção saiu deste item: a remoção vai pelo item de disco do servidor, conferido no Mac)";
+  const mixedNote = "(comando retirado: misturava remoção de worktree com outros passos; peça ao bot para separar. A remoção vai pelo item de disco do servidor, conferido no Mac)";
+  let mixedCommands = 0;
+  const steps = (input.steps ?? []).map((step) => {
+    if (!step.command || !/worktree\s+remove/.test(step.command)) return step;
+    const { command: _command, ...rest } = step;
+    const mixed = !onlyRemoval(step.command);
+    if (mixed) mixedCommands += 1;
+    return { ...rest, text: `${step.text} ${mixed ? mixedNote : note}`.slice(0, 500) } as S;
+  });
   return {
     folders: names.map((name) => {
       const reason = said(name);
       return { name, size: sizeAfter(reason, name, folders), reason: reason.replace(/\s+/g, " ").trim() };
     }),
-    steps: (input.steps ?? []).map((step) => {
-      if (!step.command || !/worktree\s+remove/.test(step.command)) return step;
-      const { command: _command, ...rest } = step;
-      const left = withoutRemovals(step.command);
-      return { ...rest, ...(left ? { command: left } : {}), text: `${step.text} ${note}`.slice(0, 500) } as S;
-    }),
+    steps,
+    mixedCommands,
     ...(input.options ? {
       options: input.options.map((option) => (/worktree\s+remove/.test(option.reply)
         ? { ...option, reply: `${option.label}: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac; por este item, não remova nenhuma worktree.`.slice(0, 500) }
@@ -612,17 +609,25 @@ export function ownerRemovalIntent(text: string, itemFolders: readonly string[])
   };
 }
 
-/** Whether an answer to a disk item may remove anything: the removing
- * decisions, or the owner's words authorizing a removal. */
-export function answerRemoves(answer: { kind: string; label?: string; text?: string }, itemFolders: readonly string[]): boolean {
-  if (answer.kind === "option") return answer.label === DISK_CLEAN_LABEL || answer.label === DISK_PUSH_LABEL || answer.label === DISK_BRANCH_LABEL;
-  return answer.kind === "text" && Boolean(answer.text && ownerRemovalIntent(answer.text, itemFolders));
+/** Whether an answer to a disk item may remove anything: only a removing
+ * decision — the item's buttons. The owner's free text never authorizes a
+ * removal: every attempt to read it ("todas, a 503 fica", "…sem a X",
+ * "keep X") left an exception that authorized the very folder kept (INSP-R13fol
+ * R2-1, R3-1, R4-2). */
+export function answerRemoves(answer: { kind: string; label?: string }): boolean {
+  return answer.kind === "option" && (answer.label === DISK_CLEAN_LABEL || answer.label === DISK_PUSH_LABEL || answer.label === DISK_BRANCH_LABEL);
 }
 
-/** Under the owner's words that authorize no removal ("sim", "ok", "pode decidir por mim…", 06/10 11:47): said to the bot (INSP-R13fol R2-1). */
-export const DISK_NOT_AUTHORIZED = "[Servidor: este texto não autoriza remover nenhuma pasta. Não remova nada; se o dono quis autorizar, peça a ele que escolha uma decisão ou escreva quais pastas.]";
-/** And to the owner, once the answer is sent. */
-export const DISK_NOT_AUTHORIZED_NOTICE = "O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas.";
+/** Under any free text to a disk item: said to the bot (R4-2). */
+export const DISK_NOT_AUTHORIZED = "[Servidor: texto livre não autoriza remover nenhuma pasta. Não remova nada; para remover, o dono usa os botões do item («Remover as limpas», «Push e remover», «Criar branch e push»).]";
+/** And to the owner, once the text is sent. */
+export const DISK_NOT_AUTHORIZED_NOTICE = "Texto não autoriza remoção. Para remover, use os botões do item.";
+
+/** The notice to the owner after free text to a disk item: the buttons, and — when the words read like a removal — which of the item's buttons they may have meant (R4-2; ownerRemovalIntent only suggests now). */
+export function diskTextNotice(text: string, folders: readonly string[], labels: readonly string[]): string {
+  const removing = labels.filter((label) => label === DISK_CLEAN_LABEL || label === DISK_PUSH_LABEL || label === DISK_BRANCH_LABEL);
+  return ownerRemovalIntent(text, folders) && removing.length ? `${DISK_NOT_AUTHORIZED_NOTICE} Talvez você quisesse ${removing.map((label) => `«${label}»`).join(" ou ")}.` : DISK_NOT_AUTHORIZED_NOTICE;
+}
 
 /** The decision for folders with commits on no branch (HEAD detached): a branch first, then its push (R2-4). */
 export const DISK_BRANCH_LABEL = "Criar branch e push";
@@ -634,9 +639,9 @@ const pushFirst = (name: string, fact: FolderFacts) => `${name}${fact.branch ? `
  * else (R13-followup #2, INSP-R13fol #1-#3, #7). Never more than the owner
  * said: "Remover as limpas" removes the clean ones it names, without
  * --force; "Push e remover" is push FIRST and the commit seen on the remote
- * BEFORE removing — a removal never loses a commit only on this Mac unless
- * the owner wrote so; free text authorizes only what ownerRemovalIntent
- * reads in it. Null when the answer authorizes nothing (no line is added). */
+ * BEFORE removing — a removal never loses a commit only on this Mac; free
+ * text authorizes nothing, and says so (R4-2). Null for an answer that is
+ * neither (Manter, a request for steps). */
 export function diskAnswerLine(folders: readonly string[], facts: ReadonlyMap<string, FolderFacts>, answer: { kind: string; label?: string; text?: string }, kept: readonly string[]): string | null {
   const forbidden = `PROIBIDO remover qualquer outra pasta${kept.length ? `, inclusive as que o item manteve: ${kept.join("; ")}` : ""}.`;
   const recheck = "Antes de cada remoção, reconfira lsof e segredos na hora; se algo mudou, pare e me diga.]";
@@ -657,31 +662,8 @@ export function diskAnswerLine(folders: readonly string[], facts: ReadonlyMap<st
     }
     return null;
   }
-  if (answer.kind !== "text" || !answer.text) return null;
-  const intent = ownerRemovalIntent(answer.text, folders);
-  // words that authorize nothing still reach the bot with the state checked now and this (R2-1)
-  if (!intent) return DISK_NOT_AUTHORIZED;
-  const scope = intent.folders.filter(free);
-  const busy = intent.folders.filter((name) => !free(name));
-  const secret = scope.filter((name) => facts.get(name)!.secrets?.length);
-  const rest = scope.filter((name) => !secret.includes(name));
-  const push = rest.filter((name) => facts.get(name)!.unpushed !== false && !intent.discardUnpushed);
-  const go = rest.filter((name) => !push.includes(name));
-  const how = (name: string) => {
-    const fact = facts.get(name)!;
-    if (intent.force.includes(name)) return `${name} (com --force: o dono escreveu force para ela${fact.dirty === true ? "; as alterações não commitadas se perdem" : ""})`;
-    if (fact.dirty === true) return `${name} (tem alterações não commitadas: sem --force o git recusa; se recusar, pare e me diga)`;
-    if (fact.dirty === null) return `${name} (estado do git desconhecido: confira antes; se o git recusar, pare e me diga)`;
-    return name;
-  };
-  return [
-    `[Servidor: o dono escreveu «${answer.text.replace(/\s+/g, " ").trim().slice(0, 120)}».`,
-    go.length ? `Pelo texto dele, pode remover agora só estas, sem --force salvo onde dito: ${go.map(how).join("; ")}.` : "Pelo texto dele, nenhuma pasta pode ser removida agora sem antes o que segue.",
-    push.length ? `Push primeiro: faça push da branch e confirme o commit no remoto ANTES de remover; sem isso, não remova (o dono não escreveu que os commits locais podem se perder): ${push.map((name) => pushFirst(name, facts.get(name)!)).join("; ")}.` : "",
-    secret.length ? `Só depois de copiar os segredos para fora e o dono confirmar a cópia: ${secret.map((name) => `${name} (${facts.get(name)!.secrets!.join(", ")})`).join("; ")}.` : "",
-    busy.length ? `Em uso agora, não remova: ${busy.join(", ")}.` : "",
-    forbidden, recheck,
-  ].filter(Boolean).join(" ");
+  // any free text: no authorization, whatever it says (R4-2)
+  return answer.kind === "text" ? DISK_NOT_AUTHORIZED : null;
 }
 
 /** The folders an item kept out: its own list when it has one, else as its why says them (items saved before it). */

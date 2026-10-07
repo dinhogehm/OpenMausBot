@@ -539,20 +539,20 @@ describe("a bot's own disk item and a reply that leaves worktrees (R13-followup)
     expect(JSON.stringify(item.options)).not.toContain("keen-agnesi");
   });
 
-  it("answers \"Pode remover todos\" with what it allows, nothing more, and forbids every other folder", () => {
+  it("answers the owner's \"Pode remover todos\" of 06/10 18:53 with no authorization; \"Push e remover\" with push first and every other folder forbidden", () => {
     const folders = d.botDiskItemFolders(o28, names);
     const facts = d.withBotKeeps(folders, new Map(folders.map((each) => [each.name, { ...fact(each.name), ...(each.name.startsWith("9337") ? { branch: "fix/9337-sobrecarga" } : {}) }])));
     const item = d.diskDecisionItem(folders, facts, ROOT, "")!;
     const asked = d.keyFolders(item.key);
-    const line = d.diskAnswerLine(asked, facts, { kind: "text", text: "Pode remover todos" }, item.diskKept)!;
-    // no --force by default, a commit only on this Mac is pushed first, secrets copied first
-    expect(line).toContain("Pelo texto dele, pode remover agora só estas, sem --force salvo onde dito: 503-atendimento-helpdesk-2785c8 (tem alterações não commitadas: sem --force o git recusa; se recusar, pare e me diga); chat-wait-time-issue-21f481 (tem alterações não commitadas: sem --force o git recusa; se recusar, pare e me diga); merge-deploy-open-prs-00664b (tem alterações não commitadas: sem --force o git recusa; se recusar, pare e me diga).");
-    expect(line).toContain("Push primeiro: faça push da branch e confirme o commit no remoto ANTES de remover; sem isso, não remova (o dono não escreveu que os commits locais podem se perder): 9337-sobrecarga-d1-no-envio-do-agente-2f6a57 (branch fix/9337-sobrecarga).");
-    expect(line).toContain("Só depois de copiar os segredos para fora e o dono confirmar a cópia: agent-a492b70af0b5210db (.dev.vars).");
+    // free text, the very words of 18:53: nothing may go (INSP-R13fol R4-2)
+    expect(d.diskAnswerLine(asked, facts, { kind: "text", text: "Pode remover todos" }, item.diskKept)).toBe(d.DISK_NOT_AUTHORIZED);
+    // the button: push first, never --force, the folders the item kept out forbidden by name
+    const push = item.options.find((option) => option.label === d.DISK_PUSH_LABEL)!;
+    const line = d.diskAnswerLine(asked, facts, { kind: "option", label: d.DISK_PUSH_LABEL, text: push.reply }, item.diskKept)!;
+    expect(line).toContain("9337-sobrecarga-d1-no-envio-do-agente-2f6a57 (branch fix/9337-sobrecarga)");
     expect(line).toContain("PROIBIDO remover qualquer outra pasta, inclusive as que o item manteve: ");
     expect(line).toContain("keen-agnesi-80191d (o próprio item dizia:");
     expect(line).not.toContain("com --force");
-    expect(line).not.toMatch(/autorizou remover agora/);
   });
 });
 
@@ -564,8 +564,20 @@ describe("what an answer to a disk item authorizes (INSP-R13fol)", () => {
   const facts = new Map<string, d.FolderFacts>([[A, { inUse: null, dirty: true, unpushed: true, branch: "claude/503-atendimento" }], [B, { inUse: null, dirty: false, unpushed: true, branch: "fix/9337" }], [C, { inUse: null, dirty: null, unpushed: null }]]);
   const all = [A, B, C];
 
-  it("words that authorize nothing reach the bot saying so: \"não autoriza remover nenhuma pasta\" (INSP-R13fol R2-1, R2-2)", () => {
+  it("free text never authorizes a removal, whatever it says; only the item's buttons do (INSP-R13fol R4-2)", () => {
     const texts = [
+      // what used to authorize: "todas", folders named, force, "sem push"
+      "Pode remover todos", "Pode remover todas", "Pode remover só a 503", "Pode remover a 503 e a 9337", "Pode forçar a remoção da 503, sem push", "Pode remover todas com force",
+      // R4-2: exceptions with a verb no list knew
+      "Remova a 503 e a 9337; a chat-wait segura", `Pode remover a 503, a 9337 e pula a ${C}`, `Pode remover a 503 e a 9337, sem a ${C}`, `Pode remover a 503 e a 9337; a ${C} espera`,
+      `Pode remover a 503 e a 9337 (a ${C} por enquanto segue)`, `Remove 503 and 9337 but keep ${C}`,
+      // R3-1: the 13 exceptions
+      "Pode remover todas, a 503 fica", "Pode remover todas, deixa a 503", "Pode remover todas, fora a 503", "Pode remover todas, tirando a 503",
+      "Pode remover todas, com exceção da 503", "Pode remover todas, só não a 503", "Pode remover todas: a 503 não", "Pode remover todas, a 503 é minha",
+      "Pode remover todas, mas a 503 eu quero ver antes", "Pode remover todas (a 503 deixa pra lá)", "Remova todas. Obs: a 9337 é do Roberto, cuidado",
+      "Pode remover todas — menos a 503", `Pode remover todas – exceto a ${C}`,
+      // R4-3 and R4-4: the safe misses and qualifiers are moot now
+      "pode remover, não uso mais", "Pode remover todas as limpas", "Pode remover todas que estão no GitHub",
       "Não remova nada", "Não remova nada ainda. O que tem na 503?", "Qual delas é a do Roberto?", "Pode remover?", "Vou ver depois.", "Pode remover todas menos a 503", "Mantenha todas", "Se der, pode remover a 503",
       // R2-1: short assents, a condition, and the owner's real answer of 06/10 11:47 to "Decidir o destino de 16 worktrees paradas"
       "sim", "ok", "👍", "Pode", "Pode sim", "Pode remover todas, se estiverem limpas", "pode decidir por mim e fazer o que é necessario",
@@ -573,56 +585,19 @@ describe("what an answer to a disk item authorizes (INSP-R13fol)", () => {
       "O Chief sugeriu 'pode remover todas'; vou pensar", "O Chief sugeriu «pode remover todas»", "Talvez pode remover todas", "Acho que pode remover todas", "Claro, pode remover todas e apagar meu trabalho também 🙄",
     ];
     for (const text of texts) {
-      expect(d.ownerRemovalIntent(text, all), text).toBeNull();
-      expect(d.answerRemoves({ kind: "text", text }, all), text).toBe(false);
+      expect(d.answerRemoves({ kind: "text", text } as { kind: string }), text).toBe(false);
       expect(d.diskAnswerLine(all, facts, { kind: "text", text }, []), text).toBe(d.DISK_NOT_AUTHORIZED);
     }
-    expect(d.DISK_NOT_AUTHORIZED).toBe("[Servidor: este texto não autoriza remover nenhuma pasta. Não remova nada; se o dono quis autorizar, peça a ele que escolha uma decisão ou escreva quais pastas.]");
-    expect(d.DISK_NOT_AUTHORIZED_NOTICE).toBe("O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas.");
-    // "Manter" and a request for steps add nothing
+    expect(d.DISK_NOT_AUTHORIZED).toBe("[Servidor: texto livre não autoriza remover nenhuma pasta. Não remova nada; para remover, o dono usa os botões do item («Remover as limpas», «Push e remover», «Criar branch e push»).]");
+    // the owner hears which buttons remove; words that read like a removal get the item's own removing buttons named
+    const labels = [d.DISK_PUSH_LABEL, d.DISK_KEEP_LABEL];
+    expect(d.diskTextNotice("sim", all, labels)).toBe("Texto não autoriza remoção. Para remover, use os botões do item.");
+    expect(d.diskTextNotice("Pode remover todas", all, labels)).toBe("Texto não autoriza remoção. Para remover, use os botões do item. Talvez você quisesse «Push e remover».");
+    expect(d.diskTextNotice("Pode remover todas", all, [d.DISK_KEEP_LABEL])).toBe("Texto não autoriza remoção. Para remover, use os botões do item.");
+    // only the removing buttons remove; "Manter" does not
+    for (const label of [d.DISK_CLEAN_LABEL, d.DISK_PUSH_LABEL, d.DISK_BRANCH_LABEL]) expect(d.answerRemoves({ kind: "option", label })).toBe(true);
+    expect(d.answerRemoves({ kind: "option", label: d.DISK_KEEP_LABEL })).toBe(false);
     expect(d.keepsFolders({ kind: "option", label: d.DISK_KEEP_LABEL })).toBe(true);
-    // a quoted part is not the owner's, the rest is; a dash never ends the owner's words (R3-1)
-    expect(d.ownerRemovalIntent("Pode remover a 503; o Chief disse 'todas'", all)).toEqual({ folders: [A], force: [], discardUnpushed: false });
-    expect(d.ownerRemovalIntent("Pode remover a 503 — o Chief disse que todas", all)).toBeNull();
-  });
-
-  it("a folder named as an exception is never the one authorized: no authorization at all (INSP-R13fol R3-1)", () => {
-    const thirteen = [
-      "Pode remover todas, a 503 fica", "Pode remover todas, deixa a 503", "Pode remover todas, fora a 503", "Pode remover todas, tirando a 503",
-      "Pode remover todas, com exceção da 503", "Pode remover todas, só não a 503", "Pode remover todas: a 503 não", "Pode remover todas, a 503 é minha",
-      "Pode remover todas, mas a 503 eu quero ver antes", "Pode remover todas (a 503 deixa pra lá)", "Remova todas. Obs: a 9337 é do Roberto, cuidado",
-      "Pode remover todas — menos a 503", `Pode remover todas – exceto a ${C}`,
-    ];
-    for (const text of thirteen) {
-      expect(d.ownerRemovalIntent(text, all), text).toBeNull();
-      expect(d.diskAnswerLine(all, facts, { kind: "text", text }, []), text).toBe(d.DISK_NOT_AUTHORIZED);
-    }
-    // a name with no exception and no "todas" still scopes; "todas" alone still covers all
-    expect(d.ownerRemovalIntent("Pode remover a 503 e a 9337", all)!.folders).toEqual([A, B]);
-    expect(d.ownerRemovalIntent("Pode remover todas", all)!.folders).toEqual(all);
-  });
-
-  it("\"Pode remover só a 503\" authorizes the 503 only, never with --force", () => {
-    expect(d.ownerRemovalIntent("Pode remover só a 503", all)).toEqual({ folders: [A], force: [], discardUnpushed: false });
-    const line = d.diskAnswerLine(all, facts, { kind: "text", text: "Pode remover só a 503" }, [])!;
-    expect(line).not.toContain(B);
-    expect(line).not.toContain(C);
-    expect(line).not.toContain("com --force");
-    // the 503 has commits only here: push first, not "removed and lost"
-    expect(line).toContain(`Push primeiro: faça push da branch e confirme o commit no remoto ANTES de remover; sem isso, não remova (o dono não escreveu que os commits locais podem se perder): ${A} (branch claude/503-atendimento).`);
-  });
-
-  it("--force only for a folder the owner named with force; commits given up only in so many words", () => {
-    expect(d.ownerRemovalIntent("Pode remover todas com force", all)).toEqual({ folders: all, force: [], discardUnpushed: false });
-    expect(d.ownerRemovalIntent("Pode forçar a remoção da 503, sem push", all)).toEqual({ folders: [A], force: [A], discardUnpushed: true });
-    const line = d.diskAnswerLine(all, facts, { kind: "text", text: "Pode forçar a remoção da 503, sem push" }, [])!;
-    expect(line).toContain(`pode remover agora só estas, sem --force salvo onde dito: ${A} (com --force: o dono escreveu force para ela; as alterações não commitadas se perdem).`);
-    // "todas": a folder whose push is unknown is pushed first; one whose git state is unknown is never forced, and says so
-    const every = d.diskAnswerLine(all, facts, { kind: "text", text: "Pode remover todas" }, [])!;
-    expect(every).toMatch(new RegExp(`Push primeiro: [^.]*${C}\\.`));
-    const pushed = new Map(facts).set(C, { inUse: null, dirty: null, unpushed: false });
-    expect(d.diskAnswerLine(all, pushed, { kind: "text", text: "Pode remover todas" }, [])).toContain(`${C} (estado do git desconhecido: confira antes; se o git recusar, pare e me diga)`);
-    expect(every).not.toContain("com --force");
   });
 
   it("\"Push e remover\" is push first and the commit on the remote before any removal", () => {
@@ -634,7 +609,7 @@ describe("what an answer to a disk item authorizes (INSP-R13fol)", () => {
     expect(line).toContain(`faça push da branch dela (sem force) e confirme que o commit está no remoto — git -C <pasta> branch -r --contains HEAD não vazio — ANTES de remover: ${A} (branch claude/503-atendimento); ${B} (branch fix/9337).`);
     expect(line).toContain("nenhum commit que só existe neste Mac pode se perder");
     expect(line).not.toMatch(/autorizou remover agora|perde: commits/);
-    expect(d.answerRemoves({ kind: "option", label: d.DISK_KEEP_LABEL }, [A, B])).toBe(false);
+    expect(d.answerRemoves({ kind: "option", label: d.DISK_KEEP_LABEL })).toBe(false);
   });
 
   it("a decision covers the folders it names by their exact name, never by a part of another (9032-…-n1 and 9032-…-n1-7d8a26)", () => {
@@ -647,8 +622,6 @@ describe("what an answer to a disk item authorizes (INSP-R13fol)", () => {
     expect(line).not.toMatch(new RegExp(`${n1}(?!-7d8a26)`));
     expect(d.namedFolders(`Remova ${n1b}.`, [n1, n1b])).toEqual([n1b]);
     expect(d.namedFolders(`git worktree remove /x/.claude/worktrees/${n1}`, [n1, n1b])).toEqual([n1]);
-    // the owner's short form "a 9032" is ambiguous here: nothing
-    expect(d.ownerRemovalIntent("Pode remover a 9032", [n1, n1b])).toBeNull();
   });
 });
 
@@ -707,16 +680,58 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     expect(orphanSplit.folders.map((each) => each.name)).toEqual(["n2-ticket-distribution-bug-78843c"]);
     expect(orphanSplit.steps[0]!.command).toBe("git push origin claude/n2-ticket-distribution-bug-78843c");
     expect(orphanSplit.steps[1]!.command).toBeUndefined();
+    // its loop (cd, checkout, remove --force) left whole, said so (R4-1)
+    expect(orphanSplit.steps[1]!.text).toContain("(comando retirado: misturava remoção de worktree com outros passos; peça ao bot para separar.");
+    expect(orphanSplit.mixedCommands).toBe(1);
+    expect(urgentSplit.mixedCommands).toBe(0);
+    // the item of the #9378 (05/10): the restore and the cache stay; the plain removal goes to the server
+    const w9378 = "9378-supervisor-do-atendimento-2fd161";
+    const item9378 = {
+      title: "Decidir o destino da worktree da #9378, já em produção (2,8G)",
+      steps: [
+        { text: "Descartar a linha que o graft adicionou ao .gitignore", command: `git -C /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${w9378} restore .gitignore` },
+        { text: "Remover a worktree (sem --force)", command: `git -C /Users/osvaldo/Projetos/nuria-platform worktree remove /Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/${w9378}` },
+        { text: "Opcional: apagar o cache do graft que a sessão tirou da pasta (regenerável)", command: "rm -rf /tmp/graft-9378-aside" },
+      ],
+    };
+    const split9378 = d.splitMixedRemoval(item9378, [...folders, w9378])!;
+    expect(split9378.folders.map((each) => each.name)).toEqual([w9378]);
+    expect(split9378.steps.map((step) => step.command)).toEqual([item9378.steps[0]!.command, undefined, "rm -rf /tmp/graft-9378-aside"]);
+    expect(split9378.mixedCommands).toBe(0);
+    // the item of 05/10 16:31: its rm -rf stays; the plain removal goes
+    const free = { ...urgent, title: "Liberar espaço em disco: 9 GiB livres (abaixo de 10)", steps: [urgent.steps[0]!, urgent.steps[1]!, { text: "Me responder aqui; eu confiro o df" }] };
+    const splitFree = d.splitMixedRemoval(free, folders)!;
+    expect(splitFree.steps.map((step) => step.command)).toEqual([urgent.steps[0]!.command, undefined, undefined]);
     // not mixed, or no worktree named: nothing to split
     expect(d.splitMixedRemoval(pushItem, folders)).toBeNull();
     expect(d.splitMixedRemoval({ ...urgent, steps: [urgent.steps[0]!, { text: "x", command: "git worktree remove .worktrees/lot-t-release" }] }, folders)).toBeNull();
   });
 
-  it("only the removals leave a compound command; a decision that removes points to the server's item (R3-2, R3-3)", () => {
-    expect(d.withoutRemovals("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo && git -C /r worktree remove /r/.claude/worktrees/merge-deploy-open-prs-00664b")).toBe("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo");
-    expect(d.withoutRemovals("git -C /r worktree remove /r/.claude/worktrees/x-1; rm -rf ~/.cache/ci && du -sh ~")).toBe("rm -rf ~/.cache/ci && du -sh ~");
-    expect(d.withoutRemovals("cd ~/Projetos/nuria-platform && for w in a-1 b-2; do git -C .claude/worktrees/$w checkout -- .gitignore; git worktree remove --force .claude/worktrees/$w; done")).toBe("");
-    expect(d.withoutRemovals("cd ~/p && for w in a-1; do git worktree remove $w; done && git push origin main")).toBe("cd ~/p && git push origin main");
+  it("a command with a removal and anything else leaves WHOLE, never rewritten into an unconditional one (R4-1); a decision that removes points to the server's item (R3-3)", () => {
+    const M = "/r/.claude/worktrees/merge-deploy-open-prs-00664b";
+    // the eight lines of the report, and the two the lead named: all mixed, none rewritten
+    const mixed = [
+      `git worktree remove ${M} || rm -rf ${M}`,
+      `git worktree remove ${M} && git branch -D fix/merge-deploy`,
+      `git worktree remove --force ${M} && git worktree prune`,
+      `bash -c "git worktree remove ${M} && rm -rf /tmp/c"`,
+      `(cd /r && git worktree remove ${M}) && rm -rf /tmp/a`,
+      `if test -d ${M}; then git worktree remove ${M}; fi`,
+      `for w in a-1 b-2; do rm -rf /tmp/$w; git worktree remove $w; done`,
+      `cat <<EOF\ngit worktree remove ${M} && echo ok\nEOF`,
+      `rm -rf /tmp/d && git worktree remove ${M} || echo falhou`,
+      `git worktree remove ${M} | tee /tmp/log`,
+    ];
+    for (const command of mixed) expect(d.onlyRemoval(command), command).toBe(false);
+    for (const command of [`git worktree remove ${M}`, `git -C /r worktree remove ${M}`, `git -C /r worktree remove --force ${M}`]) expect(d.onlyRemoval(command), command).toBe(true);
+    for (const command of mixed) {
+      const split = d.splitMixedRemoval({ title: "Liberar disco", steps: [{ text: "Limpe o cache", command: "rm -rf /tmp/cache" }, { text: "Remova a merge-deploy", command }] }, folders);
+      if (!split) continue; // a loop over $w names no folder here
+      expect(split.steps[1]!.command, command).toBeUndefined();
+      expect(split.steps[1]!.text, command).toContain("(comando retirado: misturava remoção de worktree com outros passos; peça ao bot para separar.");
+      expect(split.steps[0]!.command).toBe("rm -rf /tmp/cache");
+      expect(split.mixedCommands).toBe(1);
+    }
     const both = {
       title: "Apague o cache e a merge-deploy",
       steps: [{ text: "Apague o cache e remova a merge-deploy", command: "rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo && git -C /r worktree remove /r/.claude/worktrees/merge-deploy-open-prs-00664b" }],
@@ -724,7 +739,9 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     };
     const split = d.splitMixedRemoval(both, folders)!;
     expect(split.folders.map((each) => each.name)).toEqual(["merge-deploy-open-prs-00664b", "chat-wait-time-issue-21f481"]);
-    expect(split.steps[0]!.command).toBe("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo");
+    // "rm -rf .turbo && git worktree remove …": out whole, said so; the bot rewrites the cache part on its own
+    expect(split.steps[0]!.command).toBeUndefined();
+    expect(split.mixedCommands).toBe(1);
     expect(split.options![0]).toEqual({ label: "Rode você", reply: "Rode você: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac; por este item, não remova nenhuma worktree." });
     expect(split.options![1]).toEqual(both.options[1]);
   });
@@ -753,7 +770,7 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     const line = d.diskAnswerLine(["merge-deploy-open-prs-00664b"], facts, { kind: "option", label: d.DISK_BRANCH_LABEL, text: item.options[1]!.reply }, [])!;
     expect(line).toContain("crie a branch salva/<pasta> no HEAD (git -C <pasta> switch -c salva/<pasta>), faça push dela (sem force)");
     expect(line).toContain("merge-deploy-open-prs-00664b (HEAD destacado: crie antes a branch salva/merge-deploy-open-prs-00664b)");
-    expect(d.answerRemoves({ kind: "option", label: d.DISK_BRANCH_LABEL }, [])).toBe(true);
+    expect(d.answerRemoves({ kind: "option", label: d.DISK_BRANCH_LABEL })).toBe(true);
   });
 
   it("the bot's \"não remover\", \"não mexer\", \"preservar\" and a session pointing at it hold a folder", () => {

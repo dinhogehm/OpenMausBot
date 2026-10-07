@@ -136,7 +136,7 @@ import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
-import { answerRemoves, asksOwnerToDecide, botDiskItemFolders, busyNote, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_NOT_AUTHORIZED_NOTICE, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, keepsFolders, ownerRemovalIntent, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
+import { asksOwnerToDecide, botDiskItemFolders, busyNote, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskTextNotice, keepsFolders, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
 import { checkItemRows, fixedRowWarning, RowCheckBackoff, supersededItems, supersededLine, supersedeRefs } from "./owner-pending-guard.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -15039,8 +15039,7 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
     // under the owner's answer, only what the answer itself allows, and every other folder forbidden (R13-followup #2, INSP-R13fol #1-#3)
     const allowed = answer ? diskAnswerLine(folders.map((folder) => folder.name), facts, answer, kept) : null;
     // what must be pushed before it goes: looked for on the remote after the turn that carries the answer (INSP-R13fol #2, R2-4)
-    const covered = !answer?.text ? [] : answer.kind === "option" ? (answer.label === DISK_PUSH_LABEL || answer.label === DISK_BRANCH_LABEL ? namedFolders(answer.text, folders.map((folder) => folder.name)) : [])
-      : answer.kind === "text" ? (ownerRemovalIntent(answer.text, folders.map((folder) => folder.name))?.folders ?? []) : [];
+    const covered = answer?.text && answer.kind === "option" && (answer.label === DISK_PUSH_LABEL || answer.label === DISK_BRANCH_LABEL) ? namedFolders(answer.text, folders.map((folder) => folder.name)) : [];
     const pending = covered.filter((name) => facts.get(name)?.unpushed !== false && facts.get(name)?.head && !facts.get(name)?.inUse);
     if (pending.length && answer?.text) {
       autonomy.addDiskPushCheck({
@@ -15218,7 +15217,9 @@ async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: s
   const split = splitMixedRemoval(input, names);
   if (!split) return null;
   const opened = await serverDiskItem(bot, threadId, input, undefined, split.folders);
-  return { steps: split.steps, ...(split.options ? { options: split.options } : {}), message: opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor." };
+  // a command that mixed the removal with other steps left whole: the bot writes the other part on its own (INSP-R13fol R4-1)
+  const mixed = split.mixedCommands ? ` ${split.mixedCommands === 1 ? "Um comando seu misturava" : `${split.mixedCommands} comandos seus misturavam`} remoção de worktree com outros passos e saiu inteiro: se a outra parte ainda vale, reescreva-a num passo próprio, sem remoção de worktree.` : "";
+  return { steps: split.steps, ...(split.options ? { options: split.options } : {}), message: `${opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor."}${mixed}` };
 }
 
 async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending, beside?: LeftFolder[]): Promise<{ message: string; opened?: OwnerPending } | null> {
@@ -26127,7 +26128,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // "Manter" removes nothing: never checked, never refused (INSP-R12F r4). Every other answer is checked on the
       // Mac and carries the state found now — words that authorize no removal ("sim", "pode decidir por mim…") too,
       // with the server saying so to the bot and to the owner (INSP-R13fol R2-1)
-      const diskNotice = item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind === "text" && !answerRemoves(answer, keyFolders(item.key)) ? DISK_NOT_AUTHORIZED_NOTICE : undefined;
+      // free text never removes: the owner hears which buttons do (INSP-R13fol R4-2)
+      const diskNotice = item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind === "text" ? diskTextNotice(answer.text, keyFolders(item.key), (item.options ?? []).map((option) => option.label)) : undefined;
       if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
         // in turn with a routine's pass: the item read after it, gone if that pass replaced it
         const check = await diskItemTurn(async () => {
