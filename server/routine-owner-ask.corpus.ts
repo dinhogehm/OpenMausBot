@@ -22,8 +22,14 @@
 // R6: the mark of an item counts where the ask is said — its own sentence, or the label of its list — and never for
 // an ask about another ticket, issue or row than the item's; "Não abri item" never across a "mas" (INSP-R13VIS F1).
 // Open in the test: o1 (linha 190, #9384), o3 (#9374), o9 (the hook), o11 (#9326), o15.
-export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6";
-export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco"]> = [
+//
+// R7: a neighbour sentence points an ask at an open item only with something in common with the item's title — the
+// same id and no other action, or, for an ask with no id, a word of what it is about (INSP-R13VIS G1); "PR 9400",
+// "issue 9400" and a cell ("H192", "Atendimento!B190") are ids (G2).
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7";
+/** The items open when a phrase is read, any bot's, by id and title — the test's default set when a phrase gives none. */
+export type CorpusItems = ReadonlyArray<{ id: string; title: string }>;
+export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco" | "", open?: CorpusItems]> = [
   ["R1", "Como você decidiu ontem, preciso agora da sua aprovação para fazer o merge da #9400.", [], "detector"],
   ["R1", "Como você decidiu ontem, a #9400 está pronta. Preciso da sua aprovação para o merge.", ["Ver: preciso da sua aprovação para o merge"]],
   ["R1", "Continua com você: não mexi, mas decida até amanhã se a #9400 entra.", ["Ver: não mexi, mas decida até amanhã se a #9400 entra"]],
@@ -170,7 +176,7 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   ["R5", "Cabe a você aprovar a #9400.", [], "detector"],
   // an ask whose item already exists, said in its paragraph (real 02/10 07:37, 05/10 14:50 and 20:52; INSP-R13VIS E2)
   ["R5", "**Precisa de você (o11):** feche a #9326. Tentei fechar com um comentário com essa prova, mas o Jev barrou o comando e não tentei de novo.", []],
-  ["R5", "**Decisão sua (item o1 em \"Precisa de você\"):**\n- **Recomendo:** ajustar o corredor C1 para aceitar as colunas B, C e E numa linha nova da aba Atendimento.\n- **Ou:** você grava à mão a B185, a C185 e a E185. O comando está no item.", []],
+  ["R5", "**Decisão sua (item o1 em \"Precisa de você\"):**\n- **Recomendo:** ajustar o corredor C1 para aceitar as colunas B, C e E numa linha nova da aba Atendimento.\n- **Ou:** você grava à mão a B185, a C185 e a E185. O comando está no item.", [], "", [{ id: "o1", title: "Aprovar as 3 escritas da planilha (linhas 185 e 186) para eu gravar" }]],
   ["R5", "Continua com você a linha 190 da #9384, que o Jev barrou. O comando está em \"Precisa de você\" (o1).", []],
   ["R5", "Para destravar, falta você criar a trava; a pendência é a o15, e quem a abriu foi o Chief.", []],
   // the bot opened none, or says where the owner decides (real 05/10 21:26, 06/10 09:57)
@@ -190,6 +196,16 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   // the same marks, on the ask's own subject, still make it an echo
   ["R6", "Decisão sua (item o3): manter a pausa só no envio, e a #9374 é fechada.", []],
   ["R6", "Só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo. Atualizei o item o9 com o passo a passo.", []],
+  ["R7", "Avisar o Matheus depende de você. Atualizei o item o1 com o passo a passo do disco.", ["Avisar o Matheus depende de você"], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
+  ["R7", "Avisar o Matheus depende de você. O hotfix dele está no item o33.", ["Avisar o Matheus depende de você"], "", [{ id: "o33", title: "Decidir como a #9386 vai para produção (hotfix P1 do Matheus)" }]],
+  ["R7", "O deploy da #9386 depende de você. O caminho do merge está no item o33.", ["Ver: o deploy da #9386"], "", [{ id: "o33", title: "Decidir como a #9386 vai para produção (hotfix P1 do Matheus)" }]],
+  ["R7", "O deploy da #9400 depende de você. O merge já está no item o3.", ["Ver: o deploy da #9400"], "", [{ id: "o3", title: "Aprovar o merge da PR #9400" }]],
+  ["R7", "Decisão sua (item o3): aprovar o merge da PR 9400.", ["Decidir: aprovar o merge da PR 9400"], "", [{ id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" }]],
+  ["R7", "O merge da PR 9400 depende de você. O caso parecido de setembro foi o item o3.", ["Ver: o merge da PR 9400"], "", [{ id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" }]],
+  // what the item is about, said beside it: still the echo it was (real 03/10 13:41 and 05/10 16:32, by their words)
+  ["R7", "Liberar o disco depende de você. Atualizei o item o1 com o passo a passo.", [], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
+  // the o38 duplicate: the row by its cell ("H192") is the row of the ask (real 06/10 22:16)
+  ["R7", "A linha 192 depende de você. O comando está no o38.", [], "", [{ id: "o38", title: "Colar você mesmo as Observações da H192 (#9032): o Jev barrou o Monitor" }]],
   // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
   ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
 ];

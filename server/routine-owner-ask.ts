@@ -171,8 +171,10 @@ function sharedWords(a: string, b: string, except: readonly string[] = []): numb
 function idsIn(text: string): { ticket: string[]; issue: string[]; linha: string[] } {
   return {
     ticket: [...text.matchAll(/(?<![\w-])([A-Z]{2,6}-\d{4,8}-\d{2,6})(?![\w-])/g)].map((match) => slug(match[1]!)),
-    issue: [...text.matchAll(/(?<![\w/])#(\d{3,6})(?!\d)/g)].map((match) => match[1]!),
-    linha: [...text.matchAll(/(?<![\p{L}])(?:linha|L)\s?(\d{1,5})(?!\d)/gu)].map((match) => match[1]!),
+    // "#9400", and "PR 9400", "PR #9400", "issue 9400" (INSP-R13VIS G2)
+    issue: [...text.matchAll(/(?<![\w/])#(\d{3,6})(?!\d)|(?<![\p{L}])(?:PR|pull\s+request|issue)\s+#?(\d{3,6})(?!\d)/giu)].map((match) => (match[1] ?? match[2])!),
+    // "linha 192", "L192", and a cell of the sheet: "H192", "B190", "Atendimento!X192" (INSP-R13VIS G2)
+    linha: [...text.matchAll(/(?<![\p{L}])(?:linhas?|L)\s?(\d{1,5})(?!\d)|(?:(?<![\p{L}\d])|!)[A-K](\d{2,4})(?![\p{L}\d])/gu)].map((match) => (match[1] ?? match[2])!),
   };
 }
 
@@ -366,17 +368,52 @@ const IDS_OF = (text: string) => { const ids = idsIn(text); return new Set([...i
  * preciso que você aprove…"). */
 function echoesItem(ask: string, same: string, neighbours: string, items: ReadonlyMap<string, string>): boolean {
   const asked = IDS_OF(ask);
+  // what the ask is about, in words: its own, and the paragraph's sentences that point at no item — the pointing
+  // sentence ("Atualizei o item o1 com o passo a passo do disco") says what the item is, not what is asked
+  const said = [ask, ...splitSentences(neighbours).filter((each) => !new RegExp(ITEM_BY_ID.source, "iu").test(each))].join(" ");
   const fits = (id: string, near: boolean) => {
     if (!items.has(id)) return false;
-    const held = IDS_OF(items.get(id)!);
-    if (!asked.size) return true;
+    const title = items.get(id)!;
+    const held = IDS_OF(title);
     const shared = [...asked].some((each) => held.has(each));
-    return near ? shared || !held.size : shared;
+    if (near) return !asked.size || shared || !held.size;
+    // a neighbour points at it: an echo only with something in common with what the item is about (INSP-R13VIS G1) —
+    // with no title to compare, the ask that names nothing, as before
+    if (!title) return !asked.size;
+    // the same id, and no action of its own the item does not name ("O deploy da #9386…" beside an item on its merge)
+    if (asked.size) {
+      if (!shared) return false;
+      const doing = actionsIn(ask);
+      const named = new Set(actionsIn(title));
+      return !doing.length || doing.some((each) => named.has(each)) || commonWords(ask, title) > 0;
+    }
+    return commonWords(said, title) > 0;
   };
   if ([...same.matchAll(ITEM_BY_ID)].some((match) => fits(match[1]!.toLowerCase(), true))) return true;
   if (!asked.size && !/(?<![\p{L}])(?:mas|por[ée]m|s[óo]\s+que)(?![\p{L}])/iu.test(same) && (NO_ITEM_OPENED.test(same) || ITEM_WHERE_DECIDED.test(same))) return true;
   return [...neighbours.matchAll(ITEM_BY_ID)].some((match) => fits(match[1]!.toLowerCase(), false));
 }
+/** Words two texts share that say what they are about: content words, and acronyms ("WAF", "PR") — never an id,
+ * which is compared apart, nor the words every ask has. */
+function commonWords(a: string, b: string): number {
+  const words = (text: string) => {
+    // a person's name says who, not what ("Avisar o Matheus" and "o hotfix do Matheus" are not the same pendency)
+    const plain = text.replace(/#\d+|(?<![\p{L}])(?:linha|L)\s?\d+|[A-Z]{2,6}-\d{4,8}-\d{2,6}/gu, " ").replace(/(?<=[\p{L}\d,;:)]\s+)\p{Lu}\p{Ll}+/gu, " ");
+    return new Set([...contentWords(plain), ...[...plain.matchAll(/(?<![\p{L}])([A-Z]{2,5})(?![\p{L}])/gu)].map((match) => match[1]!.toLowerCase())].filter((word) => !ASK_WORDS.has(word) && !/^\d+$/.test(word)));
+  };
+  const two = words(b);
+  return [...words(a)].filter((word) => two.has(word)).length;
+}
+/** What an ask asks done, in a word: an infinitive ("instalar", "fechar") or the noun of an action ("deploy", "merge",
+ * "push", "publicação") — by its stem, so "aprovar" and "aprovação" meet; the words every ask has aside. */
+function actionsIn(text: string): string[] {
+  const words = strip(text).toLowerCase().split(/[^a-z]+/).filter((word) => word.length >= 4 && !ASK_WORDS.has(word));
+  const actions = words.filter((word) => /(?:ar|er|ir)$/.test(word) || /(?:cao|coes|mento)$/.test(word) || ACTION_NOUNS.has(word));
+  return [...new Set(actions.map((word) => word.replace(/(?:ar|er|ir|cao|coes|mento)$/, "")))];
+}
+const ACTION_NOUNS = new Set(["deploy", "merge", "push", "release", "carrier", "gate", "rollback", "hotfix", "commit", "backup", "login", "teste", "testes"]);
+/** Words any ask or item says, whatever it is about. */
+const ASK_WORDS = new Set(["depende", "dependem", "precisa", "precisam", "preciso", "decidir", "decisao", "aprovar", "falta", "item", "itens", "voce", "osvaldo", "pendencia", "pedido", "comando", "comandos", "passo", "agora", "ainda", "planilha", "issue", "issues"]);
 
 /** What the routine's reply leaves with the owner: one ask per pendency —
  * one per item of a list it leads ("Ainda dependem de você: - abrir… -
@@ -515,7 +552,8 @@ const lower = (text: string) => text.charAt(0).toLocaleLowerCase("pt-BR") + text
 export function routineAskTitle(ask: RoutineAsk): string {
   const title = askTitle(ask);
   const { kind, label } = ask.subject;
-  if (!label || !(kind === "ticket" || kind === "issue" || kind === "linha") || slug(title).includes(slug(label))) return title;
+  // "o merge da PR 9400" names the #9400 already
+  if (!label || !(kind === "ticket" || kind === "issue" || kind === "linha") || slug(title).includes(slug(label)) || (kind === "issue" && new RegExp(`(?<!\\d)${ask.subject.id}(?!\\d)`).test(title))) return title;
   return `${title.replace(/…$/, "").replace(/[\s,;:–—-]+$/, "")}${title.endsWith("…") ? "…" : ""} (${label})`;
 }
 function askTitle(ask: RoutineAsk): string {

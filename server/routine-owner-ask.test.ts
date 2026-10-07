@@ -850,6 +850,20 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
   });
 });
 
+// INSP-R13VIS G2: an issue said as a PR or an issue, and a row said by its cell, are the same subject
+describe("ids as the routines write them", () => {
+  it.each([
+    ["O merge da PR 9400 depende de você.", "routine-ask:issue:9400"],
+    ["O merge da PR #9400 depende de você.", "routine-ask:issue:9400"],
+    ["A issue 9400 depende de você.", "routine-ask:issue:9400"],
+    ["A H192 depende de você.", "routine-ask:linha:192"],
+    ["A célula Atendimento!B190 depende de você.", "routine-ask:linha:190"],
+    ["As linhas 185 e 186 dependem de você.", "routine-ask:linha:185"],
+  ])("%s", (text, key) => {
+    expect(routineOwnerAsks(text, ctx).map(routineAskKey)).toEqual([key]);
+  });
+});
+
 // INSP-R13VIS E3: titles of asks the conversation detector does not read today — kept right for when it does
 describe("titles of a decision or an action left with the owner", () => {
   const ask = (sentence: string, decide: boolean, subject: RoutineAsk["subject"] = { kind: "frase", id: "x", label: "" }): RoutineAsk => ({ sentence, decide, subject });
@@ -877,8 +891,9 @@ describe("the attack corpus", () => {
   ];
   const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: items.map((item) => item.id), items };
   const origin = { botName: "Monitor", routineName: "Atendimento", firstAt: 0, lastAt: 0 };
-  it.each(ROUTINE_ASK_CORPUS.map(([round, text, expected, note]) => [round, note ?? "", text, expected] as const))("%s %s: %s", (_round, _note, text, expected) => {
-    expect(routineOwnerAsks(text, corpusCtx).map((ask) => routineAskItem(ask, origin).title)).toEqual(expected);
+  it.each(ROUTINE_ASK_CORPUS.map(([round, text, expected, note, open]) => [round, note ?? "", text, expected, open] as const))("%s %s: %s", (_round, _note, text, expected, open) => {
+    const ctx = open ? { ...corpusCtx, itemIds: open.map((item) => item.id), items: open } : corpusCtx;
+    expect(routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title)).toEqual(expected);
   });
 
   it("holds every finding's phrases", () => {
