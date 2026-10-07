@@ -45,6 +45,10 @@ export interface CcSession {
   worktree: string;
   /** Where the session lives; known once the first run reports it. */
   cwd?: string;
+  /** cli: the worktree the server made for it before its first turn, with
+   * the dependencies cloned from the seed when it was in date (G2, R13-gate):
+   * the first turn runs right there instead of `-w`. */
+  cliWorktree?: { path: string; branch: string; caches: "cloned" | "install"; reason?: string };
   model?: string;
   permissionMode: CcPermissionMode;
   status: CcStatus;
@@ -311,10 +315,11 @@ export function slugify(text: string): string {
 
 /** argv for one turn. The brief/message always goes last, after "--", so a
  * text starting with "-" can never be read as a flag. */
-export function ccTurnArgs(session: Pick<CcSession, "id" | "worktree" | "model" | "permissionMode">, prompt: string, first: boolean): string[] {
+export function ccTurnArgs(session: Pick<CcSession, "id" | "worktree" | "model" | "permissionMode" | "cliWorktree">, prompt: string, first: boolean): string[] {
   return [
     "-p",
-    ...(first ? ["--session-id", session.id, "-w", session.worktree] : ["--resume", session.id]),
+    // a worktree the server made (and seeded) is the turn's cwd: no `-w`, which would make a bare one
+    ...(first ? ["--session-id", session.id, ...(session.cliWorktree ? [] : ["-w", session.worktree])] : ["--resume", session.id]),
     "--output-format", "stream-json",
     "--verbose",
     "--permission-mode", session.permissionMode,

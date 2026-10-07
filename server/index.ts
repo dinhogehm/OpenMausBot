@@ -411,7 +411,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, breakerRepo, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, breakerRepo, cacheLine, cliDependencyLine, installText, prepareCliWorktree, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -10032,7 +10032,8 @@ function sessionTokenEnv(session: CcSession): Record<string, string> {
  * unless a reply was queued meanwhile, which then runs as the next turn. */
 function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   const expectedCwd = join(session.repo, ".claude", "worktrees", session.worktree);
-  const cwd = first ? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
+  // the first turn runs in the worktree the server made, or in the repository for claude -w to make one
+  const cwd = first ? session.cliWorktree?.path ?? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
   ccLedger.markRunning(session);
   const lines: string[] = [];
   let buffer = "";
@@ -10410,6 +10411,39 @@ async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnTyp
   };
 }
 const ownPrepareState = { preparing: false };
+/** A headless session's first turn in a worktree the server made and seeded
+ * from the same seed as the app's (R13-gate G2: `claude -p -w` made bare
+ * ones, and the first ci:local failed on a missing vite after ~14 min of
+ * lease). Its brief says whether to install; not made, it goes the old way. */
+async function startSeededCli(session: CcSession, brief: string): Promise<void> {
+  const seedRepo = breakerRepo(session.repo);
+  const settings = ownWorktreeSettings(seedRepo);
+  const outcome = await prepareCliWorktree(session.repo, session.worktree, {
+    add: (plan) => addOwnWorktree(session.repo, plan, ownExec, repoBaseBranch(session.repo)),
+    clone: async (path) => {
+      // while this clone reads the seed, the seed is not installed again (refreshOwnSeeds waits)
+      ownSeedWatch.cloning += 1;
+      try {
+        return await cloneSeedCaches(ownStore.seed(seedRepo), path, settings.lockfiles, realCloneIo(ownExec, nodeVersion));
+      } finally {
+        ownSeedWatch.cloning -= 1;
+      }
+    },
+  });
+  if (session.status === "stopped" || session.status === "archived") {
+    console.log(`[cc-session] ${session.id}: stopped while its worktree was made${outcome.ok ? ` (${outcome.plan.path}, left as it is)` : ""}`);
+    return;
+  }
+  if (outcome.ok) {
+    session.cliWorktree = { path: outcome.plan.path, branch: outcome.plan.branch, caches: outcome.caches.mode, ...(outcome.caches.reason ? { reason: outcome.caches.reason } : {}) };
+    // the seed behind origin/main (or never installed): refreshed on the next pass
+    if (outcome.caches.mode === "install") ownSeedWatch.due.add(seedRepo);
+    ccLedger.save();
+  }
+  console.log(`[cc-session] ${session.id}: ${outcome.ok ? `worktree ${outcome.plan.path} made, dependencies ${outcome.caches.mode === "cloned" ? `cloned (${outcome.caches.dirs.length} folders)` : `to install (${outcome.caches.reason ?? "?"})`}` : `worktree not made (${outcome.reason}); claude -w makes it, the brief says to install`}`);
+  ccChipShort(session, outcome.ok && outcome.caches.mode === "cloned" ? `dependências clonadas da semente na worktree ${session.worktree}` : `worktree sem dependências clonadas: a sessão roda ${installText(undefined, settings)} antes do gate`);
+  runCcTurn(session, `${brief}\n\n${cliDependencyLine(outcome, installText(undefined, settings))}`, true);
+}
 /** The seeds of the repositories whose app sessions open in worktrees of the
  * server's: checked every `seedEveryMs` (sooner when a clone met a seed
  * behind origin/main), one at a time, never with a release on its way. */
@@ -10418,8 +10452,8 @@ async function refreshOwnSeeds(): Promise<void> {
   // a clone reading a seed now: no seed changes until it is done
   if (ownSeedWatch.running || ownSeedWatch.cloning || process.platform !== "darwin") return;
   const now = Date.now();
-  // the repositories the app sessions of the last 30 days worked in
-  const repos = [...new Set(ccLedger.all().filter((session) => session.surface === "app" && now - session.createdAt < 30 * 86_400_000).map((session) => session.repo))];
+  // the repositories the sessions of the last 30 days worked in — headless ones too, seeded the same way (R13-gate G2)
+  const repos = [...new Set(ccLedger.all().filter((session) => now - session.createdAt < 30 * 86_400_000).map((session) => breakerRepo(session.repo)))];
   const repo = repos.find((each) => {
     const settings = ownWorktreeSettings(each);
     const seed = ownStore.seed(each);
@@ -11329,7 +11363,11 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   if (corridor) session.corridorVersion = corridorVersionOf(corridor);
   if (delegation) delegationOpened(delegation, session);
   ccLedger.save();
-  runCcTurn(session, input.brief, true);
+  // the worktree made and seeded by the server first, as for the app (R13-gate G2); elsewhere claude -w makes a bare one
+  if (process.platform === "darwin" && ownWorktreesOn(input.repo)) {
+    ccLedger.markRunning(session);
+    void startSeededCli(session, input.brief).catch((error) => console.error(`[cc-session] ${session.id}: seeded start failed: ${error instanceof Error ? error.message : String(error)}`));
+  } else runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
   noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
   if (cliOnRecord) ccChipShort(session, sessionChips.cli(session.title, `${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`));

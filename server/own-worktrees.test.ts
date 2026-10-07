@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
+  cliDependencyLine, cliWorktreePlan, prepareCliWorktree, type OwnPlan,
 } from "./own-worktrees.ts";
+import { ccTurnArgs } from "./cc-sessions.ts";
 import { worktreeLines } from "./productivity-export.ts";
 import type { ProductivityReport } from "../shared/productivity.ts";
 
@@ -577,5 +579,52 @@ describe("the folder the app is given", () => {
     const link = ownLinkPath(repo, "9353-x");
     expect(link).toBe("/Users/osvaldo/Projetos/.omb-worktree-links/nuria-platform/9353-x");
     expect(appLinkFolder(link)).toBe(link);
+  });
+});
+
+// R13-gate G2: `claude -p -w <name>` made bare worktrees; b2d01a's first
+// ci:local failed on a missing vite (Cannot find module …/node_modules/vite)
+// after ~14 min of the global lease. The server now makes that worktree
+// where claude would, seeds it like the app's, and the first turn runs there.
+describe("a headless session's worktree, seeded like the app's (R13-gate G2)", () => {
+  const session = { id: "b2d01a01-0000-4000-8000-000000000000", worktree: "w", permissionMode: "auto" as const };
+  const made = (plans: OwnPlan[]) => async (plan: OwnPlan) => { plans.push(plan); return { ok: true as const, head: "abc" }; };
+
+  it("seed in date: the worktree where claude -w would put it, the caches cloned, the first turn there without -w, and the brief says not to install", async () => {
+    const w = cloneWorld();
+    const plans: OwnPlan[] = [];
+    const out = await prepareCliWorktree(REPO, "w", { add: made(plans), clone: (path) => cloneSeedCaches(w.seed, path, OWN_DEFAULTS.lockfiles, w.io) });
+    expect(plans).toEqual([{ dir: "w", path: `${REPO}/.claude/worktrees/w`, branch: "worktree-w" }]);
+    expect(cliWorktreePlan(REPO, "w")).toEqual(plans[0]);
+    expect(out).toMatchObject({ ok: true, caches: { mode: "cloned", dirs: ["node_modules", "web/node_modules"], hooks: ".husky/_" } });
+    const line = cliDependencyLine(out);
+    expect(line).toContain("As dependências já estão instaladas nesta worktree: node_modules, web/node_modules");
+    expect(line).toContain("Não rode `npm ci` no começo");
+    expect(line).not.toContain("ANTES de qualquer");
+    const args = ccTurnArgs({ ...session, cliWorktree: { path: `${REPO}/.claude/worktrees/w`, branch: "worktree-w", caches: "cloned" } }, "brief", true);
+    expect(args).not.toContain("-w");
+    expect(args.slice(0, 3)).toEqual(["-p", "--session-id", session.id]);
+  });
+
+  it("seed not in date (another lockfile): nothing cloned, and the brief says to run npm ci in the worktree before any ci:local", async () => {
+    const w = cloneWorld({}, { [`${REPO}/.claude/worktrees/w/package-lock.json`]: '{"lockfileVersion":3,"packages":{"x":{}}}' });
+    const out = await prepareCliWorktree(REPO, "w", { add: made([]), clone: (path) => cloneSeedCaches(w.seed, path, OWN_DEFAULTS.lockfiles, w.io) });
+    expect(out).toMatchObject({ ok: true, caches: { mode: "install", dirs: [] } });
+    expect(w.calls).toEqual([]); // nothing copied
+    const line = cliDependencyLine(out);
+    expect(line).toContain("As dependências NÃO foram clonadas (");
+    expect(line).toContain("rode `npm ci` na worktree ANTES de qualquer `npm run ci:local` ou `npm run pr:merge`: sem node_modules o gate reprova à toa (vite ausente)");
+  });
+
+  it("worktree not made (git failed): claude -w makes it as before, and the brief still says to install before the gate; a failing clone is an install", async () => {
+    const out = await prepareCliWorktree(REPO, "w", { add: async () => ({ ok: false, error: "git worktree add: invalid reference: origin/main" }), clone: async () => { throw new Error("never"); } });
+    expect(out).toEqual({ ok: false, reason: "git worktree add: invalid reference: origin/main" });
+    const line = cliDependencyLine(out, "pnpm install --frozen-lockfile");
+    expect(line).toContain("o servidor não criou a worktree: git worktree add: invalid reference: origin/main");
+    expect(line).toContain("rode `pnpm install --frozen-lockfile` na worktree ANTES de qualquer `npm run ci:local`");
+    expect(ccTurnArgs(session, "brief", true)).toEqual(expect.arrayContaining(["-w", "w"]));
+    const thrown = await prepareCliWorktree(REPO, "w", { add: made([]), clone: async () => { throw new Error("cp: No space left on device"); } });
+    expect(thrown).toMatchObject({ ok: true, caches: { mode: "install", reason: "o clone das dependências falhou: cp: No space left on device" } });
+    expect(cliDependencyLine(thrown)).toContain("ANTES de qualquer `npm run ci:local`");
   });
 });

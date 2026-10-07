@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
@@ -21,7 +22,11 @@ import { waitForExit } from "./testing/cleanup.ts";
 const GIT_DIR = ["/usr/bin", "/bin"].find((dir) => existsSync(join(dir, "git"))) ?? "";
 
 it.runIf(process.platform === "darwin")("two sessions in the app's own worktree trip the breaker: one owner item, the next start straight to the cli, worktrees told; the item resolved rearms it", async () => {
-  const env = { ...process.env, OMB_AUTONOMY_TICK_MS: "200", OMB_AUTONOMY_MINUTE_MS: "200", OMB_TEST_GRANT_PATH: GIT_DIR, OMB_CC_BIN: "/usr/bin/true" };
+  // a stand-in cli that only writes down where it ran and with what (R13-gate G2: the first turn's cwd and argv)
+  const bin = mkdtempSync(join(tmpdir(), "omb-fake-cc-"));
+  const turns = join(bin, "turns.txt");
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\n{ pwd -P; for arg in "$@"; do printf '%s\\n' "$arg"; done; echo ---; } >> '${turns}'\n`, { mode: 0o755 });
+  const env = { ...process.env, OMB_AUTONOMY_TICK_MS: "200", OMB_AUTONOMY_MINUTE_MS: "200", OMB_TEST_GRANT_PATH: GIT_DIR, OMB_CC_BIN: join(bin, "claude") };
   const fixture = await launchVerificationServer(env);
   const { url, dataDir, logPath } = fixture.info;
   // the repository under the fixture's HOME (a start takes only repositories of the home): ~/Projetos/nuria-platform
@@ -30,6 +35,10 @@ it.runIf(process.platform === "darwin")("two sessions in the app's own worktree 
   mkdirSync(made, { recursive: true });
   execFileSync("git", ["init", "--quiet", "-b", "main", made]);
   execFileSync("git", ["-C", made, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "init"]);
+  // an origin with main, so the server can make a headless session's worktree from origin/main
+  execFileSync("git", ["clone", "--quiet", "--bare", made, join(bin, "origin.git")]);
+  execFileSync("git", ["-C", made, "remote", "add", "origin", join(bin, "origin.git")]);
+  execFileSync("git", ["-C", made, "fetch", "--quiet", "origin"]);
   const repo = realpathSync(made);
   let restarted: ChildProcess | undefined;
   const boot = async () => {
@@ -107,6 +116,19 @@ it.runIf(process.platform === "darwin")("two sessions in the app's own worktree 
     expect(ledger().filter((each) => each.surface === "app").map((each) => each.id).sort()).toEqual(["s9353", "s9354"]); // nothing opened in the app, the server's path not taken
     expect(existsSync(join(repo, ".claude", "worktrees", "9355-outra"))).toBe(false);
     expect(readFileSync(logPath, "utf8")).not.toMatch(/\[claude-desktop\] create start/);
+    // G2: the server made the headless session's worktree where claude -w would (branch worktree-<name>, from origin/main)
+    // and the first turn ran in it, without -w; no seed here, so its brief says to install before the gate
+    await expect.poll(() => ledger().find((each) => each.title === "9355 Outra")?.cliWorktree ?? null, { timeout: 30_000, interval: 200 }).not.toBeNull();
+    const cli = ledger().find((each) => each.title === "9355 Outra");
+    const path = join(repo, ".claude", "worktrees", cli.worktree);
+    expect(cli.cliWorktree).toMatchObject({ path: join(made, ".claude", "worktrees", cli.worktree), branch: `worktree-${cli.worktree}`, caches: "install" });
+    expect(execFileSync("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]).toString().trim()).toBe(`worktree-${cli.worktree}`);
+    await expect.poll(() => (existsSync(turns) ? readFileSync(turns, "utf8") : ""), { timeout: 20_000, interval: 200 }).toContain("---");
+    const [cwd, ...argv] = readFileSync(turns, "utf8").split("---")[0]!.trim().split("\n");
+    expect(cwd).toBe(realpathSync(path));
+    expect(argv.slice(0, 3)).toEqual(["-p", "--session-id", cli.id]);
+    expect(argv).not.toContain("-w");
+    expect(argv.join("\n")).toContain("na worktree ANTES de qualquer `npm run ci:local`");
 
     // the owner resolves the item: the breaker rearms (the queue emptied first: nothing then opens on this Mac)
     await stop();
@@ -119,5 +141,6 @@ it.runIf(process.platform === "darwin")("two sessions in the app's own worktree 
   } finally {
     if (restarted) await waitForExit(restarted, { signal: "SIGTERM" }).catch(() => {});
     rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
   }
 }, 180_000);

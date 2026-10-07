@@ -678,6 +678,47 @@ export function cacheLine(outcome: Pick<CloneOutcome, "mode" | "reason"> & { dir
   return `As dependências NÃO foram clonadas (${why}): rode \`${install}\` nesta worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.`;
 }
 
+// ── the worktrees of headless sessions (claude -p): the same seeding ──────
+// `claude -p -w <name>` makes a bare worktree: no node_modules, and the
+// first ci:local of the session failed after ~14 min of the global lease on
+// a missing vite (R13-gate G2, b2d01a). The server makes that worktree itself
+// where claude would (<repo>/.claude/worktrees/<name>, branch
+// worktree-<name>), from origin/<base>, clones the seed's caches into it,
+// and the first turn runs there.
+
+/** Where claude -w would put a session's worktree, and its branch. */
+export const cliWorktreePlan = (repo: string, name: string): OwnPlan => ({ dir: name, path: join(repo, ".claude", "worktrees", name), branch: `worktree-${name}` });
+
+/** Make a headless session's worktree and seed it: what was made, or why not
+ * (the session then goes the old way, `-w`, and its brief says to install). */
+export async function prepareCliWorktree(repo: string, name: string, io: { add: (plan: OwnPlan) => Promise<{ ok: true; head: string } | { ok: false; error: string }>; clone: (path: string) => Promise<CloneOutcome> }): Promise<{ ok: true; plan: OwnPlan; caches: CloneOutcome } | { ok: false; reason: string }> {
+  const plan = cliWorktreePlan(repo, name);
+  let made: Awaited<ReturnType<typeof io.add>>;
+  try {
+    made = await io.add(plan);
+  } catch (error) {
+    made = { ok: false, error: failureText(error) };
+  }
+  if (!made.ok) return { ok: false, reason: made.error };
+  let caches: CloneOutcome;
+  try {
+    caches = await io.clone(plan.path);
+  } catch (error) {
+    caches = { mode: "install", reason: `o clone das dependências falhou: ${failureText(error)}`, dirs: [], savedKb: 0, savedMs: 0, ms: 0, install: "npm ci" };
+  }
+  return { ok: true, plan, caches };
+}
+
+/** The line a headless session's first brief carries about its dependencies:
+ * cloned and checked — do not install; otherwise install before anything,
+ * and above all before the gate (ci:local, pr:merge). */
+export function cliDependencyLine(outcome: { ok: true; caches: Pick<CloneOutcome, "mode" | "reason"> & { dirs?: string[]; install?: string; hooks?: string } } | { ok: false; reason: string }, install = "npm ci"): string {
+  if (outcome.ok && outcome.caches.mode === "cloned" && outcome.caches.hooks) return cacheLine(outcome.caches);
+  const said = outcome.ok ? cacheLine(outcome.caches) : `As dependências NÃO foram clonadas (o servidor não criou a worktree: ${outcome.reason.slice(0, 160)}): rode \`${install}\` na sua worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.`;
+  const run = outcome.ok ? outcome.caches.install ?? install : install;
+  return `${said} Em especial, rode \`${run}\` na worktree ANTES de qualquer \`npm run ci:local\` ou \`npm run pr:merge\`: sem node_modules o gate reprova à toa (vite ausente) e prende o lease por ~14 min.`;
+}
+
 // ── what was saved: the ledger behind the metrics and the report ──────────
 
 export interface OwnEvent {
