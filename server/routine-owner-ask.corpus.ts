@@ -18,7 +18,11 @@
 // R5: narrations that carry an ask's words and ask nothing — someone else's words, a sheet's or ticket's status, the
 // bot's own report, a denial — never an item, whatever reads them; and a reply that points at the item that already
 // holds its ask ("no item o1", "(o2)", "é lá que você decide") or says it opened none ("Não abri item").
-export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5";
+//
+// R6: the mark of an item counts where the ask is said — its own sentence, or the label of its list — and never for
+// an ask about another ticket, issue or row than the item's; "Não abri item" never across a "mas" (INSP-R13VIS F1).
+// Open in the test: o1 (linha 190, #9384), o3 (#9374), o9 (the hook), o11 (#9326), o15.
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6";
 export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco"]> = [
   ["R1", "Como você decidiu ontem, preciso agora da sua aprovação para fazer o merge da #9400.", [], "detector"],
   ["R1", "Como você decidiu ontem, a #9400 está pronta. Preciso da sua aprovação para o merge.", ["Ver: preciso da sua aprovação para o merge"]],
@@ -172,6 +176,20 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   // the bot opened none, or says where the owner decides (real 05/10 21:26, 06/10 09:57)
   ["R5", "Nenhuma está na tag de produção, então a decisão sobre elas é sua. Não abri item para essas pastas porque liberam pouco espaço.", []],
   ["R5", "Fora essas, a rotina de medição monta o item \"Decidir o destino de N worktrees paradas\" com os comandos, e é lá que você decide. Isso depende de você.", []],
+  ["R6", "Não abri item novo, mas preciso que você aprove o merge da #9400.", ["Ver: preciso que você aprove o merge da #9400"]],
+  ["R6", "Não abri item novo: o merge da #9400 depende de você e prefiro que você veja aqui.", ["Ver: o merge da #9400"]],
+  ["R6", "Não criei pendência para o disco. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "Não abri item para a #9401, que é pequena. A #9400 precisa do seu GO para o merge.", ["Ver: a #9400"]],
+  ["R6", "Atualizei o item o9 com o comando. Também preciso do seu GO na #9400.", ["Ver: também preciso do seu GO na #9400"]],
+  ["R6", "A #9401 já está no item o9. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "Para a #9401 é lá que você decide, no item do Chief. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "O merge da #9400 depende de você. O caso parecido de setembro foi o item o3.", ["Ver: o merge da #9400"]],
+  ["R6", "Decisão sua (item o3): aprovar o merge da #9400.", ["Decidir: aprovar o merge da #9400"]],
+  ["R6", "- A #9401 já está no item o9.\n- O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "Use o item em \"Precisa de você\" para a #9401. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  // the same marks, on the ask's own subject, still make it an echo
+  ["R6", "Decisão sua (item o3): manter a pausa só no envio, e a #9374 é fechada.", []],
+  ["R6", "Só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo. Atualizei o item o9 com o passo a passo.", []],
   // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
   ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
 ];

@@ -867,8 +867,15 @@ describe("titles of a decision or an action left with the owner", () => {
 
 // INSP-R13VIS rounds 1-4: every attack phrase, with the items it must open (server/routine-owner-ask.corpus.ts)
 describe("the attack corpus", () => {
-  // the items open in the real replies the R5 phrases come from, any bot's (o1, o3, o11, o15)
-  const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: ["o1", "o3", "o11", "o15"] };
+  // the items open in the real replies the R5 and R6 phrases come from, any bot's, with their titles (bot-autonomy.json)
+  const items = [
+    { id: "o1", title: "Aprovar a criação da linha 190 da planilha (127138 do Matheus, #9384)" },
+    { id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" },
+    { id: "o9", title: "Liberar a planilha para os bots: instalar o corredor de planilha no hook (v2.4)" },
+    { id: "o11", title: "Fechar você mesmo a #9326 (P1): o Jev barrou de novo, mesmo liberado" },
+    { id: "o15", title: "Criar a trava da planilha" },
+  ];
+  const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: items.map((item) => item.id), items };
   const origin = { botName: "Monitor", routineName: "Atendimento", firstAt: 0, lastAt: 0 };
   it.each(ROUTINE_ASK_CORPUS.map(([round, text, expected, note]) => [round, note ?? "", text, expected] as const))("%s %s: %s", (_round, _note, text, expected) => {
     expect(routineOwnerAsks(text, corpusCtx).map((ask) => routineAskItem(ask, origin).title)).toEqual(expected);
