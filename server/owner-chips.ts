@@ -27,6 +27,8 @@ export const sessionChips = {
   followedEnded: (title: string, turn: number) => `${sessionLabel(title)} terminou o turno ${turn}, acompanhado após o reinício`,
   followedCut: (title: string, turn: number) => `${sessionLabel(title)} parou sem fechar o turno ${turn} — o Chief retoma (o processo que sobreviveu ao reinício terminou)`,
   survivorLimit: (title: string, turn: number, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min — o Chief retoma (turno ${turn}, acompanhado após o reinício)`,
+  // its gate outlived the cut: the server, not the Chief, resumes it (R13-2)
+  survivorLimitJob: (title: string, turn: number, minutes: number, count: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min com ${plural(count, "processo ainda rodando", "processos ainda rodando")} — o servidor retoma a sessão quando ${count === 1 ? "terminar" : "terminarem"} (turno ${turn}, acompanhado após o reinício)`,
   survivorStopped: (title: string) => `${sessionLabel(title)} parada: o processo que seguia após o reinício foi encerrado`,
   movedHere: (titles: string[], why: string) => `${titles.length === 1 ? "1 sessão passa" : `${titles.length} sessões passam`} a relatar aqui (${why}): ${titles.map(sessionLabel).map((label) => label.replace(/^Sessão /, "")).join(", ")}`,
   movedAway: (title: string) => `${sessionLabel(title)}: os relatórios agora vão para o canal do dono`,
