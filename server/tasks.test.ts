@@ -117,7 +117,7 @@ describe("tasks", () => {
   it("a Chinese or Japanese first message names the conversation; a short first line carries the next one", async () => {
     const { store } = await freshStore();
     const bot = store.createBot();
-    for (const said of ["修复登录页面的错误", "ログイン画面を直して", "登录"]) {
+    for (const said of ["修复登录页面的错误", "ログイン画面を直して", "修复登录"]) {
       const task = store.createTask(bot.id)!;
       expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)?.title).toBe(said);
     }
@@ -126,6 +126,8 @@ describe("tasks", () => {
     // still nothing to name in a one-word Korean or pt-BR message
     const short = store.createTask(bot.id)!;
     for (const said of ["네", "Pode"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId)).toBeNull();
+    // INSP-R13VIS B4: a "yes", "OK" or "thanks" in Chinese or Japanese is the "Pode" of those languages
+    for (const said of ["はい", "了解", "好的", "はい！", "ありがとうございます", "わかりました。", "没问题"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
   });
 
   it("returns the task it named, so a caller knows which title it may replace", async () => {

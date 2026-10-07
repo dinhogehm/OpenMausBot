@@ -711,6 +711,42 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
     expect(titles(text)).toEqual([expect.stringMatching(/^routine-ask:issue:9400 \| .*#9400/)]);
   });
 
+  // INSP-R13VIS round 2
+  it.each([
+    ["B1", "O Chief concordou com você: a linha da Marluce (#9389) fica com você, como você decidiu às 11:05."],
+    ["B1", "O Chief concordou com você: a linha da Marluce (#9389) fica com você."],
+    ["B1", "O Chief concordou, e a #9389 fica com você."],
+    ["B2", "Como você decidiu às 11:05, a #9389 fica com você; a Marluce precisa da sua resposta, que você já mandou às 11:10."],
+    ["B2", "Como combinado, a escala depende de você só nas férias, e isso já está registrado."],
+    ["B2", "Como você pediu, aguardo seu retorno apenas se mudar algo; por enquanto sigo."],
+  ])("%s: a report opens no item: %s", (_finding, text) => {
+    expect(routineOwnerAsks(text, ctx)).toEqual([]);
+  });
+
+  it("B1: agreeing to a plan, in another clause, still leaves the decision asked", () => {
+    expect(titles("O Chief concordou com o plano, e a decisão sobre a #9400 fica com você.")).toEqual(["routine-ask:issue:9400 | Decidir: #9400"]);
+  });
+
+  it("B3: a pronoun nothing before it agrees with is left out of the title, never \"(ela)\"", () => {
+    expect(titles("O ticket ATD-202610-0042 voltou. Ela precisa da sua decisão sobre o reembolso.")).toEqual(["routine-ask:frase:reembolso | Decidir: o reembolso"]);
+  });
+
+  // B5: the real titles of 30/09, 03/10 and 06/10 that read "Ver: jev (#9278)", "Ver: #9058) (a o12…" and "Ver: o17 (#9378)"
+  it("B5: a one-word tag or an item's id before the colon is no title; nor a list cut inside parentheses", () => {
+    const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    expect(title("Ainda depende de você: Jev: liberar push, pr:merge e carrier no nuria-platform. Sem isso, a #9278, que corrige o 503, não entra.")).toEqual([expect.stringMatching(/^Liberar push, pr:merge e carrier no nuria-platform \(Jev\)/)]);
+    expect(title("Nada mudou na planilha nem no Chat neste turno; a o12 segue resolvida e a o2 (linha 105, #9058) continua com você.")).toEqual(["Ver: a o2 (linha 105, #9058)"]);
+    expect(title("Ainda dependem de você: o17: a worktree da #9378 com a linha do graft no .gitignore.")).toEqual(["Ver: a worktree da #9378 com a linha do graft no .gitignore"]);
+    expect(title("Ainda dependem de você: o18: abrir uma sessão à mão no nuria-platform no app, para destravar a sessão nova da #9378.")).toEqual(["Abrir uma sessão à mão no nuria-platform no app, para destravar a sessão nova da #9378"]);
+    // the bot's own voice before the colon names nothing
+    expect(title("Decisão sua: Recomendo: ajustar o corredor C1 para aceitar as colunas da linha 185.")[0]).toMatch(/^Decidir: ajustar o corredor C1/);
+    // a fact the bot told of an item it names by title (06/10 07:39)
+    expect(title("Precisa de você: atualizei o item já existente o19 (\"Decidir o destino de 17 worktrees paradas\") com a lista nova e o espaço livre, sem criar item repetido.")).toEqual(["Decidir o destino de 17 worktrees paradas"]);
+    // the vocative is who, not what (01/10 18:07)
+    expect(title("Osvaldo, a #9314 (https://github.com/dinhogehm/nuria-platform/pull/9314) (9295) travou e precisa de você para seguir.")).toEqual(["Ver: #9314"]);
+  });
+
   it("an explicit ask in the same paragraph still opens it, titled with its subject", () => {
     expect(titles("A linha 192 da Marluce continua com você, então não mexi. Preciso que confirme o valor da coluna H.")).toEqual(["routine-ask:linha:192 | Ver: a linha 192 da Marluce"]);
     expect(titles("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você, então não mexi: pode confirmar se grava hoje?")).toHaveLength(1);

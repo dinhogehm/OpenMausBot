@@ -180,18 +180,34 @@ const DECIDE = /(?<![\p{L}])(?:decis[ãa]o|decid(?!(?:i|iu|imos|iram|ido|ida|ido
 const PAST_DECISION = /(?<![\p{L}])(?:voc[êe]\s+(?:j[áa]\s+)?(?:decidiu|escolheu|aprovou)|(?:como|conforme)\s+(?:voc[êe]\s+)?(?:decidiu|pediu|combinamos|combinado|definiu)|j[áa]\s+decidid[oa])(?![\p{L}])/iu;
 /** Someone agreed, and what they agreed to follows: "O Chief concordou: …", "o Filipe concordou que …" — never
  * "concordou com o plano, e a decisão … fica com você", another clause (INSP-R13VIS A2). */
-const AGREED_TO = /(?<![\p{L}])concord(?:ou|aram)(?:\s*:|\s+que(?![\p{L}]))/iu;
+// "concordou com você: …" and "concordou, e a #9389 fica com você" too (INSP-R13VIS B1)
+const AGREED_TO = /(?<![\p{L}])concord(?:ou|aram)(?:\s+com\s+(?:voc[êe]|\S+))?(?:\s*[:,]|\s+que(?![\p{L}]))/iu;
 /** The sentence reports a decision taken: said of it all, or an agreement whose content holds the ask. */
 function reportsDecision(sentence: string, owner: ReturnType<typeof ownerByName>): boolean {
   if (PAST_DECISION.test(sentence)) return true;
   const agreed = AGREED_TO.exec(sentence);
   return Boolean(agreed) && agreed!.index < ownerAskIndex(sentence, owner?.asks);
 }
+/** What follows an ask in its clause and takes it back: already done ("…que você já mandou às 11:10", "…e isso já
+ * está registrado") or only under a condition ("…apenas se mudar algo"). It only keeps a report a report: a
+ * decision taken or what the routine left alone is not reopened by such an ask (INSP-R13VIS B2). */
+const ASK_TAKEN_BACK = /(?<![\p{L}])(?:j[áa]|(?:s[óo]|apenas|somente)\s+se)(?![\p{L}])/iu;
+/** The owner is asked for something in so many words, and the clause does not take it back. */
+function explicitAsk(text: string): boolean {
+  for (const match of text.matchAll(new RegExp(EXPLICIT_REQUEST.source, "giu"))) {
+    const rest = text.slice(match.index! + match[0].length);
+    const clause = rest.slice(0, rest.search(/[;.!]|$/));
+    if (match[0] === "?" || !ASK_TAKEN_BACK.test(clause)) return true;
+  }
+  return false;
+}
 /** The routine left it alone because it is the owner's: "continua com você, então não mexi". */
 const LEFT_ALONE = /(?<![\p{L}])(?:continua|continuam|fica|ficam|segue|seguem)\s+com\s+voc[êe](?![\p{L}])[^.!?]*?(?<![\p{L}])(?:n[ãa]o\s+(?:mexi|mexo|mexerei|vou\s+mexer|toquei|toco|alterei|altero)|deixei\s+como\s+est(?:á|a|ava))(?![\p{L}])/iu;
 /** The owner asked for something in so many words: an imperative, "preciso que", "preciso do seu GO", "aguardo seu
  * OK", "falta o seu GO", "falta você aprovar", "depende de você", a question (INSP-R13VIS A2). */
 const EXPLICIT_REQUEST = /(?<![\p{L}])(?:preciso\s+que|precisamos\s+que|(?:preciso|precisamos|precisa|precisam)\s+d[oa]\s+(?:seu|sua)|aguardo\s+(?:o\s+|a\s+)?(?:seu|sua)|falta(?:m)?\s+(?:o\s+seu|a\s+sua|voc[êe])|depende(?:m)?\s+(?:s[óo]\s+)?de\s+voc[êe]|decida|confirme|responda|aprove|escolha|libere|me\s+(?:diga|avise|confirme|responda|passe)|pode\s+(?:me\s+)?(?:confirmar|dizer|decidir|aprovar|responder|liberar))(?![\p{L}])|\?/iu;
+/** A pronoun and nothing else ("ela", "Isso"). */
+const BARE_PRONOUN = /^\s*(?:el[ae]s?|isso|isto|aquilo|ess[ae]s?|est[ae]s?)\s*$/iu;
 /** A sentence whose subject is a pronoun ("Ela continua com você, então não mexi."): what it is about was said before it. */
 const PRONOUN_START = /^\s*(?:el[ae]s?|isso|isto|aquilo|(?:ess|est)[ae]s?(?=\s+(?:continua|fica|segue|depende|est[áa]|precisa|aguarda|espera)))(?![\p{L}])/iu;
 /** What it is about: a ticket, an issue, a sheet row, a conversation, the person it is owed to, else its words. */
@@ -339,8 +355,8 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
       // a report, not an ask: a decision already taken ("como você decidiu às 11:05", "O Chief concordou: …"), or what
       // the routine left alone because it is the owner's ("continua com você, então não mexi") — unless the owner is
       // asked for something in so many words (R13-followup 1: o16 and o17 of 06/10; INSP-R13VIS A2)
-      if (reportsDecision(sentence, owner) && !EXPLICIT_REQUEST.test(sentence)) return;
-      if (LEFT_ALONE.test(sentence) && !EXPLICIT_REQUEST.test(unquoted(line))) return;
+      if (reportsDecision(sentence, owner) && !explicitAsk(sentence)) return;
+      if (LEFT_ALONE.test(sentence) && !explicitAsk(unquoted(line))) return;
       // "Ainda dependem do Osvaldo: a abertura da issue…" — what is left, after the ask that leads it; the colon is
       // the bot's own, never one inside a quote ('no item o1 de "Precisa de você": ajustar…', INSP-R13VIS A3)
       const colon = colonOutsideQuotes(original);
@@ -409,6 +425,8 @@ function askTitle(ask: RoutineAsk): string {
   const clause = ask.what ?? ask.sentence.split(/;\s*/).find((each) => asksOwnerSentence(each)) ?? ask.sentence;
   // "Fica com você decidir a escala" → "decidir a escala"
   let said = /^\s*(?:fica|ficam|continua|continuam)\s+com\s+voc[êe]\s+(\p{L}+(?:ar|er|ir)(?![\p{L}]).*)$/iu.exec(clause)?.[1] ?? clause;
+  // "Osvaldo, a #9314 travou…": the vocative is who, not what
+  said = said.replace(/^\s*\p{Lu}\p{Ll}+,\s+(?=[oa]s?\s|#)/u, "");
   // "Como combinado, aguardo seu OK…": the decision taken is how it was said, not what is asked
   said = said.replace(/^\s*(?:como|conforme)\s+(?:voc[êe]\s+)?(?:combinado|combinamos|pediu|decidiu|definiu)[^,]{0,30},\s*/iu, "");
   // "O Chief concordou: a linha da Marluce (#9389) fica com você" — a fact told before the colon is no label: what follows is the subject (R13-visual N26, real o16)
@@ -416,6 +434,16 @@ function askTitle(ask: RoutineAsk): string {
   if (told && PAST_CLAUSE.test(told[1]!)) said = told[2]!;
   // a fact told in the past is no title: the subject it names, if any (INSP-R13VIS A4); else routineAskItem says whose message it is
   if (toldFact(said) && ask.subject.label) return `${ask.decide ? "Decidir" : "Ver"}: ${ask.subject.label}`;
+  // a one-word tag before the colon is no subject ("o17: a worktree da #9378…", "Jev: liberar push…"): what follows
+  // is, with the tag after it — never an item's own id, which the owner sees beside it already (INSP-R13VIS B5)
+  const tag = /^\s*([\p{L}\d#_-]{1,12}):\s+(\S.*)$/su.exec(said);
+  const itemId = Boolean(tag && /^o\d+$/iu.test(tag[1]!));
+  if (tag && tag[2]!.trim().length > 8 && (itemId || (/\p{L}/u.test(tag[1]!) && ACTION_START.test(tag[2]!) && !STATEMENT_START.test(tag[2]!)))) {
+    const rest = askTitle({ ...ask, what: tag[2]!.trim(), sentence: tag[2]!.trim() });
+    // the bot's own voice ("Recomendo:", "Sugiro:") names nothing; a cut title keeps its "…" last
+    const voice = /^(?:recomendo|sugiro|proponho|prefiro|acho|ou|e)$/iu.test(tag[1]!);
+    return itemId || voice || rest.endsWith("…") || slug(rest).includes(slug(tag[1]!)) ? rest : `${rest.replace(/\.$/, "")} (${tag[1]})`;
+  }
   // already an action for the owner: a question to decide ("Posso escrever…?"), or a verb ("Abrir a issue…", "Aprovar a #9370")
   if (ask.decide && (ask.what || /\?\s*$/.test(said)) && !/^\s*decid/iu.test(said)) return `Decidir: ${lower(clipTitle(said, 100))}`;
   if (ACTION_START.test(said) && !STATEMENT_START.test(said)) return clipTitle(said.charAt(0).toLocaleUpperCase("pt-BR") + said.slice(1));
@@ -431,7 +459,9 @@ function askTitle(ask: RoutineAsk): string {
   if (about) {
     const whose = withoutAsk(said);
     const what = withoutAsk(about[1]!) || about[1]!;
-    return `Decidir: ${lower(clipTitle(what, 70))}${whose && whose !== said && !DECIDE.test(whose) && whose.split(/\s+/).length <= 5 ? ` (${lower(whose)})` : ""}`;
+    // a pronoun nothing before it agreed with says nobody: "Decidir: o reembolso", never "(ela)" (INSP-R13VIS B3)
+    const named = whose && whose !== said && !DECIDE.test(whose) && !BARE_PRONOUN.test(whose) && whose.split(/\s+/).length <= 5;
+    return `Decidir: ${lower(clipTitle(what, 70))}${named ? ` (${lower(whose)})` : ""}`;
   }
   const answer = /^(.+?),?\s+(?:e|ent[ãa]o|mas)\s+a\s+resposta$/iu.exec(withoutAsk(said));
   if (answer && !ask.decide) return `Responder: ${lower(clipTitle(answer[1]!, 90))}`;
@@ -445,13 +475,32 @@ function askTitle(ask: RoutineAsk): string {
  * de você" → "a resposta"), with what led to it after, in parentheses; an opening adverb ("Até agora,", "Desde
  * ontem,") dropped (INSP-N22 r3 R5). */
 function askedNoun(text: string): string {
-  const parts = text.split(/,\s+|\s+e\s+/).map((each) => each.trim()).filter(Boolean);
-  const kept = parts.filter((each, at) => !(at < parts.length - 1 && /^(?:at[ée]|desde|hoje|ontem|agora|ainda|tamb[ée]m|por enquanto|nesta|neste|de novo|mais uma vez)(?![\p{L}])/iu.test(each)));
+  // split outside parentheses only: "a o2 (linha 105, #9058)" is one noun (INSP-R13VIS B5)
+  const parts = splitOutsideParens(text).map((each) => each.trim()).filter(Boolean);
+  const kept = parts.filter((each, at) => !(at < parts.length - 1 && (/^(?:at[ée]|desde|hoje|ontem|agora|ainda|tamb[ée]m|por enquanto|nesta|neste|de novo|mais uma vez)(?![\p{L}])/iu.test(each)
+    // another thing, said to be done ("a o12 segue resolvida e a o2 …"), is not what is asked
+    || RESOLVED.test(each))));
   const main = kept.at(-1) ?? text;
   const lead = kept.slice(0, -1).join(", ");
   // a short noun phrase leads; a long one is the whole thing already
   if (!lead || main.split(/\s+/).length > 6) return kept.join(", ");
   return `${main} (${lead.charAt(0).toLocaleLowerCase("pt-BR")}${lead.slice(1)})`;
+}
+/** The text split at ", " and " e ", never inside parentheses. */
+function splitOutsideParens(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at]!;
+    if (char === "(") depth++;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    if (depth) continue;
+    const cut = /^(?:,\s+|\s+e\s+)/.exec(text.slice(at));
+    if (cut) { parts.push(text.slice(start, at)); at += cut[0].length - 1; start = at + 1; }
+  }
+  parts.push(text.slice(start));
+  return parts;
 }
 /** A short clause told in the past ("O Chief concordou", "Ele confirmou", "A Marluce respondeu"). */
 const PAST_CLAUSE = /^\s*(?:\p{L}+\s+){0,3}\p{Ll}+(?:ou|eu|iu|aram|eram|iram)\s*$/u;
@@ -497,7 +546,11 @@ export function routineAskItem(ask: RoutineAsk, origin: { botName: string; routi
   // still no subject ("Ver: ela continua com você" with nothing before it): say whose message it is, never a pronoun nobody can place (R13-visual N26)
   const body = said.replace(/^(?:Ver|Decidir|Responder):\s*/u, "");
   // a question is its own subject ("Decidir: ele publica direto ou deixa em rascunho?")
-  const title = (PRONOUN_START.test(body) && !body.endsWith("?")) || toldFact(body) || ![...contentWords(body)].length ? `Ver o recado do ${origin.botName} na rotina "${origin.routineName}"` : said;
+  // an item's id or an issue is a subject too ("Ver: o o1 também continua com você")
+  const subjectless = (PRONOUN_START.test(body) && !body.endsWith("?")) || toldFact(body) || (![...contentWords(body)].length && !/(?<![\p{L}\d])(?:o\d+|#\d{3,6})(?![\p{L}\d])/u.test(body));
+  // a fact the bot told of an item it names by title ('atualizei o item o19 ("Decidir o destino de 17 worktrees")'): that title
+  const named = subjectless && toldFact(body) ? /["“]([^"”]{8,90})["”]/u.exec(ask.sentence)?.[1] : undefined;
+  const title = named ? (ACTION_START.test(named) ? named : `Ver: ${lower(named)}`) : subjectless ? `Ver o recado do ${origin.botName} na rotina "${origin.routineName}"` : said;
   const why = `O bot ${origin.botName}, na rotina "${origin.routineName}", escreveu: "${clipQuote(ask.quoted ?? ask.sentence)}" ${saidLine(origin.firstAt, origin.lastAt)}`;
   const people = ask.people ?? [];
   const todo = ask.decide

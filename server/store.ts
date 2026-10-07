@@ -348,10 +348,12 @@ export function threadTitleFrom(title?: string): string {
 /** A first message too short to name what the conversation is about: one
  * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
  * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
+const CJK_ACKS = new Set(["ありがとう", "ありがとうございます", "わかりました", "分かりました", "了解です", "了解しました", "承知しました", "かしこまりました", "大丈夫です", "お願いします", "没问题", "没有问题", "好的谢谢", "谢谢你", "非常感谢", "知道了吗", "可以的", "好的好的"]);
 export function tooShortToTitle(text: string): boolean {
-  // a script written without spaces (Chinese, Japanese) counts its characters, two of them already a name
-  // ("修复登录"); Korean is spaced like pt-BR (INSP-R13VIS A7)
-  if ((text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) ?? []).length >= 2) return false;
+  // a script written without spaces (Chinese, Japanese) counts its characters: four name it ("修复登录"), fewer are
+  // a "yes" ("はい", "了解", "好的"), and so is a longer thanks or OK; Korean is spaced like pt-BR (INSP-R13VIS A7, B4)
+  const cjk = text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) ?? [];
+  if (cjk.length >= 4) return CJK_ACKS.has(text.trim().replace(/[\s\p{P}]+/gu, ""));
   return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
 }
 
