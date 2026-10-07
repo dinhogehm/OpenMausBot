@@ -163,6 +163,14 @@ describe("sidebar virtual sections", () => {
     expect(sidebarRoutineRunPreview({ ...run, summary: undefined, goalStatus: "needs-input" }, say)).toBe("Rotina “Atendimento: Chat, planilha e issues” precisa da sua resposta");
     // a failure says so in pt-BR; the provider's error is not the bot speaking
     expect(sidebarRoutineRunPreview({ ...run, status: "failed" }, say)).toBe("Rotina “Atendimento: Chat, planilha e issues” falhou");
+    // a "completed" run whose goal did not complete says how it ended, never "concluída" (INSP-R13VIS A6)
+    const ended = (goalStatus: "blocked" | "limit-reached" | "stopped" | "failed" | "paused") => sidebarRoutineRunPreview({ ...run, summary: undefined, goalStatus }, say);
+    expect(ended("blocked")).toBe("Rotina “Atendimento: Chat, planilha e issues” travou");
+    expect(ended("limit-reached")).toBe("Rotina “Atendimento: Chat, planilha e issues” chegou ao limite de passos");
+    expect(ended("stopped")).toBe("Rotina “Atendimento: Chat, planilha e issues” interrompida");
+    expect(ended("failed")).toBe("Rotina “Atendimento: Chat, planilha e issues” falhou");
+    expect(ended("paused")).toBe("Rotina “Atendimento: Chat, planilha e issues” pausada");
+    expect(sidebarRoutineRunPreview({ ...run, summary: undefined, goalStatus: "completed" }, say)).toBe("Rotina “Atendimento: Chat, planilha e issues” concluída");
     for (const status of ["queued", "running", "waiting", "completed", "failed", "cancelled", "missed"] as const) {
       expect(sidebarRoutineRunPreview({ ...run, status, summary: undefined }, say)).not.toMatch(/Routine/);
     }

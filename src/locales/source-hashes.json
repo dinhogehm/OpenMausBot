@@ -7407,6 +7407,10 @@
       "place.view.autoTeam.short": "e3c4b39d6d5013477c98cd58236fed455f37aa7017b7168ce1980a449aaf438a"
     },
     "pt-br": {
+      "sidebar.preview.routineRun.blocked": "1054686c82bfb4280de763882161e4c948bfda24f614ed4ed07e786f07a784d8",
+      "sidebar.preview.routineRun.limitReached": "bc310f94a9eb384f0a5c1d23f5419797700c81590b2ae2c440af59525d31cdce",
+      "sidebar.preview.routineRun.paused": "f2d211064e0241c8d1154422cfcbf46032a79143a3e1a4a7916f726dad4c2089",
+      "sidebar.preview.routineRun.stopped": "c9e163075cabea6120c7af538a8cdadc661b802f0843ad910cd9067d4def9411",
       "report.delta.noSourceShort": "b06110aea34e991b9c4b36df0f71b56fd2a2b3954ddfbf08a085eda38b8b1087",
       "report.releaseNotComparable": "54599b900f3948a641cb36fe77e07c5fb91fbebaff1c3a48ccf7ad42513fd3d1",
       "sidebar.preview.routineRun.queued": "38946f5e2c577b0da7ce1139c16a49aa3b00339e2f59ab8509beca82cf8149fe",

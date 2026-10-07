@@ -349,8 +349,10 @@ export function threadTitleFrom(title?: string): string {
  * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
  * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
 export function tooShortToTitle(text: string): boolean {
-  const line = text.trim().split("\n")[0]!;
-  return (line.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
+  // a script written without spaces (Chinese, Japanese) counts its characters, two of them already a name
+  // ("修复登录"); Korean is spaced like pt-BR (INSP-R13VIS A7)
+  if ((text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) ?? []).length >= 2) return false;
+  return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
 }
 
 export function titleFromMessage(text: string): string {
@@ -2905,7 +2907,8 @@ export class Store {
     if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
     // "Pode": the row keeps its sentinel title, and the next message gets the naming attempt
     if (tooShortToTitle(text)) return null;
-    task.title = titleFromMessage(text);
+    // "Pode\nabrir a issue da Marluce": a first line too short to name it carries the next one
+    task.title = titleFromMessage(tooShortToTitle(text.trim().split("\n")[0]!) ? text.trim().replace(/\s*\n\s*/g, " ") : text);
     task.titleFromFirstMessage = true;
     this.saveBots();
     this.emit({ type: "bot", botId });

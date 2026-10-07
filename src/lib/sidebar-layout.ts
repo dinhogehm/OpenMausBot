@@ -78,7 +78,11 @@ export type SidebarRoutineRunPreviewKey =
   | "sidebar.preview.routineRun.failed"
   | "sidebar.preview.routineRun.cancelled"
   | "sidebar.preview.routineRun.missed"
-  | "sidebar.preview.routineRun.needsInput";
+  | "sidebar.preview.routineRun.needsInput"
+  | "sidebar.preview.routineRun.blocked"
+  | "sidebar.preview.routineRun.limitReached"
+  | "sidebar.preview.routineRun.paused"
+  | "sidebar.preview.routineRun.stopped";
 
 /** A routine run's receipt previews as what the run said, in the bot's own
  * words, or as where it stands in the reader's language — never as the
@@ -97,11 +101,19 @@ export function sidebarRoutineRunPreview(
     .replace(/\s+/g, " ")
     .trim();
   if (summary) return summary;
-  const key: SidebarRoutineRunPreviewKey = run.goalStatus === "needs-input"
-    ? "sidebar.preview.routineRun.needsInput"
-    : `sidebar.preview.routineRun.${run.status}`;
-  return say(key, { name: run.routineName });
+  // the goal's own outcome first, as the computer's line does: a run "completed" whose goal got blocked did not
+  // complete what it was for (INSP-R13VIS A6)
+  const goal = run.goalStatus && run.goalStatus !== "completed" ? GOAL_PREVIEW_KEY[run.goalStatus] : undefined;
+  return say(goal ?? `sidebar.preview.routineRun.${run.status}`, { name: run.routineName });
 }
+const GOAL_PREVIEW_KEY = {
+  "needs-input": "sidebar.preview.routineRun.needsInput",
+  blocked: "sidebar.preview.routineRun.blocked",
+  "limit-reached": "sidebar.preview.routineRun.limitReached",
+  paused: "sidebar.preview.routineRun.paused",
+  stopped: "sidebar.preview.routineRun.stopped",
+  failed: "sidebar.preview.routineRun.failed",
+} satisfies Record<Exclude<NonNullable<RoutineRunCardData["goalStatus"]>, "completed">, SidebarRoutineRunPreviewKey>;
 
 /** The catalog keys a connection card's preview reads its state from. */
 export type SidebarConnectorPreviewKey = "connectors.card.connected" | "connectors.card.waiting" | "connectors.card.connectSecurely";

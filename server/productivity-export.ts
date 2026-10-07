@@ -282,17 +282,17 @@ export function executiveSummary(report: ProductivityReport, lang: SummaryLang =
 // ── definitions (shared by the export; the app has the same in i18n) ────────
 
 export const DEFINITIONS_PT: ReadonlyArray<[string, string]> = [
-  ["Entregas em produção", "avanços da tag nuria-production-deployed: releases que terminaram o deploy (log do watcher de produção; antes de 15/09, deployments de produção do GitHub). O horário é o fim do deploy. Um deploy que foi ao ar sem a tag avançar (push recusado) conta e é marcado."],
+  ["Entregas em produção", "avanços da tag nuria-production-deployed: releases que terminaram o deploy (registro do vigia de produção; antes de 15/09, deployments de produção do GitHub). O horário é o fim do deploy. Um deploy que foi ao ar sem a tag avançar (push recusado) conta e é marcado."],
   ["PRs e issues entregues", "PRs mergeadas cujos commits entraram entre o release anterior e este (compare do GitHub), sem as PRs de publicação. Issue entregue: só as citadas explicitamente pela PR (vínculo do GitHub, ou Closes/Fixes/Resolves/Refs #N no corpo ou no commit) e já fechadas como concluídas. Release cujo conteúdo ainda não foi lido torna o total um mínimo (≥)."],
   ["Frequência de deploy (DORA)", "entregas em produção ÷ dias úteis com fonte de releases (seg–sex, horário de São Paulo, sem feriados nacionais). Dias sem fonte não entram no denominador nem contam como zero; quando o período tem trecho sem fonte, o total de entregas é um mínimo (≥)."],
-  ["Sucesso de release", "entregas ÷ (entregas + falhas). Falha é a tentativa que rodou (CI ou deploy) e não avançou a tag. Substituídos (o watcher passou a um commit mais novo, ou o run saiu da fila sem rodar) e abortados (pararam antes de rodar: lock, smart-deploy que não iniciou) ficam fora da taxa."],
+  ["Sucesso de release", "entregas ÷ (entregas + falhas). Falha é a tentativa que rodou (CI ou deploy) e não avançou a tag. As trocadas por um commit mais novo (o vigia passou ao commit seguinte, ou a tentativa saiu da fila sem rodar) e as abortadas antes de rodar (outra publicação em curso, deploy que não iniciou) ficam fora da taxa."],
   ["Lead time", "criação da issue até o fim do deploy que levou sua PR ao ar, para as issues concluídas entregues no período; mediana e p90 (posto mais próximo). Lead time de mudança (DORA): merge da PR até o fim do deploy."],
   ["Taxa de falha de mudança e tempo de restauração (DORA)", "pela verificação pós-release (POST_RELEASE_RESULT): reverteu ou achou produção fora do ar ÷ releases com verificação conclusiva; restauração = da falha ao próximo release com verificação saudável. Sem verificação ou sem falha, aparece —."],
   ["PRs mergeadas", "PRs mergeadas na main no período, sem as PRs de publicação (chore/release-carrier-*), que só levam outras PRs para produção."],
   ["Issues resolvidas", "issues fechadas como concluídas no período (não planejadas e duplicadas à parte); tipo pelos rótulos type:bug/hotfix, type:improvement, type:feature."],
   ["Prioridade", "P0 = priority:p0 + priority:critical; P1 = priority:p1 + priority:high (escala antiga, contada junto e mostrada à parte); P2 = p2 + medium; P3 = p3 + low. O cartão P0/P1 compara o fim do período com o fim do anterior (rótulos de hoje); o número de agora aparece à parte, rotulado."],
   ["PRs esperando o gate", "PRs abertas na main, fora de rascunho, sem o status nuria/local-merge-gate verde no último commit (retrato de agora)."],
-  ["Pipeline de release parado", "produção continua no ar; conta do primeiro release que rodou e falhou depois de um sucesso até o próximo sucesso. Runs substituídos e abortados não abrem intervalo. A parte em sábado e domingo aparece separada."],
+  ["Pipeline de release parado", "produção continua no ar; conta do primeiro release que rodou e falhou depois de um sucesso até o próximo sucesso. Tentativas trocadas por um commit mais novo ou abortadas antes de rodar não abrem intervalo. A parte em sábado e domingo aparece separada."],
   ["Esforço dos bots", "dados locais do OpenMausBot, só nos dias em que o ledger de uso existe (antes: —). Custo separado por papel: engenharia (Lead, Eng, QA, DBA, SRE, Delivery) e operação (Monitor Chat, Chief of Staff). Custo de engenharia por entrega = custo dos bots de engenharia nesses dias ÷ entregas nesses mesmos dias, só com pelo menos 5 entregas (antes disso: —). \"Precisa de você\": itens abertos e resolvidos; resposta do dono = do item aberto à primeira resposta (ou resolução) do dono."],
   ["Comparações", "só contra um período anterior com fonte comparável e de depois da criação do repositório; com base menor que 5 (ou menos de 10 amostras numa mediana) mostra o valor anterior, sem variação."],
 ];
@@ -304,7 +304,7 @@ const nums = (items: ReadonlyArray<{ number: number }>, max = 30) => items.lengt
   ? `${items.slice(0, max).map((item) => `#${item.number}`).join(", ")}${items.length > max ? ` +${items.length - max}` : ""}`
   : "—";
 
-const OUTCOME_TEXT: Record<string, string> = { released: "em produção", failed: "falhou", superseded: "substituído", aborted: "abortado", declined: "recusado" };
+const OUTCOME_TEXT: Record<string, string> = { released: "em produção", failed: "falhou", superseded: "trocado por um commit mais novo", aborted: "abortado antes de rodar", declined: "recusado" };
 const outcomeText = (outcome: string) => OUTCOME_TEXT[outcome] ?? outcome;
 const UNKNOWN_REASON: Record<string, string> = {
   first: "conteúdo desconhecido (primeiro release conhecido)",
@@ -323,8 +323,8 @@ export function releaseCounts(report: ProductivityReport): string {
   return [
     `${formatNumber(c.released)} em produção`,
     `${pluralPt(c.failedCommits, "commit falhou", "commits falharam")} (${pluralPt(c.failedTries, "tentativa", "tentativas")} que rodaram)`,
-    `${pluralPt(c.superseded, "run substituído", "runs substituídos")}`,
-    `${pluralPt(c.aborted, "run abortado", "runs abortados")}`,
+    `${pluralPt(c.superseded, "trocado", "trocados")} por um commit mais novo`,
+    `${pluralPt(c.aborted, "abortado", "abortados")} antes de rodar`,
     pluralPt(c.declined, "recusado", "recusados"),
   ].join(" · ");
 }
@@ -334,9 +334,9 @@ function outcomeLabel(row: ProductivityReport["releases"][number]): string {
   if (row.outcome === "released") return row.tagNotAdvanced ? "em produção (tag movida à mão)" : "em produção";
   const tries = row.attempts ?? 1;
   const base = row.outcome === "failed" ? (tries > 1 ? `falhou (${tries} tentativas)` : "falhou")
-    : row.outcome === "superseded" ? (tries > 1 ? `substituído (${tries} runs)` : "substituído")
-    : row.outcome === "aborted" ? (tries > 1 ? `abortado (${tries} runs)` : "abortado") : outcomeText(row.outcome);
-  const folded = [row.supersededRuns ? `${row.supersededRuns} substituído${row.supersededRuns > 1 ? "s" : ""}` : "", row.abortedRuns ? `${row.abortedRuns} abortado${row.abortedRuns > 1 ? "s" : ""}` : ""].filter(Boolean);
+    : row.outcome === "superseded" ? (tries > 1 ? `trocado por um commit mais novo (${tries} tentativas)` : "trocado por um commit mais novo")
+    : row.outcome === "aborted" ? (tries > 1 ? `abortado antes de rodar (${tries} tentativas)` : "abortado antes de rodar") : outcomeText(row.outcome);
+  const folded = [row.supersededRuns ? `${pluralPt(row.supersededRuns, "trocado", "trocados")} por um commit mais novo` : "", row.abortedRuns ? `${pluralPt(row.abortedRuns, "abortado", "abortados")} antes de rodar` : ""].filter(Boolean);
   return folded.length ? `${base} · ${folded.join(", ")}` : base;
 }
 
@@ -365,7 +365,7 @@ export function exportWarnings(report: ProductivityReport): string[] {
 function coverageLines(report: ProductivityReport): string[] {
   const c = report.coverage;
   const lines: string[] = [];
-  if (c.releaseLog.from !== null) lines.push(`Log do watcher de produção desde ${formatInstant(c.releaseLog.from)}.`);
+  if (c.releaseLog.from !== null) lines.push(`Registro do vigia de produção desde ${formatInstant(c.releaseLog.from)}.`);
   if (c.githubDeployments.from !== null) lines.push(`Deployments de produção do GitHub de ${formatInstant(c.githubDeployments.from)} a ${formatInstant(c.githubDeployments.to!)}.`);
   for (const gap of c.releaseGaps) lines.push(`Sem fonte de releases de ${formatInstant(gap.from)} a ${formatInstant(gap.to)}: entregas e falhas desse trecho não são conhecidas (não são zero).`);
   const readiness = exportReadiness(report, report.generatedAt);
@@ -447,7 +447,7 @@ export function reportMarkdown(report: ProductivityReport): string {
       const prs = release.outcome === "released" ? (release.contentUnknown ? UNKNOWN_REASON[release.contentUnknownReason ?? "pending"]! : nums(release.prs.filter((pr) => !pr.carrier))) : headPrText(release);
       lines.push(`| ${formatInstant(release.at)} | \`${release.sha.slice(0, 9)}\` | ${outcomeLabel(release)} | ${prs} | ${release.outcome === "released" ? nums(release.issues) : "—"} |`);
     }
-    if (board.omitted) lines.push("", `${pluralPt(board.omitted, "commit só teve", "commits só tiveram")} runs substituídos ou abortados (nenhum rodou): contados no cabeçalho, não listados.`);
+    if (board.omitted) lines.push("", `${pluralPt(board.omitted, "commit só teve", "commits só tiveram")} tentativas trocadas por um commit mais novo ou abortadas antes de rodar (nenhuma rodou): contados no cabeçalho, não listados.`);
   }
   const b = report.backlog;
   if (b.periodEnd) {
@@ -911,12 +911,12 @@ export function reportPdf(report: ProductivityReport): Buffer {
     });
     if (board.omitted) {
       doc.ensure(14);
-      doc.text(doc.margin, doc.y, `${pluralPt(board.omitted, "commit só teve", "commits só tiveram")} runs substituídos ou abortados (nenhum rodou): contados acima, não listados.`, { size: 7.5, color: MUTED, maxWidth: contentWidth });
+      doc.text(doc.margin, doc.y, `${pluralPt(board.omitted, "commit só teve", "commits só tiveram")} tentativas trocadas por um commit mais novo ou abortadas antes de rodar (nenhuma rodou): contados acima, não listados.`, { size: 7.5, color: MUTED, maxWidth: contentWidth });
       doc.y += 14;
     }
     if (board.rows.some((row) => row.tagNotAdvanced)) {
       doc.ensure(14);
-      doc.text(doc.margin, doc.y, "* no ar, mas o watcher não conseguiu avançar a tag de produção; ela foi movida à mão depois.", { size: 7.5, color: MUTED });
+      doc.text(doc.margin, doc.y, "* no ar, mas o vigia de produção não conseguiu avançar a tag de produção; ela foi movida à mão depois.", { size: 7.5, color: MUTED });
       doc.y += 14;
     }
   }

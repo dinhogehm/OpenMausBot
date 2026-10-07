@@ -691,6 +691,26 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
     expect(routineOwnerAsks("A linha 192 da Marluce continua com você, então não mexi.", ctx)).toEqual([]);
   });
 
+  // INSP-R13VIS A1: the filter ran before the list, and a lead saying "como combinado" dropped every item
+  it("a list is asked in so many words: \"como combinado\" or \"como você pediu\" in its lead drops nothing", () => {
+    const listed = ["routine-ask:issue:9400 | Aprovar a #9400", "routine-ask:issue:9401 | Decidir a escala da #9401"];
+    expect(titles("Como combinado, ainda dependem de você:\n- aprovar a #9400\n- decidir a escala da #9401")).toEqual(listed);
+    expect(titles("Ainda dependem de você, como você pediu:\n- aprovar a #9400\n- decidir a escala da #9401")).toEqual(listed);
+  });
+
+  // INSP-R13VIS A2: an ask said the way routines say it wins over a decision taken or a "não mexi"
+  it.each([
+    ["O Chief concordou: a #9400 precisa do seu GO para o merge."],
+    ["O Chief concordou que a #9400 precisa da sua aprovação para subir."],
+    ["O Chief concordou com o plano, e a decisão sobre a #9400 fica com você."],
+    ["Como combinado, aguardo seu OK para publicar a #9400."],
+    ["Você já decidiu a escala, mas a #9400 ainda depende de você: falta o seu GO."],
+    ["A #9400 fica com você, não mexi, mas preciso do seu GO até amanhã."],
+    ["A #9400 fica com você, não mexi; falta você aprovar a PR."],
+  ])("an explicit ask opens one item about the #9400: %s", (text) => {
+    expect(titles(text)).toEqual([expect.stringMatching(/^routine-ask:issue:9400 \| .*#9400/)]);
+  });
+
   it("an explicit ask in the same paragraph still opens it, titled with its subject", () => {
     expect(titles("A linha 192 da Marluce continua com você, então não mexi. Preciso que confirme o valor da coluna H.")).toEqual(["routine-ask:linha:192 | Ver: a linha 192 da Marluce"]);
     expect(titles("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você, então não mexi: pode confirmar se grava hoje?")).toHaveLength(1);
@@ -699,23 +719,50 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
     expect(titles("Como você decidiu, a #9370 fica com você: decida até sexta se ela entra no lote.")).toHaveLength(1);
   });
 
-  it("a pronoun takes its subject from the sentence before, which the why quotes too", () => {
-    const asks = routineOwnerAsks("A linha da Marluce (#9389) ainda não aparece na planilha. Isso depende de você confirmar.", ctx);
-    expect(asks.map((ask) => `${routineAskKey(ask)} | ${routineAskTitle(ask)}`)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389) ainda não aparece na planilha"]);
+  it("a pronoun inherits only the subject of the sentence right before; the ask is still its own sentence, and the why quotes both", () => {
+    const asks = routineOwnerAsks("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você.", ctx);
+    expect(asks.map((ask) => `${routineAskKey(ask)} | ${routineAskTitle(ask)}`)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389)"]);
     const item = routineAskItem(asks[0]!, { botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", firstAt: 0, lastAt: 0 });
-    expect(item.why).toContain("A linha da Marluce (#9389");
-    expect(item.why).toContain("Isso depende de você confirmar.");
+    expect(item.why).toContain("escreveu: \"A linha da Marluce (#9389) ainda não aparece na planilha.");
+    expect(item.why).toContain("Ela continua com você.\"");
+  });
+
+  // INSP-R13VIS A3: the nearest sentence that NAMES something was taken, and its whole fact became the title
+  it("the sentence right before, never one further up that names an id: Daiane, not the closed #9403", () => {
+    expect(titles("Fechei a #9403. A Daiane respondeu. Ela precisa da sua decisão sobre o reembolso.")).toEqual(["routine-ask:frase:daiane-reembolso | Decidir: o reembolso (a Daiane)"]);
+    // a pronoun with no agreeing subject right before stays as the bot said it ("Ela" is not "a #9403"… nor "o widget")
+    expect(titles("O widget caiu de novo às 14h. Ela continua com você.")[0]).not.toMatch(/widget/);
+    // another item of the list is another paragraph: never its subject
+    expect(titles("- A #9380 está pendente.\n- Ela continua com você.")[0]).not.toContain("9380");
+  });
+
+  // INSP-R13VIS A3: the five real titles that got worse (01/10 3e55c0fd ×3, 02/10 9f80f3ae, 03/10 52417e4a) and the "cisa de você" of 05/10
+  it("the real cases: a label line, a fact the bot did or a time clause is no subject", () => {
+    const origin = { botName: "Chief of Staff", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    for (const scope of ["o mesmo escopo de antes", "é o mesmo das outras tentativas"]) {
+      expect(title(`Pedido: ${scope}, com o padrão "sem limite". Ela não faz o merge sem o meu OK, porque o valor padrão ainda depende do Osvaldo.`)).toEqual(["Ver: porque o valor padrão (ela não faz o merge sem o meu OK)"]);
+    }
+    expect(title("Quando essa publicação terminar, a sessão envia de novo, roda o CI e publica o gate. Ela não faz o merge sem o meu OK, e o valor padrão \"sem limite\" ainda depende do Osvaldo.")[0]).toMatch(/^Ver: e o valor padrão "sem limite"/);
+    expect(title("Abri então uma sessão do Claude Code com prioridade Reprovado: \"8204 Reprovado sidebar da fila não reflete no atendimento\". Ela roda sem o app, porque o app está preso reaproveitando uma worktree, e isso já está com o Osvaldo como pendência.")[0]).not.toMatch(/abri/i);
+    expect(title("Osvaldo, o Redator KB Nuria mandou o levantamento do que entrou em produção. Ele ainda não consegue publicar artigo nem cadastrar entradas no changelog porque falta acesso, e só você pode liberar.")[0]).toMatch(/^Ver: o Redator KB Nuria ainda não consegue publicar/);
+    expect(title("A linha 185 da planilha ainda está incompleta. Isso depende de você no item o1 de \"Precisa de você\": ajustar o corredor (recomendo) ou gravar as três células à mão.")).toEqual(["Ajustar o corredor (recomendo) ou gravar as três células à mão (linha 185)"]);
+  });
+
+  it("a fact told in the past is no title, with or without a colon (INSP-R13VIS A4)", () => {
+    const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    expect(title("Fechei a #9403 e isso fica com você.")).toEqual(["Ver: #9403"]);
+    expect(title("O Redator KB Nuria mandou o levantamento e isso fica com você.")).toEqual(["Ver o recado do Monitor na rotina \"R\""]);
   });
 
   it("a told fact before the colon is no label: what follows is the subject", () => {
     expect(titles("O Filipe respondeu: a linha 110 continua com você.")).toEqual(["routine-ask:linha:110 | Ver: a linha 110"]);
   });
 
-  it("the subject from the paragraph: the nearest sentence naming an issue, a row or a person, else the one before", () => {
-    expect(titles("A linha 191 ainda está vazia. O Chat ficou quieto a tarde toda. Isso continua com você.")).toEqual(["routine-ask:linha:191 | Ver: a linha 191 ainda está vazia"]);
-    expect(titles("O widget caiu de novo às 14h.\nIsso continua com você.")).toEqual([expect.stringMatching(/\| Ver: o widget caiu de novo às 14h$/)]);
-    // another item of the list is another paragraph: never its subject
-    expect(titles("- A #9380 está pendente.\n- Ela continua com você.")[0]).not.toContain("9380");
+  it("the subject from the paragraph: the sentence before, or the one before it when that one names nothing that agrees", () => {
+    expect(titles("A linha 191 ainda está vazia. O Chat ficou quieto a tarde toda. Isso continua com você.")).toEqual(["routine-ask:linha:191 | Ver: a linha 191"]);
+    expect(titles("A #9380 voltou para Pendente.\nIsso continua com você.")).toEqual(["routine-ask:issue:9380 | Ver: a #9380"]);
   });
 
   it("still no subject: whose message it is, in which routine — never a pronoun nobody can place", () => {

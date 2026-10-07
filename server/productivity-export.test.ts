@@ -189,11 +189,13 @@ describe("Markdown", () => {
     expect(markdown).toContain("| Pipeline de release parado | 5 h<br>produção no ar · 0 min em fim de semana | — | sem base comparável | — | 1ª falha que rodou após um sucesso até o próximo sucesso |");
     expect(markdown).toContain("## DORA");
     expect(markdown).toContain("| 29/09 | 1 | ≥0 |");
-    expect(markdown).toContain("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 run substituído · 1 run abortado · 1 recusado");
+    expect(markdown).toContain("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 trocado por um commit mais novo · 1 abortado antes de rodar · 1 recusado");
+    // the words the cards use, nowhere "run" nor "watcher" (INSP-R13VIS A5)
+    expect(markdown).not.toMatch(/\bruns?\b|watcher|ubstituíd/);
     expect(markdown).toContain("| 01/10/2026 06:00 | `xxxxxxxxx` | falhou (2 tentativas) | PR #6 | — |");
     // commits whose runs never ran are counted in the header, not listed (INSP-V r2 #7)
     expect(markdown).not.toContain("`sssssssss`");
-    expect(markdown).toContain("2 commits só tiveram runs substituídos ou abortados (nenhum rodou): contados no cabeçalho, não listados.");
+    expect(markdown).toContain("2 commits só tiveram tentativas trocadas por um commit mais novo ou abortadas antes de rodar (nenhuma rodou): contados no cabeçalho, não listados.");
     expect(markdown).toContain("conteúdo desconhecido (primeiro release conhecido)");
     expect(markdown).not.toContain("sem release anterior para comparar");
     expect(markdown).toContain("- P1: 1\n");
@@ -326,7 +328,7 @@ describe("PDF", () => {
   });
 
   it("states the release counts as runs, the same numbers the screen shows (INSP-V r2 #6)", () => {
-    expect(releaseCounts(report())).toBe("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 run substituído · 1 run abortado · 1 recusado");
+    expect(releaseCounts(report())).toBe("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 trocado por um commit mais novo · 1 abortado antes de rodar · 1 recusado");
   });
 
   it("is deterministic for the same report", () => {

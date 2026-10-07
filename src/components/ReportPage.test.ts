@@ -82,7 +82,7 @@ describe("report screen (pt-BR)", () => {
   });
 
   it("shows P1 as p1 + high with the split, in words (INSP-V r1 #5, R13-visual N17)", () => {
-    expect(plain).toContain("P1 1 (1 com o rótulo novo, 0 com o antigo) · P0 1");
+    expect(plain).toContain("P1 1 (0 ainda com o rótulo antigo, 1 com o novo) · P0 1");
   });
 
   it("compares by one rule: no trend on a small base, the previous value instead (INSP-V r1 #7)", () => {
@@ -122,9 +122,11 @@ describe("report screen (pt-BR)", () => {
   it("lists the releases with what they carried; superseded and aborted runs are not failures (INSP-V r1 #1, #4, #8)", () => {
     expect(plain).toContain("Releases do período");
     // the same counts as the exports: commits for failures, runs for what never ran (INSP-V r2 #6)
-    expect(plain).toContain("em produção: 3 · commits que falharam: 1 (tentativas que rodaram: 2) · runs substituídos: 1 · runs abortados: 1 · recusados: 1");
-    expect(plain).toContain("Substituído");
-    expect(plain).toContain("Abortado");
+    expect(plain).toContain("em produção: 3 · commits que falharam: 1 (tentativas que rodaram: 2) · trocados por um commit mais novo: 1 · abortados antes de rodar: 1 · recusados: 1");
+    expect(plain).toContain("Trocado por um commit mais novo");
+    expect(plain).toContain("Abortado antes de rodar");
+    // the words the cards use, nowhere "run" nor "watcher" (INSP-R13VIS A5)
+    expect(plain).not.toMatch(/\bruns?\b|watcher|ubstituíd/i);
     expect(plain).toContain("2 tentativas");
     expect(plain).toContain("Recusado");
     // the head PR of a failed run is a PR, called carrier only when it is one
@@ -176,7 +178,7 @@ describe("a closed month and the time before the bots' ledger", () => {
     const plain = text(render(september));
     expect(plain).toContain("Produtividade de engenharia — setembro/2026");
     // P0/P1 at the end of September against the end of August; today apart, labelled (INSP-V r2 #2)
-    expect(plain).toContain("ao fim do período · agora 2: P1 1 (1 com o rótulo novo, 0 com o antigo) · P0 1");
+    expect(plain).toContain("ao fim do período · agora 2: P1 1 (0 ainda com o rótulo antigo, 1 com o novo) · P0 1");
     // the backlog of the closed month, then today's (INSP-V r2 #7)
     expect(plain).toContain("Backlog ao fim do período (30/09/2026)");
     expect(plain).toContain("P0/P1 abertas (rótulos de hoje)");
