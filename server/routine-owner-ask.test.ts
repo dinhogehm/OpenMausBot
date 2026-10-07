@@ -856,9 +856,14 @@ describe("ids as the routines write them", () => {
     ["O merge da PR 9400 depende de você.", "routine-ask:issue:9400"],
     ["O merge da PR #9400 depende de você.", "routine-ask:issue:9400"],
     ["A issue 9400 depende de você.", "routine-ask:issue:9400"],
-    ["A H192 depende de você.", "routine-ask:linha:192"],
+    ["A H192 da planilha depende de você.", "routine-ask:linha:192"],
     ["A célula Atendimento!B190 depende de você.", "routine-ask:linha:190"],
-    ["As linhas 185 e 186 dependem de você.", "routine-ask:linha:185"],
+    ["Gravar a B185, a C185 e a E185 depende de você.", "routine-ask:linha:185"],
+    // every row, one key (INSP-R13VIS H1)
+    ["As linhas 185 e 186 dependem de você.", "routine-ask:linha:185+186"],
+    ["Decisão sua: o que foi reprovado nas linhas 76, 98 e 106.", "routine-ask:linha:76+98+106"],
+    // a cell only where a sheet is said (INSP-R13VIS H2)
+    ["O modelo A100 depende de você.", "routine-ask:frase:modelo-a100"],
   ])("%s", (text, key) => {
     expect(routineOwnerAsks(text, ctx).map(routineAskKey)).toEqual([key]);
   });

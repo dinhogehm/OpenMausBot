@@ -167,14 +167,25 @@ function sharedWords(a: string, b: string, except: readonly string[] = []): numb
   return [...contentWords(a)].filter((word) => two.has(word) && !except.includes(word)).length;
 }
 
+/** The sheet rows a text names, all of them: "linha 192", "L192", "linhas 76, 98 e 106" (INSP-R13VIS H1), and a cell
+ * of the sheet ("H192", "B185, C185 e E185", "Atendimento!B190") — a cell only where a sheet is said ("aba!",
+ * "célula", "coluna", "planilha") or beside another cell, never "o modelo A100" (G2, H2). */
+function rowsIn(text: string): string[] {
+  const rows: string[] = [];
+  for (const match of text.matchAll(/(?<![\p{L}])(?:linhas?|L)\s?(\d{1,5}(?:\s*(?:,|e)\s*(?:a\s+)?\d{1,5}(?!\d))*)(?!\d)/gu)) rows.push(...match[1]!.match(/\d+/g)!);
+  const cells = [...text.matchAll(/(?:(?<![\p{L}\d])|!)([A-K])(\d{2,4})(?![\p{L}\d])/gu)];
+  // the sheet said by name, by a cell's column ("as Observações da H192") or by its range
+  const sheet = /!|(?<![\p{L}])(?:c[ée]lulas?|colunas?|planilha|aba|range|observa[çc][õo]es|solicitante|respons[áa]vel|valida[çc][ãa]o)(?![\p{L}])/iu.test(text) || cells.length > 1;
+  if (sheet) rows.push(...cells.map((match) => match[2]!));
+  return [...new Set(rows)];
+}
 /** The ids a text names: tickets, issues and sheet rows — another one is another pendency. */
 function idsIn(text: string): { ticket: string[]; issue: string[]; linha: string[] } {
   return {
     ticket: [...text.matchAll(/(?<![\w-])([A-Z]{2,6}-\d{4,8}-\d{2,6})(?![\w-])/g)].map((match) => slug(match[1]!)),
     // "#9400", and "PR 9400", "PR #9400", "issue 9400" (INSP-R13VIS G2)
     issue: [...text.matchAll(/(?<![\w/])#(\d{3,6})(?!\d)|(?<![\p{L}])(?:PR|pull\s+request|issue)\s+#?(\d{3,6})(?!\d)/giu)].map((match) => (match[1] ?? match[2])!),
-    // "linha 192", "L192", and a cell of the sheet: "H192", "B190", "Atendimento!X192" (INSP-R13VIS G2)
-    linha: [...text.matchAll(/(?<![\p{L}])(?:linhas?|L)\s?(\d{1,5})(?!\d)|(?:(?<![\p{L}\d])|!)[A-K](\d{2,4})(?![\p{L}\d])/gu)].map((match) => (match[1] ?? match[2])!),
+    linha: rowsIn(text),
   };
 }
 
@@ -257,6 +268,8 @@ function subjectOf(text: string, exclude: ReadonlySet<string>): Pick<RoutineAsk,
   const conversation = /(?:threads|messages)\/([\w-]{8,})/.exec(text)?.[1] ?? /(?<![\p{L}])(?:conversa|fio)\s+(?:\p{Ll}+\s+)?`?([A-Za-z0-9_-]{9,})`?(?![\w-])/u.exec(text)?.[1];
   if (ids.ticket[0]) return { subject: { kind: "ticket", id: ids.ticket[0], label: ids.ticket[0].toUpperCase() }, ...extra };
   if (ids.issue[0]) return { subject: { kind: "issue", id: ids.issue[0], label: `#${ids.issue[0]}` }, ...extra };
+  // "linhas 76, 98 e 106": one pendency about the three rows, by its key and its label (INSP-R13VIS H1)
+  if (ids.linha.length > 1) return { subject: { kind: "linha", id: ids.linha.join("+"), label: `linhas ${ids.linha.slice(0, -1).join(", ")} e ${ids.linha.at(-1)}` }, ...extra };
   if (ids.linha[0]) return { subject: { kind: "linha", id: ids.linha[0], label: `linha ${ids.linha[0]}` }, ...extra };
   if (conversation && /\d|[A-Z]/.test(conversation)) return { subject: { kind: "conversa", id: conversation.toLowerCase(), label: conversation }, ...extra };
   if (people) return { subject: { kind: "pessoa", id: people.map((each) => slug(each.name)).join("+"), label: people.map((each) => each.name).join(" e ") }, ...extra };
@@ -382,7 +395,8 @@ function echoesItem(ask: string, same: string, neighbours: string, items: Readon
     if (!title) return !asked.size;
     // the same id, and no action of its own the item does not name ("O deploy da #9386…" beside an item on its merge)
     if (asked.size) {
-      if (!shared) return false;
+      // every id the ask names is the item's: "As linhas 185 e 186… A 185 já está no item o1" still asks the 186 (H1)
+      if (![...asked].every((each) => held.has(each))) return false;
       const doing = actionsIn(ask);
       const named = new Set(actionsIn(title));
       return !doing.length || doing.some((each) => named.has(each)) || commonWords(ask, title) > 0;
@@ -399,7 +413,9 @@ function commonWords(a: string, b: string): number {
   const words = (text: string) => {
     // a person's name says who, not what ("Avisar o Matheus" and "o hotfix do Matheus" are not the same pendency)
     const plain = text.replace(/#\d+|(?<![\p{L}])(?:linha|L)\s?\d+|[A-Z]{2,6}-\d{4,8}-\d{2,6}/gu, " ").replace(/(?<=[\p{L}\d,;:)]\s+)\p{Lu}\p{Ll}+/gu, " ");
-    return new Set([...contentWords(plain), ...[...plain.matchAll(/(?<![\p{L}])([A-Z]{2,5})(?![\p{L}])/gu)].map((match) => match[1]!.toLowerCase())].filter((word) => !ASK_WORDS.has(word) && !/^\d+$/.test(word)));
+    // an acronym that names a thing ("WAF", "CSAT", "D1"), never one every pendency has ("PR", "GO", "OK", "CI") (INSP-R13VIS H1)
+    const acronyms = [...plain.matchAll(/(?<![\p{L}\d])([A-Z][A-Z\d]{1,4})(?![\p{L}\d])/gu)].map((match) => match[1]!).filter((each) => !GENERIC_ACRONYMS.has(each) && !/^P\d$/.test(each));
+    return new Set([...contentWords(plain), ...acronyms.map((each) => each.toLowerCase())].filter((word) => !ASK_WORDS.has(word) && !/^\d+$/.test(word)));
   };
   const two = words(b);
   return [...words(a)].filter((word) => two.has(word)).length;
@@ -407,11 +423,20 @@ function commonWords(a: string, b: string): number {
 /** What an ask asks done, in a word: an infinitive ("instalar", "fechar") or the noun of an action ("deploy", "merge",
  * "push", "publicação") — by its stem, so "aprovar" and "aprovação" meet; the words every ask has aside. */
 function actionsIn(text: string): string[] {
-  const words = strip(text).toLowerCase().split(/[^a-z]+/).filter((word) => word.length >= 4 && !ASK_WORDS.has(word));
+  const plain = strip(text).toLowerCase();
+  const words = plain.split(/[^a-z]+/).filter((word) => word.length >= 4 && !ASK_WORDS.has(word));
   const actions = words.filter((word) => /(?:ar|er|ir)$/.test(word) || /(?:cao|coes|mento)$/.test(word) || ACTION_NOUNS.has(word));
-  return [...new Set(actions.map((word) => word.replace(/(?:ar|er|ir|cao|coes|mento)$/, "")))];
+  // one stem for the verb and its noun ("publicar", "publicação" → "public"; "aprovar", "aprovação" → "aprov"), and one
+  // name for the same act said three ways ("mesclar", "mergear" → "merge"; "implantar" → "deploy") (INSP-R13VIS H2)
+  const stems = actions.map((word) => ACTION_SAME[word] ?? word.replace(/(?:acao|acoes|icao|icoes|ar|er|ir|cao|coes|mento)$/, (end) => (end.startsWith("ic") ? "ic" : "")));
+  // "publicar em produção" is the deploy
+  if (/(?<![a-z])publica\w*\s+(?:\S+\s+){0,3}em\s+producao/.test(plain)) stems.push("deploy");
+  return [...new Set(stems)];
 }
 const ACTION_NOUNS = new Set(["deploy", "merge", "push", "release", "carrier", "gate", "rollback", "hotfix", "commit", "backup", "login", "teste", "testes"]);
+const ACTION_SAME: Record<string, string> = { mesclar: "merge", mergear: "merge", mesclagem: "merge", implantar: "deploy", implantacao: "deploy" };
+/** Acronyms of the work itself, in every pendency: they say how, never what about. */
+const GENERIC_ACRONYMS = new Set(["PR", "PRS", "GO", "OK", "CI", "CD", "QA", "CS", "N1", "N2", "N3", "BRT", "UTC", "GB", "MB", "KB", "GIB", "MIB", "API", "URL", "ID", "IDS", "SHA", "LOG", "APP", "BOT", "SLA", "TI", "PDF", "MCP", "VM"]);
 /** Words any ask or item says, whatever it is about. */
 const ASK_WORDS = new Set(["depende", "dependem", "precisa", "precisam", "preciso", "decidir", "decisao", "aprovar", "falta", "item", "itens", "voce", "osvaldo", "pendencia", "pedido", "comando", "comandos", "passo", "agora", "ainda", "planilha", "issue", "issues"]);
 
@@ -659,6 +684,8 @@ function splitOutsideParens(text: string): string[] {
     else if (char === ")") depth = Math.max(0, depth - 1);
     if (depth) continue;
     // ", e a escala…" is one cut, never one that leaves the "e" leading a part
+    // never between numbers: "as linhas 185 e 186", "76, 98 e 106" are one noun
+    if (/\d/.test(text[at - 1] ?? "") && /^(?:,\s+|\s+e\s+)\d/.test(text.slice(at))) continue;
     const cut = /^(?:,\s+e\s+(?=[oa]s?\s)|,\s+|\s+e\s+)/u.exec(text.slice(at));
     if (cut) { parts.push(text.slice(start, at)); at += cut[0].length - 1; start = at + 1; }
   }
@@ -812,7 +839,8 @@ function isAbout(facts: NonNullable<ReturnType<typeof itemFacts>>, sentence: str
   }
   // a person or words alone: a ticket or issue the ask never named is something else ("o bug do widget foi resolvido na #9370")
   if (kind !== "ticket" && kind !== "issue" && [...ids.ticket, ...ids.issue].some((one) => !askedIds.ticket.includes(one) && !askedIds.issue.includes(one))) return false;
-  if (kind === "linha") return ids.linha.includes(id);
+  // "linhas 76, 98 e 106" (one key, "76+98+106"): any of its rows names it
+  if (kind === "linha") return id.split("+").some((row) => ids.linha.includes(row));
   if (kind === "issue") return ids.issue.includes(id);
   if (kind === "ticket") return ids.ticket.includes(id);
   if (kind === "conversa") return has(sentence, id);

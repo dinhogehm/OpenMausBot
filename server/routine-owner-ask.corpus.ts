@@ -26,7 +26,11 @@
 // R7: a neighbour sentence points an ask at an open item only with something in common with the item's title — the
 // same id and no other action, or, for an ask with no id, a word of what it is about (INSP-R13VIS G1); "PR 9400",
 // "issue 9400" and a cell ("H192", "Atendimento!B190") are ids (G2).
-export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7";
+//
+// R8: "PR", "GO", "OK", "CI" and the like say how, never what about; every row or issue the ask names must be the
+// item's; a cell needs a sheet said around it; "publicar"/"publicação", "merge"/"mesclar" and "deploy"/"publicar em
+// produção" are one act each (INSP-R13VIS H1, H2).
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8";
 /** The items open when a phrase is read, any bot's, by id and title — the test's default set when a phrase gives none. */
 export type CorpusItems = ReadonlyArray<{ id: string; title: string }>;
 export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco" | "", open?: CorpusItems]> = [
@@ -206,6 +210,21 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   ["R7", "Liberar o disco depende de você. Atualizei o item o1 com o passo a passo.", [], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
   // the o38 duplicate: the row by its cell ("H192") is the row of the ask (real 06/10 22:16)
   ["R7", "A linha 192 depende de você. O comando está no o38.", [], "", [{ id: "o38", title: "Colar você mesmo as Observações da H192 (#9032): o Jev barrou o Monitor" }]],
+  // R8: an acronym every pendency has is no subject; every row of the ask must be the item's (INSP-R13VIS H1)
+  ["R8", "Preciso que você dê o GO no deploy do Lead. Atualizei o item o5.", ["Ver: preciso que você dê o GO no deploy do Lead"], "", [{ id: "o5", title: "Dar o GO no merge da #9400" }]],
+  ["R8", "A PR do Redator depende de você. O item o5 tem o comando.", ["Ver: a PR do Redator"], "", [{ id: "o5", title: "Criar a PR da #9374 que o Jev barrou" }]],
+  ["R8", "O OK do Matheus depende de você. Atualizei o item o5.", ["Ver: o OK do Matheus"], "", [{ id: "o5", title: "Dar OK no push da #9311" }]],
+  ["R8", "O CI do Lead depende de você. Atualizei o item o5 com o comando.", ["Ver: o CI do Lead"], "", [{ id: "o5", title: "Rodar o CI da #9332 de novo" }]],
+  ["R8", "As linhas 185 e 186 dependem de você. A 185 já está no item o1.", ["Ver: as linhas 185 e 186"], "", [{ id: "o1", title: "Gravar a linha 185" }]],
+  // a cell only where a sheet is said; one act said two ways (INSP-R13VIS H2)
+  ["R8", "O modelo A100 depende de você. Atualizei o item o5.", ["Ver: o modelo A100"], "", [{ id: "o5", title: "Escrever na linha 100 da planilha" }]],
+  ["R8", "Liberar o cluster K80 depende de você.", ["Liberar o cluster K80 depende de você"]],
+  ["R8", "Mesclar a #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Aprovar o merge da #9400" }]],
+  ["R8", "O merge da #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Mesclar a #9400 pelo gate" }]],
+  ["R8", "Publicar a #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Aprovar a publicação da #9400" }]],
+  ["R8", "A publicação da #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Publicar a #9400" }]],
+  ["R8", "O deploy da #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Publicar a #9400 em produção" }]],
+  ["R8", "O rollback da #9400 depende de você. O deploy dela está no item o3.", ["Ver: o rollback da #9400"], "", [{ id: "o3", title: "Aprovar o deploy da #9400" }]],
   // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
   ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
 ];
