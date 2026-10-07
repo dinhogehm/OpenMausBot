@@ -712,36 +712,109 @@ export async function prepareCliWorktree(repo: string, name: string, io: { add: 
 /** How long one seeded headless start may hold the ones after it. */
 export const SEEDED_START_MAX_MS = 180_000;
 
+/** After the abort, how long the slow start may take to really stop (its git
+ * or cp killed, a temporary copy taken back) before the queue goes on anyway. */
+export const SEEDED_STOP_GRACE_MS = 60_000;
+
 /** The seeded headless starts, one after another in the order they came (a
  * P1 the queue opened first spawns first — INSP-R13dis 3), each with a
- * deadline: past it, its `late` runs (the old way, -w) and the next start
- * goes on; the slow one sees `live()` false from then on and must spawn
- * nothing (INSP-R13dis R2-1). A throw before the deadline is `late` too. */
-export function seededStartChain(deadlineMs = SEEDED_START_MAX_MS, timers: { set: (run: () => void, ms: number) => unknown; clear: (timer: unknown) => void } = { set: (run, ms) => setTimeout(run, ms), clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) }) {
+ * deadline (R2-1). Past it the start is aborted (its `signal`: the git and cp
+ * it runs are killed) and waited for until it has really stopped — so the
+ * next start never runs a second fetch in the same repository beside it
+ * (R3-2) — and only then its `late` runs. `live()` is false from the
+ * deadline on: a slow start must spawn nothing. A throw is `late` too. */
+export function seededStartChain(deadlineMs = SEEDED_START_MAX_MS, timers: { set: (run: () => void, ms: number) => unknown; clear: (timer: unknown) => void } = { set: (run, ms) => setTimeout(run, ms), clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) }, graceMs = SEEDED_STOP_GRACE_MS) {
   let chain: Promise<void> = Promise.resolve();
-  return (start: (live: () => boolean) => Promise<void>, late: (why: string) => void): Promise<void> => {
+  return (start: (live: () => boolean, signal: AbortSignal) => Promise<void>, late: (why: string, stopped: boolean) => void): Promise<void> => {
     chain = chain.then(() => new Promise<void>((resolve) => {
+      const controller = new AbortController();
       let over = false;
-      const finish = (why: string | null) => {
-        if (over) return;
-        over = true;
-        timers.clear(timer);
-        if (why !== null) {
-          try { late(why); } catch { /* the next start goes on all the same */ }
-        }
+      const tell = (why: string, stopped: boolean) => {
+        try { late(why, stopped); } catch { /* the next start goes on all the same */ }
         resolve();
       };
-      const timer = timers.set(() => finish(`a preparação da worktree passou de ${Math.round(deadlineMs / 1000)} s`), deadlineMs);
       let running: Promise<void>;
       try {
-        running = start(() => !over);
+        running = start(() => !over, controller.signal);
       } catch (error) {
         running = Promise.reject(error);
       }
-      running.then(() => finish(null), (error: unknown) => finish(failureText(error)));
+      const settled = running.then(() => null, (error: unknown) => failureText(error));
+      const timer = timers.set(() => {
+        if (over) return;
+        over = true;
+        const why = `a preparação da worktree passou de ${Math.round(deadlineMs / 1000)} s`;
+        controller.abort(new Error(why));
+        // waited for until it has really stopped (or the grace is over: then said so)
+        let grace: unknown;
+        void Promise.race([settled.then(() => true), new Promise<boolean>((done) => { grace = timers.set(() => done(false), graceMs); })]).then((stopped) => {
+          timers.clear(grace);
+          tell(why, stopped);
+        });
+      }, deadlineMs);
+      void settled.then((error) => {
+        if (over) return;
+        over = true;
+        timers.clear(timer);
+        if (error === null) resolve();
+        else tell(error, true);
+      });
     }));
     return chain;
   };
+}
+
+/** One headless session as the seeded start sees it. */
+export interface SeededSession { id: string; repo: string; worktree: string; turns: number; status: string; cliWorktree?: { path: string; branch: string; caches: "cloned" | "install"; reason?: string }; cliWorktreeLeft?: { path: string; reason: string } }
+
+/** A headless session's first turn in a worktree the server made and seeded
+ * (R13-gate G2), through the chain. The worktree is used only when its
+ * preparation ENDED within the deadline — the ready mark is `cliWorktree`,
+ * set then and never by a start aborted (R3-1). A start given up (deadline
+ * or throw) never touches what it left: the session goes the old way, `-w`,
+ * under a NEW name (claude -w meeting a folder half made by us would run in
+ * it), and the folder, whatever its state, is told in the worktree report
+ * for a person to remove — removing a worktree whose git may still be
+ * writing it is the riskier choice, and the server removes none. A
+ * temporary copy of an aborted clone is taken back by the clone itself. */
+export function enqueueSeededStart(enqueue: ReturnType<typeof seededStartChain>, session: SeededSession, deps: {
+  prepare: (repo: string, name: string, signal: AbortSignal) => Promise<{ ok: true; plan: OwnPlan; caches: CloneOutcome } | { ok: false; reason: string }>;
+  spawn: (session: SeededSession, line: string, outcome: { ok: true; plan: OwnPlan; caches: CloneOutcome } | { ok: false; reason: string }) => void;
+  exists: (path: string) => boolean;
+  save: () => void;
+  log: (line: string) => void;
+  /** A new name for the old way's worktree. */
+  rename: (name: string) => string;
+  install?: string;
+}): Promise<void> {
+  return enqueue(async (live, signal) => {
+    const outcome = await deps.prepare(session.repo, session.worktree, signal);
+    // aborted, or past its deadline: no ready mark, no spawn — the late path decides (R3-1)
+    if (signal.aborted || !live()) {
+      deps.log(`${session.id}: its worktree's preparation was given up (${outcome.ok ? "made, but past the deadline" : outcome.reason}); not used`);
+      return;
+    }
+    if (session.status === "stopped" || session.status === "archived") {
+      deps.log(`${session.id}: stopped while its worktree was made${outcome.ok ? ` (${outcome.plan.path}, left as it is)` : ""}`);
+      return;
+    }
+    if (outcome.ok) {
+      session.cliWorktree = { path: outcome.plan.path, branch: outcome.plan.branch, caches: outcome.caches.mode, ...(outcome.caches.reason ? { reason: outcome.caches.reason } : {}) };
+      deps.save();
+    }
+    deps.spawn(session, cliDependencyLine(outcome, deps.install), outcome);
+  }, (why, stopped) => {
+    // never "running" with no process, never a 2nd first turn
+    if (session.turns !== 0 || session.status !== "running") return;
+    const partial = cliWorktreePlan(session.repo, session.worktree).path;
+    if (deps.exists(partial)) session.cliWorktreeLeft = { path: partial, reason: why };
+    delete session.cliWorktree;
+    const was = session.worktree;
+    session.worktree = deps.rename(was);
+    deps.save();
+    deps.log(`${session.id}: seeded start given up (${why}${stopped ? "" : "; it did not stop within the grace"}); the old way, claude -w ${session.worktree}${session.cliWorktreeLeft ? `, ${partial} left for the worktree report` : ""}`);
+    deps.spawn(session, cliDependencyLine({ ok: false, reason: why }, deps.install), { ok: false, reason: why });
+  });
 }
 
 /** The line a headless session's first brief carries about its dependencies:
@@ -978,10 +1051,11 @@ const quote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${v
 /** The server's worktrees whose session failed, or that the session never
  * used (it went the old way): for the disk report, with the command a
  * person runs. Nothing here removes anything. */
-export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } } }>, exists: (path: string) => boolean): LeftWorktree[] {
+export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } }; cliWorktreeLeft?: { path: string } }>, exists: (path: string) => boolean): LeftWorktree[] {
   const out: LeftWorktree[] = [];
   for (const session of sessions) {
-    const own = session.desktop?.own;
+    // a headless start given up past its deadline left one too (R3-1): never used, told the same way
+    const own = session.desktop?.own ?? (session.cliWorktreeLeft ? { path: session.cliWorktreeLeft.path, state: "abandoned" } : undefined);
     if (!own || !exists(own.path)) continue;
     const why = session.status === "failed" ? "failed" as const : own.state === "abandoned" || own.state === "failed" ? "unused" as const : null;
     if (!why) continue;

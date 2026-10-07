@@ -49,6 +49,8 @@ export interface CcSession {
    * the dependencies cloned from the seed when it was in date (G2, R13-gate):
    * the first turn runs right there instead of `-w`. */
   cliWorktree?: { path: string; branch: string; caches: "cloned" | "install"; reason?: string };
+  /** cli: the folder a seeded start given up past its deadline left (never used; told in the worktree report — R3-1). */
+  cliWorktreeLeft?: { path: string; reason: string };
   model?: string;
   permissionMode: CcPermissionMode;
   status: CcStatus;

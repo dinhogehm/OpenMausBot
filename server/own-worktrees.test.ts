@@ -6,6 +6,7 @@ import {
   appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
   cliDependencyLine, cliWorktreePlan, prepareCliWorktree, pruneDanglingLinks, SEEDED_START_MAX_MS, seededStartChain, type OwnPlan,
+  addOwnWorktree, enqueueSeededStart, type SeededSession,
 } from "./own-worktrees.ts";
 import { ccTurnArgs } from "./cc-sessions.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -653,37 +654,54 @@ describe("a headless session's worktree, seeded like the app's (R13-gate G2)", (
 // and a start that hangs (a clone stuck, git waiting) holds the next ones for
 // SEEDED_START_MAX_MS at most: then it goes the old way and the queue moves.
 describe("the seeded headless starts: in order, each with a deadline (R2-1)", () => {
-  /** Timers run by hand: the deadline fires when the test says. */
+  /** Timers run by hand: the ones of `ms` fire when the test says. */
   function clock() {
     const pending = new Map<number, { run: () => void; ms: number }>();
     let next = 0;
     return {
       timers: { set: (run: () => void, ms: number) => { pending.set(++next, { run, ms }); return next; }, clear: (timer: unknown) => { pending.delete(timer as number); } },
-      fire: () => { for (const [id, each] of pending) { pending.delete(id); each.run(); } },
-      pending: () => [...pending.values()].map((each) => each.ms),
+      fire: (ms: number) => { for (const [id, each] of Array.from(pending)) if (each.ms === ms) { pending.delete(id); each.run(); } },
+      pending: () => Array.from(pending.values(), (each) => each.ms),
     };
   }
   const tick = () => new Promise((resolve) => setImmediate(resolve));
+  /** A step that hangs until the start's signal aborts it, then stops a little later (a killed git or cp). */
+  const untilAborted = (signal: AbortSignal, log: string[], name: string) => new Promise<void>((_resolve, reject) => {
+    signal.addEventListener("abort", () => { log.push(`${name} aborted`); void tick().then(() => { log.push(`${name} stopped`); reject(new Error("killed")); }); });
+  });
 
-  it("a start that hangs gives way at its deadline: it goes the old way, sees itself late, and the next one spawns", async () => {
+  it("a start that hangs is aborted at its deadline and waited for until it stopped; only then its late, and only then the next one (R3-2)", async () => {
     const c = clock();
     const enqueue = seededStartChain(SEEDED_START_MAX_MS, c.timers);
     const log: string[] = [];
     let hungLive: () => boolean = () => true;
-    // 1st: hangs forever (a clone that never ends)
-    void enqueue((live) => { hungLive = live; log.push("hung started"); return new Promise<void>(() => {}); }, (why) => log.push(`hung late: ${why}`));
-    // 2nd: a P2 behind it, quick
+    void enqueue((live, signal) => { hungLive = live; log.push("hung started"); return untilAborted(signal, log, "hung"); }, (why, stopped) => log.push(`hung late (stopped ${stopped}): ${why}`));
     const second = enqueue(async (live) => { log.push(`second spawned (live ${live()})`); }, (why) => log.push(`second late: ${why}`));
     await tick();
     expect(log).toEqual(["hung started"]);
     expect(c.pending()).toEqual([180_000]);
     expect(hungLive()).toBe(true);
-    c.fire(); // 3 min pass
-    await second;
-    expect(log).toEqual(["hung started", "hung late: a preparação da worktree passou de 180 s", "second spawned (live true)"]);
-    // the hung one, should it ever end, knows it must spawn nothing
+    c.fire(180_000); // 3 min pass
     expect(hungLive()).toBe(false);
+    await second;
+    expect(log).toEqual(["hung started", "hung aborted", "hung stopped", "hung late (stopped true): a preparação da worktree passou de 180 s", "second spawned (live true)"]);
     expect(c.pending()).toEqual([]);
+  });
+
+  it("a start that ignores the abort holds the next one for the grace at most, and its late says it did not stop", async () => {
+    const c = clock();
+    const enqueue = seededStartChain(SEEDED_START_MAX_MS, c.timers, 60_000);
+    const log: string[] = [];
+    void enqueue(() => new Promise<void>(() => {}), (_why, stopped) => log.push(`deaf late (stopped ${stopped})`));
+    const second = enqueue(async () => { log.push("second spawned"); }, () => log.push("second late"));
+    await tick();
+    c.fire(180_000);
+    await tick();
+    expect(log).toEqual([]);
+    expect(c.pending()).toEqual([60_000]);
+    c.fire(60_000);
+    await second;
+    expect(log).toEqual(["deaf late (stopped false)", "second spawned"]);
   });
 
   it("keeps the order of the starts (a P1 first stays first), and a throw is the old way too, the next going on", async () => {
@@ -698,6 +716,103 @@ describe("the seeded headless starts: in order, each with a deadline (R2-1)", ()
     expect(log).toEqual(["P1 #9906", "P2 late: git: not found", "P2 #9905"]);
     // every deadline cleared once its start ended
     expect(c.pending()).toEqual([]);
+  });
+
+  // R3-1: the real start (prepareCliWorktree and cloneSeedCaches) with a git or a cp that hangs
+  // until the abort kills it — the session never runs in a worktree half made, and no temporary copy stays
+  describe("with git or the clone stuck (R3-1)", () => {
+    type Outcome = Awaited<ReturnType<typeof prepareCliWorktree>>;
+    const session = () => ({ id: "s9905", repo: REPO, worktree: "w", turns: 0, status: "running" });
+    function run(world: ReturnType<typeof cloneWorld>, exec: (signal: AbortSignal) => Exec) {
+      const c = clock();
+      const log: string[] = [];
+      const spawned: Array<{ worktree: string; ready: string | null; line: string }> = [];
+      const s: SeededSession = session();
+      const done = enqueueSeededStart(seededStartChain(SEEDED_START_MAX_MS, c.timers), s, {
+        prepare: (repo, name, signal) => prepareCliWorktree(repo, name, {
+          add: (plan) => addOwnWorktree(repo, plan, exec(signal)),
+          clone: (path) => cloneSeedCaches(world.seed, path, OWN_DEFAULTS.lockfiles, { ...world.io, exec: exec(signal) }),
+        }),
+        spawn: (each, line, outcome: Outcome) => { log.push(`spawn ${each.worktree} (${outcome.ok ? "ready" : "old way"})`); spawned.push({ worktree: each.worktree, ready: each.cliWorktree?.path ?? null, line }); },
+        exists: (path) => world.present.has(path),
+        save: () => {},
+        log: (line) => log.push(line),
+        rename: (name) => `${name}-2b7c`,
+      });
+      return { c, log, spawned, s, done };
+    }
+    const WT = `${REPO}/.claude/worktrees/w`;
+
+    it("git worktree add stuck: aborted, waited for; the session goes the old way under a new name, never in the half-made folder, which is told", async () => {
+      const w = cloneWorld();
+      w.present.delete(WT); // made by the add below
+      const r = run(w, (signal) => (async (_file, args) => {
+        if (args.includes("rev-parse") && !w.present.has(WT)) throw new Error("not a git repository");
+        if (args.includes("worktree") && args.includes("add")) {
+          // git writes <path>/.git first, then checks out: it hangs there until killed
+          w.present.add(WT);
+          w.present.add(`${WT}/.git`);
+          await untilAborted(signal, r.log, "git worktree add");
+        }
+        return "";
+      }) as Exec);
+      await tick();
+      expect(r.spawned).toEqual([]);
+      r.c.fire(180_000);
+      await r.done;
+      expect(r.log.indexOf("git worktree add stopped")).toBeLessThan(r.log.findIndex((line) => line.startsWith("spawn")));
+      expect(r.spawned).toHaveLength(1);
+      expect(r.spawned[0]).toMatchObject({ worktree: "w-2b7c", ready: null });
+      expect(r.spawned[0]!.line).toContain("ANTES de qualquer `npm run ci:local`");
+      expect(r.s.cliWorktree).toBeUndefined();
+      expect(r.s.cliWorktreeLeft).toEqual({ path: WT, reason: "a preparação da worktree passou de 180 s" });
+      // the half-made folder: in the worktree report, for a person (the server removes no worktree)
+      expect(leftOwnWorktrees([{ ...r.s, title: "9905 x" }], (path) => w.present.has(path))).toEqual([expect.objectContaining({ path: WT, sessionId: "s9905", why: "unused", command: `git -C ${REPO} worktree remove ${WT}` })]);
+    });
+
+    it("the clone stuck in its 2nd folder: the cp killed, its temporary copy taken back (no *.omb-clone left), the session the old way under a new name", async () => {
+      const w = cloneWorld();
+      const temps: string[] = [];
+      w.io.dropTemp = (path) => { w.dropped.push(path); w.present.delete(path); };
+      w.io.rename = (from, to) => { w.renamed.push(`${from} -> ${to}`); w.present.delete(from); w.present.add(to); };
+      const r = run(w, (signal) => (async (file, args) => {
+        if (file === "/usr/bin/nice") {
+          const temp = args.at(-1)!;
+          w.present.add(temp);
+          temps.push(temp);
+          w.calls.push([file, ...args]);
+          // the 2nd folder's copy never ends until killed
+          if (temp.endsWith("web/node_modules.omb-clone")) await untilAborted(signal, r.log, "cp web/node_modules");
+          return "";
+        }
+        if (args.includes("rev-parse")) return args.includes("--abbrev-ref") ? "worktree-w" : args.includes("--show-toplevel") ? WT : "abc";
+        return "";
+      }) as Exec);
+      await tick();
+      r.c.fire(180_000);
+      await r.done;
+      expect(temps).toEqual([`${WT}/node_modules.omb-clone`, `${WT}/web/node_modules.omb-clone`]);
+      // nothing named *.omb-clone left in the folder: the killed copy was taken back
+      expect([...w.present].filter((path) => path.endsWith(".omb-clone"))).toEqual([]);
+      expect(w.dropped).toContain(`${WT}/web/node_modules.omb-clone`);
+      expect(r.log.indexOf("cp web/node_modules stopped")).toBeLessThan(r.log.findIndex((line) => line.startsWith("spawn")));
+      expect(r.spawned).toEqual([expect.objectContaining({ worktree: "w-2b7c", ready: null })]);
+      expect(r.s.cliWorktree).toBeUndefined();
+      expect(r.s.cliWorktreeLeft?.path).toBe(WT);
+    });
+
+    it("the preparation ending in time: the ready mark set, the first turn in it, nothing renamed", async () => {
+      const w = cloneWorld();
+      const r = run(w, () => (async (file, args) => {
+        if (file === "/usr/bin/nice") { w.present.add(args.at(-1)!); return ""; }
+        if (args.includes("rev-parse")) return args.includes("--abbrev-ref") ? "worktree-w" : args.includes("--show-toplevel") ? WT : "abc";
+        return "";
+      }) as Exec);
+      await r.done;
+      expect(r.spawned).toEqual([{ worktree: "w", ready: WT, line: expect.stringContaining("já estão instaladas") }]);
+      expect(r.s.cliWorktreeLeft).toBeUndefined();
+      expect(r.c.pending()).toEqual([]);
+    });
   });
 });
 
