@@ -172,10 +172,13 @@ function sharedWords(a: string, b: string, except: readonly string[] = []): numb
  * "célula", "coluna", "planilha") or beside another cell, never "o modelo A100" (G2, H2). */
 function rowsIn(text: string): string[] {
   const rows: string[] = [];
-  for (const match of text.matchAll(/(?<![\p{L}])(?:linhas?|L)\s?(\d{1,5}(?:\s*(?:,|e)\s*(?:a\s+)?\d{1,5}(?!\d))*)(?!\d)/gu)) rows.push(...match[1]!.match(/\d+/g)!);
-  const cells = [...text.matchAll(/(?:(?<![\p{L}\d])|!)([A-K])(\d{2,4})(?![\p{L}\d])/gu)];
-  // the sheet said by name, by a cell's column ("as Observações da H192") or by its range
-  const sheet = /!|(?<![\p{L}])(?:c[ée]lulas?|colunas?|planilha|aba|range|observa[çc][õo]es|solicitante|respons[áa]vel|valida[çc][ãa]o)(?![\p{L}])/iu.test(text) || cells.length > 1;
+  // "linhas 100 a 200": one range, one id ("100-200"), never its first row alone
+  const ranged = text.replace(/(?<![\p{L}])linhas\s+(\d{1,5})\s+(?:a|at[ée])\s+(\d{1,5})(?!\d)/giu, (_all, from: string, to: string) => { rows.push(`${from}-${to}`); return " "; });
+  for (const match of ranged.matchAll(/(?<![\p{L}])(?:linhas?|L)\s?(\d{1,5}(?:\s*(?:,|e)\s*(?:a\s+)?\d{1,5}(?!\d))*)(?!\d)/gu)) rows.push(...match[1]!.match(/\d+/g)!);
+  const cells = [...ranged.matchAll(/(?:(?<![\p{L}\d])|!)([A-K])(\d{2,4})(?![\p{L}\d])/gu)];
+  // a sheet's cell said as one: "Aba!X192", "a célula/coluna H192", a column's name ("as Observações da H192"), its
+  // range, or another cell beside it — "planilha" alone is no cell ("A planilha tem 120 linhas; o modelo A100…", INSP-R13VIS)
+  const sheet = /!|(?<![\p{L}])(?:c[ée]lulas?|colunas?|range|observa[çc][õo]es|solicitante|respons[áa]vel|valida[çc][ãa]o)(?![\p{L}])/iu.test(ranged) || cells.length > 1;
   if (sheet) rows.push(...cells.map((match) => match[2]!));
   return [...new Set(rows)];
 }
@@ -374,71 +377,33 @@ const IDS_OF = (text: string) => { const ids = idsIn(text); return new Set([...i
  * E2, F1). The mark counts where the ask is said: its own sentence, or the label that leads its list — "**Decisão sua
  * (item o4):** - …", "Precisa de você (o11): feche a #9326", "Continua com você o item o1: …" — unless the ask names a
  * ticket, issue or row the item does not ("Decisão sua (item o3): aprovar o merge da #9400", the o3 about the #9374).
- * A neighbour sentence of the paragraph points it at an open item only for an ask that names nothing else, or names
- * what that item names ("A linha 190 da #9384 ainda depende de você. … está em Precisa de você (o1)"); never "O
- * merge da #9400 depende de você. O caso parecido foi o item o3." "Não abri item" and "é lá que você decide" count in
- * the ask's own sentence only, for an ask that names nothing, and never across a "mas" ("Não abri item novo, mas
- * preciso que você aprove…"). */
+ * A neighbour sentence ("Atualizei o item o1…", "Está no item o5") makes an echo only of an ask with no subject of its
+ * own — no id and no noun beyond pronouns and the words every ask has: "Continua com você", "Isso depende de você".
+ * An ask that says what it is about opens its item whatever item the paragraph names: comparing it with the item's
+ * title failed four rounds running (G1, H1, I1); at worst it is a duplicate the owner closes with one click (I1).
+ * "Não abri item" and "é lá que você decide" count in the ask's own sentence only, for an ask that names nothing,
+ * and never across a "mas" ("Não abri item novo, mas preciso que você aprove…"). */
 function echoesItem(ask: string, same: string, neighbours: string, items: ReadonlyMap<string, string>): boolean {
   const asked = IDS_OF(ask);
-  // what the ask is about, in words: its own, and the paragraph's sentences that point at no item — the pointing
-  // sentence ("Atualizei o item o1 com o passo a passo do disco") says what the item is, not what is asked
-  const said = [ask, ...splitSentences(neighbours).filter((each) => !new RegExp(ITEM_BY_ID.source, "iu").test(each))].join(" ");
-  const fits = (id: string, near: boolean) => {
+  const near = (id: string) => {
     if (!items.has(id)) return false;
-    const title = items.get(id)!;
-    const held = IDS_OF(title);
-    const shared = [...asked].some((each) => held.has(each));
-    if (near) return !asked.size || shared || !held.size;
-    // a neighbour points at it: an echo only with something in common with what the item is about (INSP-R13VIS G1) —
-    // with no title to compare, the ask that names nothing, as before
-    if (!title) return !asked.size;
-    // the same id, and no action of its own the item does not name ("O deploy da #9386…" beside an item on its merge)
-    if (asked.size) {
-      // every id the ask names is the item's: "As linhas 185 e 186… A 185 já está no item o1" still asks the 186 (H1)
-      if (![...asked].every((each) => held.has(each))) return false;
-      const doing = actionsIn(ask);
-      const named = new Set(actionsIn(title));
-      return !doing.length || doing.some((each) => named.has(each)) || commonWords(ask, title) > 0;
-    }
-    return commonWords(said, title) > 0;
+    const held = IDS_OF(items.get(id)!);
+    return !asked.size || [...asked].some((each) => held.has(each)) || !held.size;
   };
-  if ([...same.matchAll(ITEM_BY_ID)].some((match) => fits(match[1]!.toLowerCase(), true))) return true;
-  if (!asked.size && !/(?<![\p{L}])(?:mas|por[ée]m|s[óo]\s+que)(?![\p{L}])/iu.test(same) && (NO_ITEM_OPENED.test(same) || ITEM_WHERE_DECIDED.test(same))) return true;
-  return [...neighbours.matchAll(ITEM_BY_ID)].some((match) => fits(match[1]!.toLowerCase(), false));
+  if ([...same.matchAll(ITEM_BY_ID)].some((match) => near(match[1]!.toLowerCase()))) return true;
+  const subjectless = !asked.size && !subjectNouns(ask).size;
+  if (subjectless && !/(?<![\p{L}])(?:mas|por[ée]m|s[óo]\s+que)(?![\p{L}])/iu.test(same) && (NO_ITEM_OPENED.test(same) || ITEM_WHERE_DECIDED.test(same))) return true;
+  return subjectless && [...neighbours.matchAll(ITEM_BY_ID)].some((match) => items.has(match[1]!.toLowerCase()));
 }
-/** Words two texts share that say what they are about: content words, and acronyms ("WAF", "PR") — never an id,
- * which is compared apart, nor the words every ask has. */
-function commonWords(a: string, b: string): number {
-  const words = (text: string) => {
-    // a person's name says who, not what ("Avisar o Matheus" and "o hotfix do Matheus" are not the same pendency)
-    const plain = text.replace(/#\d+|(?<![\p{L}])(?:linha|L)\s?\d+|[A-Z]{2,6}-\d{4,8}-\d{2,6}/gu, " ").replace(/(?<=[\p{L}\d,;:)]\s+)\p{Lu}\p{Ll}+/gu, " ");
-    // an acronym that names a thing ("WAF", "CSAT", "D1"), never one every pendency has ("PR", "GO", "OK", "CI") (INSP-R13VIS H1)
-    const acronyms = [...plain.matchAll(/(?<![\p{L}\d])([A-Z][A-Z\d]{1,4})(?![\p{L}\d])/gu)].map((match) => match[1]!).filter((each) => !GENERIC_ACRONYMS.has(each) && !/^P\d$/.test(each));
-    return new Set([...contentWords(plain), ...acronyms.map((each) => each.toLowerCase())].filter((word) => !ASK_WORDS.has(word) && !/^\d+$/.test(word)));
-  };
-  const two = words(b);
-  return [...words(a)].filter((word) => two.has(word)).length;
+/** The nouns that say what an ask is about — content words, names ("o Matheus", "o Chat") and acronyms ("o OK", "o
+ * MCP") — not a verb, a pronoun, nor the words every ask has: an ask with none ("Continua com você", "Isso depende de
+ * você") is about whatever the paragraph points at. */
+function subjectNouns(text: string): Set<string> {
+  const acronyms = [...text.matchAll(/(?<![\p{L}\d])([A-Z][A-Z\d]{1,4})(?![\p{L}\d])/gu)].map((match) => match[1]!.toLowerCase());
+  return new Set([...[...contentWords(text)].filter((word) => !/(?:ar|er|ir)$/.test(word)), ...acronyms].filter((word) => !ASK_WORDS.has(word) && !/^\d+$/.test(word)));
 }
-/** What an ask asks done, in a word: an infinitive ("instalar", "fechar") or the noun of an action ("deploy", "merge",
- * "push", "publicação") — by its stem, so "aprovar" and "aprovação" meet; the words every ask has aside. */
-function actionsIn(text: string): string[] {
-  const plain = strip(text).toLowerCase();
-  const words = plain.split(/[^a-z]+/).filter((word) => word.length >= 4 && !ASK_WORDS.has(word));
-  const actions = words.filter((word) => /(?:ar|er|ir)$/.test(word) || /(?:cao|coes|mento)$/.test(word) || ACTION_NOUNS.has(word));
-  // one stem for the verb and its noun ("publicar", "publicação" → "public"; "aprovar", "aprovação" → "aprov"), and one
-  // name for the same act said three ways ("mesclar", "mergear" → "merge"; "implantar" → "deploy") (INSP-R13VIS H2)
-  const stems = actions.map((word) => ACTION_SAME[word] ?? word.replace(/(?:acao|acoes|icao|icoes|ar|er|ir|cao|coes|mento)$/, (end) => (end.startsWith("ic") ? "ic" : "")));
-  // "publicar em produção" is the deploy
-  if (/(?<![a-z])publica\w*\s+(?:\S+\s+){0,3}em\s+producao/.test(plain)) stems.push("deploy");
-  return [...new Set(stems)];
-}
-const ACTION_NOUNS = new Set(["deploy", "merge", "push", "release", "carrier", "gate", "rollback", "hotfix", "commit", "backup", "login", "teste", "testes"]);
-const ACTION_SAME: Record<string, string> = { mesclar: "merge", mergear: "merge", mesclagem: "merge", implantar: "deploy", implantacao: "deploy" };
-/** Acronyms of the work itself, in every pendency: they say how, never what about. */
-const GENERIC_ACRONYMS = new Set(["PR", "PRS", "GO", "OK", "CI", "CD", "QA", "CS", "N1", "N2", "N3", "BRT", "UTC", "GB", "MB", "KB", "GIB", "MIB", "API", "URL", "ID", "IDS", "SHA", "LOG", "APP", "BOT", "SLA", "TI", "PDF", "MCP", "VM"]);
-/** Words any ask or item says, whatever it is about. */
-const ASK_WORDS = new Set(["depende", "dependem", "precisa", "precisam", "preciso", "decidir", "decisao", "aprovar", "falta", "item", "itens", "voce", "osvaldo", "pendencia", "pedido", "comando", "comandos", "passo", "agora", "ainda", "planilha", "issue", "issues"]);
+/** Words any ask says, whatever it is about. */
+const ASK_WORDS = new Set(["depende", "dependem", "dependendo", "precisa", "precisam", "preciso", "decidir", "decisao", "aprovar", "falta", "item", "itens", "voce", "osvaldo", "pendencia", "pedido", "comando", "comandos", "passo", "agora", "ainda", "issue", "issues", "continua", "continuam", "fica", "ficam", "segue", "seguem", "dois", "duas", "tres"]);
 
 /** What the routine's reply leaves with the owner: one ask per pendency —
  * one per item of a list it leads ("Ainda dependem de você: - abrir… -
@@ -578,7 +543,9 @@ export function routineAskTitle(ask: RoutineAsk): string {
   const title = askTitle(ask);
   const { kind, label } = ask.subject;
   // "o merge da PR 9400" names the #9400 already
-  if (!label || !(kind === "ticket" || kind === "issue" || kind === "linha") || slug(title).includes(slug(label)) || (kind === "issue" && new RegExp(`(?<!\\d)${ask.subject.id}(?!\\d)`).test(title))) return title;
+  // "o merge da PR 9400" names the #9400 already, "a linha 12 e a 13" the rows 12 and 13
+  const said = (number: string) => new RegExp(`(?<!\\d)${number}(?!\\d)`).test(title);
+  if (!label || !(kind === "ticket" || kind === "issue" || kind === "linha") || slug(title).includes(slug(label)) || (kind === "issue" && said(ask.subject.id)) || (kind === "linha" && ask.subject.id.split(/[+-]/).every(said))) return title;
   return `${title.replace(/…$/, "").replace(/[\s,;:–—-]+$/, "")}${title.endsWith("…") ? "…" : ""} (${label})`;
 }
 function askTitle(ask: RoutineAsk): string {
@@ -685,7 +652,7 @@ function splitOutsideParens(text: string): string[] {
     if (depth) continue;
     // ", e a escala…" is one cut, never one that leaves the "e" leading a part
     // never between numbers: "as linhas 185 e 186", "76, 98 e 106" are one noun
-    if (/\d/.test(text[at - 1] ?? "") && /^(?:,\s+|\s+e\s+)\d/.test(text.slice(at))) continue;
+    if (/\d/.test(text[at - 1] ?? "") && /^(?:,\s+|\s+e\s+)(?:[ao]s?\s+)?\d/.test(text.slice(at))) continue;
     const cut = /^(?:,\s+e\s+(?=[oa]s?\s)|,\s+|\s+e\s+)/u.exec(text.slice(at));
     if (cut) { parts.push(text.slice(start, at)); at += cut[0].length - 1; start = at + 1; }
   }
@@ -1043,7 +1010,8 @@ export interface RoutineAskLedger {
   resolvedOwnerPendingOf(botId?: string): ResolvedOwnerPending[];
   addOwnerPending(botId: string, threadId: string, input: { title: string; key: string; link?: string; why: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string }): OwnerPending;
   resolveOwnerPending(match: { botId?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[];
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId">>): OwnerPending | null;
+  /** `key`: the rows of a sheet item grown by an ask about more of them ("linha:185" → "linha:185+186", INSP-R13VIS I2). */
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "key">>): OwnerPending | null;
 }
 
 const isRoutineItem = (item: Pick<OwnerPending, "key">) => Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
@@ -1055,9 +1023,17 @@ const closedWithReservation = (item: Pick<ResolvedOwnerPending, "history">) => {
   return Boolean(last && answerWithReservation(last.text));
 };
 /** The item says the same pendency as `ask`: the same subject, and what it asks beyond it reads alike. */
+/** The rows of a sheet item's key ("routine-ask:linha:185+186" → 185, 186); null for any other key. */
+const rowsOfKey = (key: string | undefined) => (key ? /^routine-ask:linha:([\d+-]+)$/.exec(baseKey(key))?.[1]?.split("+") ?? null : null);
+const rowsKey = (rows: readonly string[]) => `${ROUTINE_ASK_KEY_PREFIX}linha:${rows.join("+")}`;
+const rowsLabel = (rows: readonly string[]) => (rows.length > 1 ? `linhas ${rows.slice(0, -1).join(", ")} e ${rows.at(-1)}` : `linha ${rows[0]}`);
 function itemIsAsk(item: Pick<OwnerPending, "key" | "why" | "title">, ask: RoutineAsk): boolean {
-  if (!item.key || baseKey(item.key) !== routineAskKey(ask)) return false;
-  const except = subjectWords(ask);
+  // a sheet item is the ask about any of its rows: "linha:185" and "linhas 185 e 186" are one pendency, grown (INSP-R13VIS I2)
+  const itemRows = rowsOfKey(item.key);
+  const askRows = rowsOfKey(routineAskKey(ask));
+  if (itemRows && askRows) { if (!itemRows.some((row) => askRows.includes(row))) return false; } else if (!item.key || baseKey(item.key) !== routineAskKey(ask)) return false;
+  // "a linha 185" and "as linhas 185 e 186" say the row, not what is asked of it
+  const except = [...subjectWords(ask), ...(itemRows ? [...itemRows, "linha", "linhas", "dependem"] : [])];
   const asked = quotedOf(item);
   const said = ask.what ?? ask.sentence;
   const beyond = (text: string) => [...contentWords(text)].some((word) => !except.includes(word));
@@ -1090,15 +1066,32 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
   const everyOpen = ledger.allOwnerPending?.() ?? open;
   const itemIds = everyOpen.flatMap((item) => [item.id, ...(item.aliases ?? [])]);
   const items = everyOpen.flatMap((item) => [item.id, ...(item.aliases ?? [])].map((id) => ({ id, title: item.title })));
-  for (const ask of routineOwnerAsks(run.text, { ownerName: run.ownerName, knownNames: run.knownNames, itemIds, items })) {
+  for (let ask of routineOwnerAsks(run.text, { ownerName: run.ownerName, knownNames: run.knownNames, itemIds, items })) {
     const mine = ledger.ownerPendingOf(run.botId);
     // the bot's own item already asks it: it names the subject, or reads like it
     const label = ask.subject.label && slug(ask.subject.label);
     if (mine.some((item) => !item.key && ((label && has(`${item.title} ${item.why ?? ""}`, label)) || overlap(ask.what ?? ask.sentence, `${item.title} ${item.why ?? ""}`) >= 0.6))) continue;
-    const existing = mine.find((item) => isRoutineItem(item) && itemIsAsk(item, ask));
+    let existing = mine.find((item) => isRoutineItem(item) && itemIsAsk(item, ask));
     // answered by the owner a moment ago, the SAME pendency: the routine is only repeating what it read before (INSP-N22 A2)
     // — not when the owner's closing words carried a reservation: that answer must not hold it back (INSP-N22 r6 U1)
-    if (!existing && ledger.resolvedOwnerPendingOf(run.botId).some((item) => item.resolvedBy === "owner" && run.at - item.resolvedAt < ROUTINE_ASK_SETTLED_MS && itemIsAsk(item, ask) && !closedWithReservation(item))) continue;
+    if (!existing) {
+      const answered = ledger.resolvedOwnerPendingOf(run.botId).filter((item) => item.resolvedBy === "owner" && run.at - item.resolvedAt < ROUTINE_ASK_SETTLED_MS && itemIsAsk(item, ask) && !closedWithReservation(item));
+      // rows the owner answered stay answered; only the rows the ask adds are asked ("linhas 185 e 186" after the 185, INSP-R13VIS I2)
+      const askRows = rowsOfKey(routineAskKey(ask));
+      const left = askRows?.filter((row) => !answered.some((item) => rowsOfKey(item.key)?.includes(row)));
+      if (answered.length && !left?.length) continue;
+      if (answered.length && left && left.length < askRows!.length) {
+        ask = { ...ask, subject: { kind: "linha", id: left.join("+"), label: rowsLabel(left) } };
+        existing = mine.find((item) => isRoutineItem(item) && itemIsAsk(item, ask));
+      }
+    }
+    // an open sheet item about some of these rows takes the others: one item, its key grown (INSP-R13VIS I2)
+    const grown = existing ? rowsOfKey(existing.key) : null;
+    const wanted = rowsOfKey(routineAskKey(ask));
+    if (existing && grown && wanted && wanted.some((row) => !grown.includes(row)) && existing.key === baseKey(existing.key!)) {
+      const rows = [...grown, ...wanted.filter((row) => !grown.includes(row))];
+      existing = ledger.patchOwnerPending(run.botId, existing.id, { key: rowsKey(rows) }) ?? existing;
+    }
     // another pendency about a subject that already has one: its own key
     const base = routineAskKey(ask);
     const taken = new Set([...mine, ...ledger.resolvedOwnerPendingOf(run.botId)].flatMap((item) => (item.key ? [item.key] : [])));

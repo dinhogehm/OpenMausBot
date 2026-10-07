@@ -173,6 +173,38 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+  // INSP-R13VIS I2: a sheet item and an ask about more of its rows, or fewer, are one pendency
+  it("A: an item on the 185, then \"linhas 185 e 186\": the one item, grown to both rows", () => {
+    const ledger = make();
+    const [first] = run(ledger, "A linha 185 depende de você.").opened;
+    now += 3_600_000;
+    const next = run(ledger, "As linhas 185 e 186 dependem de você.");
+    expect(next.opened).toEqual([]);
+    expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[first!.id, "routine-ask:linha:185+186"]]);
+    expect(ledger.ownerPendingOf("monitor")).toHaveLength(1);
+  });
+
+  it("B: an item on the 185 and 186, then \"a linha 185\": the same item, still both rows", () => {
+    const ledger = make();
+    const [first] = run(ledger, "As linhas 185 e 186 dependem de você.").opened;
+    now += 3_600_000;
+    const next = run(ledger, "A linha 185 depende de você.");
+    expect(next.opened).toEqual([]);
+    expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[first!.id, "routine-ask:linha:185+186"]]);
+  });
+
+  it("C: the 185 answered by the owner, then \"linhas 185 e 186\": only the 186 opens", () => {
+    const ledger = make();
+    const [first] = run(ledger, "A linha 185 depende de você.").opened;
+    ledger.resolveOwnerPending({ botId: "monitor", key: first!.key!, by: "owner" });
+    now += 3_600_000;
+    const next = run(ledger, "As linhas 185 e 186 dependem de você.");
+    expect(next.opened.map((item) => item.key)).toEqual(["routine-ask:linha:186"]);
+    // and the 185 alone, said again, stays answered
+    now += 3_600_000;
+    expect(run(ledger, "A linha 185 depende de você.").opened).toEqual([]);
+  });
+
   // INSP-R13VIS E2: the Monitor pointing at the Chief's item opened a second item for the same pendency
   it("an item another bot opened is an echo too: the routine pointing at it opens nothing", () => {
     const ledger = make();
@@ -856,7 +888,10 @@ describe("ids as the routines write them", () => {
     ["O merge da PR 9400 depende de você.", "routine-ask:issue:9400"],
     ["O merge da PR #9400 depende de você.", "routine-ask:issue:9400"],
     ["A issue 9400 depende de você.", "routine-ask:issue:9400"],
-    ["A H192 da planilha depende de você.", "routine-ask:linha:192"],
+    ["A célula H192 depende de você.", "routine-ask:linha:192"],
+    // "planilha" alone makes no cell (INSP-R13VIS round 9)
+    ["A H192 da planilha depende de você.", "routine-ask:frase:h192-planilha"],
+    ["Entre as linhas 100 a 200 da planilha, a 150 depende de você.", "routine-ask:linha:100-200"],
     ["A célula Atendimento!B190 depende de você.", "routine-ask:linha:190"],
     ["Gravar a B185, a C185 e a E185 depende de você.", "routine-ask:linha:185"],
     // every row, one key (INSP-R13VIS H1)

@@ -30,7 +30,11 @@
 // R8: "PR", "GO", "OK", "CI" and the like say how, never what about; every row or issue the ask names must be the
 // item's; a cell needs a sheet said around it; "publicar"/"publicação", "merge"/"mesclar" and "deploy"/"publicar em
 // produção" are one act each (INSP-R13VIS H1, H2).
-export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8";
+//
+// R9: the sentence beside an ask makes it an echo only when the ask has no subject of its own; the title comparison
+// of R7-R8 is gone (INSP-R13VIS I1). Over the replies of 7 days, 5 of the 22 echoes came back as items — all from
+// conversations, none from a routine's reply, the only path this runs on.
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9";
 /** The items open when a phrase is read, any bot's, by id and title — the test's default set when a phrase gives none. */
 export type CorpusItems = ReadonlyArray<{ id: string; title: string }>;
 export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco" | "", open?: CorpusItems]> = [
@@ -181,7 +185,8 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   // an ask whose item already exists, said in its paragraph (real 02/10 07:37, 05/10 14:50 and 20:52; INSP-R13VIS E2)
   ["R5", "**Precisa de você (o11):** feche a #9326. Tentei fechar com um comentário com essa prova, mas o Jev barrou o comando e não tentei de novo.", []],
   ["R5", "**Decisão sua (item o1 em \"Precisa de você\"):**\n- **Recomendo:** ajustar o corredor C1 para aceitar as colunas B, C e E numa linha nova da aba Atendimento.\n- **Ou:** você grava à mão a B185, a C185 e a E185. O comando está no item.", [], "", [{ id: "o1", title: "Aprovar as 3 escritas da planilha (linhas 185 e 186) para eu gravar" }]],
-  ["R5", "Continua com você a linha 190 da #9384, que o Jev barrou. O comando está em \"Precisa de você\" (o1).", []],
+  // R9: an ask that says what it is about opens its item, whatever the sentence beside it points at — a duplicate at worst (I1)
+  ["R5", "Continua com você a linha 190 da #9384, que o Jev barrou. O comando está em \"Precisa de você\" (o1).", ["Ver: continua com você a linha 190 da #9384, que o Jev barrou"]],
   ["R5", "Para destravar, falta você criar a trava; a pendência é a o15, e quem a abriu foi o Chief.", []],
   // the bot opened none, or says where the owner decides (real 05/10 21:26, 06/10 09:57)
   ["R5", "Nenhuma está na tag de produção, então a decisão sobre elas é sua. Não abri item para essas pastas porque liberam pouco espaço.", []],
@@ -199,7 +204,7 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   ["R6", "Use o item em \"Precisa de você\" para a #9401. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
   // the same marks, on the ask's own subject, still make it an echo
   ["R6", "Decisão sua (item o3): manter a pausa só no envio, e a #9374 é fechada.", []],
-  ["R6", "Só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo. Atualizei o item o9 com o passo a passo.", []],
+  ["R6", "Só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo. Atualizei o item o9 com o passo a passo.", ["Ver: só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo"]],
   ["R7", "Avisar o Matheus depende de você. Atualizei o item o1 com o passo a passo do disco.", ["Avisar o Matheus depende de você"], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
   ["R7", "Avisar o Matheus depende de você. O hotfix dele está no item o33.", ["Avisar o Matheus depende de você"], "", [{ id: "o33", title: "Decidir como a #9386 vai para produção (hotfix P1 do Matheus)" }]],
   ["R7", "O deploy da #9386 depende de você. O caminho do merge está no item o33.", ["Ver: o deploy da #9386"], "", [{ id: "o33", title: "Decidir como a #9386 vai para produção (hotfix P1 do Matheus)" }]],
@@ -207,9 +212,9 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   ["R7", "Decisão sua (item o3): aprovar o merge da PR 9400.", ["Decidir: aprovar o merge da PR 9400"], "", [{ id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" }]],
   ["R7", "O merge da PR 9400 depende de você. O caso parecido de setembro foi o item o3.", ["Ver: o merge da PR 9400"], "", [{ id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" }]],
   // what the item is about, said beside it: still the echo it was (real 03/10 13:41 and 05/10 16:32, by their words)
-  ["R7", "Liberar o disco depende de você. Atualizei o item o1 com o passo a passo.", [], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
+  ["R7", "Liberar o disco depende de você. Atualizei o item o1 com o passo a passo.", ["Liberar o disco depende de você"], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
   // the o38 duplicate: the row by its cell ("H192") is the row of the ask (real 06/10 22:16)
-  ["R7", "A linha 192 depende de você. O comando está no o38.", [], "", [{ id: "o38", title: "Colar você mesmo as Observações da H192 (#9032): o Jev barrou o Monitor" }]],
+  ["R7", "A linha 192 depende de você. O comando está no o38.", ["Ver: a linha 192"], "", [{ id: "o38", title: "Colar você mesmo as Observações da H192 (#9032): o Jev barrou o Monitor" }]],
   // R8: an acronym every pendency has is no subject; every row of the ask must be the item's (INSP-R13VIS H1)
   ["R8", "Preciso que você dê o GO no deploy do Lead. Atualizei o item o5.", ["Ver: preciso que você dê o GO no deploy do Lead"], "", [{ id: "o5", title: "Dar o GO no merge da #9400" }]],
   ["R8", "A PR do Redator depende de você. O item o5 tem o comando.", ["Ver: a PR do Redator"], "", [{ id: "o5", title: "Criar a PR da #9374 que o Jev barrou" }]],
@@ -219,12 +224,27 @@ export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, tex
   // a cell only where a sheet is said; one act said two ways (INSP-R13VIS H2)
   ["R8", "O modelo A100 depende de você. Atualizei o item o5.", ["Ver: o modelo A100"], "", [{ id: "o5", title: "Escrever na linha 100 da planilha" }]],
   ["R8", "Liberar o cluster K80 depende de você.", ["Liberar o cluster K80 depende de você"]],
-  ["R8", "Mesclar a #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Aprovar o merge da #9400" }]],
-  ["R8", "O merge da #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Mesclar a #9400 pelo gate" }]],
-  ["R8", "Publicar a #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Aprovar a publicação da #9400" }]],
-  ["R8", "A publicação da #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Publicar a #9400" }]],
-  ["R8", "O deploy da #9400 depende de você. Está no item o5.", [], "", [{ id: "o5", title: "Publicar a #9400 em produção" }]],
+  ["R8", "Mesclar a #9400 depende de você. Está no item o5.", ["Mesclar a #9400 depende de você"], "", [{ id: "o5", title: "Aprovar o merge da #9400" }]],
+  ["R8", "O merge da #9400 depende de você. Está no item o5.", ["Ver: o merge da #9400"], "", [{ id: "o5", title: "Mesclar a #9400 pelo gate" }]],
+  ["R8", "Publicar a #9400 depende de você. Está no item o5.", ["Publicar a #9400 depende de você"], "", [{ id: "o5", title: "Aprovar a publicação da #9400" }]],
+  ["R8", "A publicação da #9400 depende de você. Está no item o5.", ["Ver: a publicação da #9400"], "", [{ id: "o5", title: "Publicar a #9400" }]],
+  ["R8", "O deploy da #9400 depende de você. Está no item o5.", ["Ver: o deploy da #9400"], "", [{ id: "o5", title: "Publicar a #9400 em produção" }]],
   ["R8", "O rollback da #9400 depende de você. O deploy dela está no item o3.", ["Ver: o rollback da #9400"], "", [{ id: "o3", title: "Aprovar o deploy da #9400" }]],
+  // R9: a verb in common is no subject in common — and no comparison is made at all: these say what they are about (I1)
+  ["R9", "Liberar o MCP do Chat depende de você. Atualizei o item o3 com o passo a passo.", ["Liberar o MCP do Chat depende de você"], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  ["R9", "Abrir a sessão do Redator depende de você. Atualizei o item o3.", ["Abrir a sessão do Redator depende de você"], "", [{ id: "o3", title: "Abrir no app uma sessão na raiz de nuria-platform" }]],
+  ["R9", "Gravar a nota do ticket depende de você. O comando está no item o3.", ["Gravar a nota do ticket depende de você"], "", [{ id: "o3", title: "Gravar a linha 185 da planilha" }]],
+  ["R9", "Criar a conta do Redator depende de você. Atualizei o item o3.", ["Criar a conta do Redator depende de você"], "", [{ id: "o3", title: "Criar a PR da #9374 que o Jev barrou" }]],
+  ["R9", "Renomear a sessão do Lead depende de você. Atualizei o item o3.", ["Renomear a sessão do Lead depende de você"], "", [{ id: "o3", title: "Renomear no app: Sobrecarga D1 → 9337 Sobrecarga D1" }]],
+  ["R9", "Trocar a senha do Redator depende de você. Atualizei o item o3.", ["Trocar a senha do Redator depende de você"], "", [{ id: "o3", title: "Trocar a senha das duas contas do piperun" }]],
+  ["R9", "Publicar o changelog da #9400 depende de você. O deploy dela está no item o3.", ["Publicar o changelog da #9400 depende de você"], "", [{ id: "o3", title: "Publicar a #9400 em produção" }]],
+  // an ask with no subject of its own is the item the sentence beside it points at
+  ["R9", "Continua com você. Atualizei o item o3.", [], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  ["R9", "Isso depende de você. Está no item o3.", [], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  // "planilha" alone makes no cell; a range is one id; "a linha 12 e a 13" is one noun
+  ["R9", "A planilha tem 120 linhas; o modelo A100 depende de você. Atualizei o item o3.", ["Ver: o modelo A100"], "", [{ id: "o3", title: "Escrever na linha 100 da planilha" }]],
+  ["R9", "Entre as linhas 100 a 200 da planilha, a 150 depende de você.", ["Ver: a 150 (entre as linhas 100 a 200 da planilha)"]],
+  ["R9", "A linha 12 e a 13 dependem de você.", ["Ver: a linha 12 e a 13"]],
   // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
   ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
 ];
