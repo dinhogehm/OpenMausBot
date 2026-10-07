@@ -581,8 +581,25 @@ describe("what an answer to a disk item authorizes (INSP-R13fol)", () => {
     expect(d.DISK_NOT_AUTHORIZED_NOTICE).toBe("O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas.");
     // "Manter" and a request for steps add nothing
     expect(d.keepsFolders({ kind: "option", label: d.DISK_KEEP_LABEL })).toBe(true);
-    // a quoted part is not the owner's, the rest is: "pode remover a 503 — o Chief disse 'todas'"
-    expect(d.ownerRemovalIntent("Pode remover a 503 — o Chief disse que todas", all)).toEqual({ folders: [A], force: [], discardUnpushed: false });
+    // a quoted part is not the owner's, the rest is; a dash never ends the owner's words (R3-1)
+    expect(d.ownerRemovalIntent("Pode remover a 503; o Chief disse 'todas'", all)).toEqual({ folders: [A], force: [], discardUnpushed: false });
+    expect(d.ownerRemovalIntent("Pode remover a 503 — o Chief disse que todas", all)).toBeNull();
+  });
+
+  it("a folder named as an exception is never the one authorized: no authorization at all (INSP-R13fol R3-1)", () => {
+    const thirteen = [
+      "Pode remover todas, a 503 fica", "Pode remover todas, deixa a 503", "Pode remover todas, fora a 503", "Pode remover todas, tirando a 503",
+      "Pode remover todas, com exceção da 503", "Pode remover todas, só não a 503", "Pode remover todas: a 503 não", "Pode remover todas, a 503 é minha",
+      "Pode remover todas, mas a 503 eu quero ver antes", "Pode remover todas (a 503 deixa pra lá)", "Remova todas. Obs: a 9337 é do Roberto, cuidado",
+      "Pode remover todas — menos a 503", `Pode remover todas – exceto a ${C}`,
+    ];
+    for (const text of thirteen) {
+      expect(d.ownerRemovalIntent(text, all), text).toBeNull();
+      expect(d.diskAnswerLine(all, facts, { kind: "text", text }, []), text).toBe(d.DISK_NOT_AUTHORIZED);
+    }
+    // a name with no exception and no "todas" still scopes; "todas" alone still covers all
+    expect(d.ownerRemovalIntent("Pode remover a 503 e a 9337", all)!.folders).toEqual([A, B]);
+    expect(d.ownerRemovalIntent("Pode remover todas", all)!.folders).toEqual(all);
   });
 
   it("\"Pode remover só a 503\" authorizes the 503 only, never with --force", () => {
@@ -693,6 +710,38 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     // not mixed, or no worktree named: nothing to split
     expect(d.splitMixedRemoval(pushItem, folders)).toBeNull();
     expect(d.splitMixedRemoval({ ...urgent, steps: [urgent.steps[0]!, { text: "x", command: "git worktree remove .worktrees/lot-t-release" }] }, folders)).toBeNull();
+  });
+
+  it("only the removals leave a compound command; a decision that removes points to the server's item (R3-2, R3-3)", () => {
+    expect(d.withoutRemovals("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo && git -C /r worktree remove /r/.claude/worktrees/merge-deploy-open-prs-00664b")).toBe("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo");
+    expect(d.withoutRemovals("git -C /r worktree remove /r/.claude/worktrees/x-1; rm -rf ~/.cache/ci && du -sh ~")).toBe("rm -rf ~/.cache/ci && du -sh ~");
+    expect(d.withoutRemovals("cd ~/Projetos/nuria-platform && for w in a-1 b-2; do git -C .claude/worktrees/$w checkout -- .gitignore; git worktree remove --force .claude/worktrees/$w; done")).toBe("");
+    expect(d.withoutRemovals("cd ~/p && for w in a-1; do git worktree remove $w; done && git push origin main")).toBe("cd ~/p && git push origin main");
+    const both = {
+      title: "Apague o cache e a merge-deploy",
+      steps: [{ text: "Apague o cache e remova a merge-deploy", command: "rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo && git -C /r worktree remove /r/.claude/worktrees/merge-deploy-open-prs-00664b" }],
+      options: [{ label: "Rode você", reply: "Rode git worktree remove /r/.claude/worktrees/chat-wait-time-issue-21f481 por mim" }, { label: "Só o cache", reply: "Apague só o cache." }],
+    };
+    const split = d.splitMixedRemoval(both, folders)!;
+    expect(split.folders.map((each) => each.name)).toEqual(["merge-deploy-open-prs-00664b", "chat-wait-time-issue-21f481"]);
+    expect(split.steps[0]!.command).toBe("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo");
+    expect(split.options![0]).toEqual({ label: "Rode você", reply: "Rode você: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac; por este item, não remova nenhuma worktree." });
+    expect(split.options![1]).toEqual(both.options[1]);
+  });
+
+  it("the size of a split folder is the one said right after its name (R3-5, item of 03/10 13:32)", () => {
+    const names = ["release-lote-p", "8891-503-diag", "8891-inbox-503"];
+    const item = {
+      title: "Liberar mais espaço em disco (13 GiB livres, 97% cheio)",
+      steps: [
+        { text: "Cache do turbo na raiz, 4,1 GB.", command: "rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo" },
+        { text: "Worktrees limpas, de trabalho antigo: release-lote-p (2,2 GB), 8891-503-diag e 8891-inbox-503 (215 MB cada).", command: "cd /Users/osvaldo/Projetos/nuria-platform && for w in release-lote-p 8891-503-diag 8891-inbox-503; do git worktree remove .claude/worktrees/$w; done" },
+      ],
+    };
+    const split = d.splitMixedRemoval(item, names)!;
+    expect(split.folders.map((each) => `${each.name}[${each.size}]`)).toEqual(["release-lote-p[2,2G]", "8891-503-diag[215M]", "8891-inbox-503[215M]"]);
+    expect(split.steps[0]!.command).toBe("rm -rf /Users/osvaldo/Projetos/nuria-platform/.turbo");
+    expect(split.steps[1]!.command).toBeUndefined();
   });
 
   it("a folder with HEAD detached is offered \"Criar branch e push\", never \"Push e remover\" (R2-4)", () => {

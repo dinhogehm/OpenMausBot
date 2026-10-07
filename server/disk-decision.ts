@@ -110,30 +110,72 @@ export function botItemAsk(input: { title: string; command?: string; steps?: Rea
   return other ? "mixed" : "remove";
 }
 
+/** A command without its worktree removals (R3-2): a `for … do … done` loop
+ * that removes worktrees goes whole; of `A && git worktree remove X; B`, A
+ * and B stay. Empty when nothing but removals (and a `cd`) is left. */
+export function withoutRemovals(command: string): string {
+  const loops = command.replace(/\bfor\s+\w+\s+in\b[\s\S]*?\bdone\b/g, (loop) => (/worktree\s+remove/.test(loop) ? " " : loop));
+  const parts = loops.split(/(\s*(?:&&|\|\||;)\s*)/);
+  const kept: string[] = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    const part = parts[index]!.trim();
+    if (!part || /worktree\s+remove/.test(part)) continue;
+    if (kept.length) kept.push((parts[index - 1] ?? " && ").trim() === ";" ? "; " : ` ${(parts[index - 1] ?? "&&").trim()} `);
+    kept.push(part);
+  }
+  const rest = kept.join("");
+  return /^\s*(?:cd\s+\S+\s*)?$/.test(rest) ? "" : rest;
+}
+
+/** The size the text says right after a folder's name ("8891-503-diag e 8891-inbox-503 (215 MB cada)"), never one said before it (R3-5). */
+function sizeAfter(text: string, name: string, folders: readonly string[]): string {
+  let at = text.indexOf(name);
+  let length = name.length;
+  // its short form ("a worktree merge-deploy (592 MB…)")
+  if (at < 0) {
+    const token = [...text.matchAll(/[A-Za-z0-9][\w.…-]{2,}/g)].find((match) => match[0].includes("-") && resolveFolder(match[0], folders) === name);
+    if (!token) return "?";
+    at = token.index!;
+    length = token[0].length;
+  }
+  const found = /(\d+(?:,\d+)?)\s?([KMGT])i?B?(?![\p{L}])/u.exec(text.slice(at + length, at + length + 120));
+  return found ? `${found[1]}${found[2]}` : "?";
+}
+
 /** The removal part of a mixed item (R2-3): the folders its `git worktree
  * remove` commands name (a `for w in A B; do … worktree remove …/$w` names
- * them in its list), with what its steps say of each; and its steps without
- * those commands, each saying the removal goes through the server's disk
- * item. Null when it is not mixed or names no folder of the worktrees. */
-export function splitMixedRemoval<S extends { text: string; command?: string }>(input: { title: string; command?: string; steps?: readonly S[]; options?: ReadonlyArray<{ label: string; reply: string }> }, folders: readonly string[]): { folders: LeftFolder[]; steps: S[] } | null {
+ * them in its list), with what its steps say of each; its steps with only
+ * the removals out of their commands (R3-2), each saying the removal goes
+ * through the server's disk item; and its decisions whose reply removes a
+ * worktree rewritten to point there (R3-3). Null when it is not mixed or
+ * names no folder of the worktrees. */
+export function splitMixedRemoval<S extends { text: string; command?: string }, O extends { label: string; reply: string }>(input: { title: string; command?: string; steps?: readonly S[]; options?: readonly O[] }, folders: readonly string[]): { folders: LeftFolder[]; steps: S[]; options?: O[] } | null {
   if (botItemAsk(input) !== "mixed") return null;
-  const removing = (input.steps ?? []).filter((step) => step.command && /worktree\s+remove/.test(step.command));
-  const names = [...new Set(removing.flatMap((step) => [...commandFolders(step.command!, folders), ...namedFolders(step.command!, folders)]))];
+  const removing = [
+    ...(input.steps ?? []).flatMap((step) => (step.command && /worktree\s+remove/.test(step.command) ? [step.command] : [])),
+    ...(input.options ?? []).flatMap((option) => (/worktree\s+remove/.test(option.reply) ? [option.reply] : [])),
+  ];
+  const names = [...new Set(removing.flatMap((command) => [...commandFolders(command, folders), ...namedFolders(command, folders)]))];
   if (!names.length) return null;
-  const said = (name: string) => (input.steps ?? []).map((step) => step.text).find((text) => namedFolders(text, folders, true).includes(name) || text.includes(name)) ?? "";
+  const texts = [...(input.steps ?? []).map((step) => step.text), ...(input.options ?? []).map((option) => option.reply)];
+  const said = (name: string) => texts.find((text) => text.includes(name)) ?? texts.find((text) => namedFolders(text, folders, true).includes(name)) ?? "";
+  const note = "(o comando de remoção saiu deste item: a remoção vai pelo item de disco do servidor, conferido no Mac)";
   return {
     folders: names.map((name) => {
       const reason = said(name);
-      // "592M", "2,2G", "592 MB"
-      const found = /(\d+(?:,\d+)?)\s?([KMGT])i?B?(?![\p{L}])/u.exec(reason);
-      const size = found ? `${found[1]}${found[2]}` : "?";
-      return { name, size, reason: reason.replace(/\s+/g, " ").trim() };
+      return { name, size: sizeAfter(reason, name, folders), reason: reason.replace(/\s+/g, " ").trim() };
     }),
     steps: (input.steps ?? []).map((step) => {
       if (!step.command || !/worktree\s+remove/.test(step.command)) return step;
       const { command: _command, ...rest } = step;
-      return { ...rest, text: `${step.text} (o comando de remoção saiu deste item: a remoção vai pelo item de disco do servidor, conferido no Mac)`.slice(0, 500) } as S;
+      const left = withoutRemovals(step.command);
+      return { ...rest, ...(left ? { command: left } : {}), text: `${step.text} ${note}`.slice(0, 500) } as S;
     }),
+    ...(input.options ? {
+      options: input.options.map((option) => (/worktree\s+remove/.test(option.reply)
+        ? { ...option, reply: `${option.label}: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac; por este item, não remova nenhuma worktree.`.slice(0, 500) }
+        : option)),
+    } : {}),
   };
 }
 
@@ -536,7 +578,11 @@ const NEGATES = [
 /** Irony or doubt in an emoji ("…apagar meu trabalho também 🙄"): in doubt, no authorization. */
 const IRONY = /[\u{1F644}\u{1F612}\u{1F643}\u{1F60F}\u{1F602}\u{1F923}\u{1F605}\u{1F928}\u{1F914}\u{1F611}\u{1F610}\u{1F62C}]/u;
 /** Someone else's words, quoted or after a dash ("O Chief sugeriu 'pode remover todas'"), are not the owner's. */
-const unquoted = (text: string) => text.replace(/'[^']*'|"[^"]*"|“[^”]*”|‘[^’]*’|«[^»]*»/gu, " ").replace(/\s[—–]\s.*$/su, " ");
+// only quotes: a dash never ends the owner's words ("todas — menos a 503", INSP-R13fol R3-1)
+const unquoted = (text: string) => text.replace(/'[^']*'|"[^"]*"|“[^”]*”|‘[^’]*’|«[^»]*»/gu, " ");
+/** An exception or a reservation about a folder ("a 503 fica", "deixa a 503", "tirando", "é do Roberto, cuidado",
+ * "a 503 não", "quero ver antes"): the scope is no longer plain — no authorization, the safest reading (R3-1). */
+const EXCEPTS = word("fica|ficam|deixa|deixe|deixem|fora|tirando|exce[cç][aã]o|exceto|salvo|menos|cuidado|quero ver|pra l[aá]|minha|minhas|meu|meus|[eé] d[oa]s?|n[aã]o");
 const REMOVES = word("pode|podem|remov|apag|exclu|delet|descart|tir[ae]|limp", true);
 const ALL = word("tod[oa]s|tudo");
 const ONLY = word("s[oó]|apenas|somente");
@@ -551,10 +597,13 @@ export function ownerRemovalIntent(text: string, itemFolders: readonly string[])
   // "não precisa de push" is not a negation of the removal
   const plain = said.replace(/n[aã]o precisa (?:de )?push/gu, "");
   if (NEGATES.some((each) => each.test(plain))) return null;
+  if (EXCEPTS.test(plain)) return null;
   if (!REMOVES.test(said)) return null;
   const named = namedFolders(own, itemFolders, true);
   const all = ALL.test(said) && !ONLY.test(said);
   if (!named.length && !all) return null;
+  // "todas" and a folder named: an exception or a list, never sure which — no authorization (R3-1)
+  if (all && named.length) return null;
   return {
     folders: named.length ? named : [...itemFolders],
     // force never by default, nor through "todas": only for a folder the owner named

@@ -191,6 +191,27 @@ it("a mixed item keeps its other ask; its worktree removal goes to the server's 
   expect(disk.key).toBe(`disk-decision:${dirty}`);
 }), 120_000);
 
+// INSP-R13fol R3-4: a push check whose turn is never seen (the answer edited,
+// the removal done elsewhere) is not dropped silently: when it expires the
+// server looks at the remote anyway and says what is still only on this Mac.
+it("a push check that expires still looks at the remote and says so", () => diskFixture(async (f) => {
+  f.plan([
+    { steps: [{ tool: "owner_pending", arguments: o28 }], reply: "Atualizei o item de disco." },
+    { reply: "Vou fazer o push." },
+    { expectContextIncludes: ["[Servidor: push conferido no remoto, 24 h depois da resposta]", dirty], reply: "Faço o push agora." },
+  ]);
+  await f.cli("send", "--bot", f.bot.id, "--task", f.bot.activeTaskId, "--text", "Atualize o item de disco.");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(1);
+  const item = f.ledger().ownerPending.find((each: any) => each.key?.startsWith("disk-decision:"));
+  const decided = await f.reply(f.bot.id, item.id, { option: 0, label: "Push e remover" });
+  expect(decided.status, await decided.clone().text()).toBeLessThan(300);
+  await expect.poll(async () => ((await f.api(`/api/threads/${f.bot.activeTaskId}/messages?limit=200`, undefined, "GET")).messages as any[]).map((message) => String(message.tool?.name ?? message.text ?? "")).join("\n"), { timeout: 30_000 }).toContain("(24 h depois)");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
+  expect(f.ledger().diskPushChecks ?? []).toEqual([]);
+  const chips = ((await f.api(`/api/threads/${f.bot.activeTaskId}/messages?limit=200`, undefined, "GET")).messages as any[]).map((message) => String(message.tool?.name ?? ""));
+  expect(chips.some((chip) => chip.startsWith(`Disco: push ainda não está no remoto (24 h depois) — `) && chip.includes(dirty))).toBe(true);
+}, { OMB_DISK_PUSH_CHECK_MS: "1" }), 120_000);
+
 // INSP-R13fol #6: a bot that asks "Quer que eu remova…?" is asked by the
 // server to open the item with replacesAsk — that item is the server's disk
 // item too, linked to the question, and only one item is open.

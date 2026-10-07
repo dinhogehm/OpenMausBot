@@ -313,6 +313,7 @@ import {
   STEPS_REPORT_PREFIX,
   type OwnerPendingStep,
   type OwnerPendingOption,
+  type DiskPushCheck,
   practicalMissing,
   REMIND_REPORT_PREFIX,
   ownerPendingVisible,
@@ -9639,6 +9640,7 @@ async function autonomyTick(): Promise<void> {
   void checkPower().catch((error) => console.error(`[power] ${error instanceof Error ? error.message : String(error)}`));
   void checkPipelineIdle().catch((error) => console.error(`[pipeline-idle] ${error instanceof Error ? error.message : String(error)}`));
   void checkFixedRows().catch((error) => console.error(`[owner-pending] row check: ${error instanceof Error ? error.message : String(error)}`));
+  if (store.bots.some((bot) => autonomy.diskPushChecksOf(bot.id).some((check) => Date.now() - check.at > DISK_PUSH_CHECK_MS))) void diskItemTurn(sweepDiskPushChecks).catch((error) => console.error(`[disk] push sweep: ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -14966,17 +14968,34 @@ const NURIA_MAIN = join(homedir(), "Projetos", "nuria-platform");
  * the answer is there — the server looks at the remote; a commit still only
  * on this Mac, the folder kept or already removed, is said to the bot, so no
  * commit is lost unseen (INSP-R13fol #2, R2-4). Kept in the ledger. */
-const DISK_PUSH_CHECK_MS = 24 * 3_600_000;
+const DISK_PUSH_CHECK_MS = Number(process.env.OMB_DISK_PUSH_CHECK_MS) > 0 ? Number(process.env.OMB_DISK_PUSH_CHECK_MS) : 24 * 3_600_000;
 
 async function checkDiskPushes(botId: string, threadId: string): Promise<void> {
   const now = Date.now();
   for (const check of autonomy.diskPushChecksOf(botId)) {
-    if (now - check.at > DISK_PUSH_CHECK_MS) { autonomy.dropDiskPushCheck(check); continue; }
+    if (now - check.at > DISK_PUSH_CHECK_MS) { await lookAtRemote(check, true); continue; }
     // only the turn that carried the answer: its conversation, with the answer in it
     if (check.threadId !== threadId) continue;
     const carried = store.messagesFor(threadId).some((message) => message.role === "user" && message.at >= check.at - 1_000 && String(message.text ?? "").includes(check.marker));
     if (!carried) continue;
-    autonomy.dropDiskPushCheck(check);
+    await lookAtRemote(check, false);
+  }
+}
+
+/** A check never fired (its answer edited, sent another way, the removal done elsewhere): at 24 h the remote is looked at anyway (R3-4). */
+async function sweepDiskPushChecks(): Promise<void> {
+  const now = Date.now();
+  for (const bot of store.bots) {
+    for (const check of autonomy.diskPushChecksOf(bot.id)) if (now - check.at > DISK_PUSH_CHECK_MS) await lookAtRemote(check, true);
+  }
+}
+
+/** Looks at the remote for a check's commits, once, and settles it: a commit
+ * still only on this Mac is said to the bot and, in its conversation, to the
+ * owner; at expiry, said even though its turn was never seen (R3-4). */
+async function lookAtRemote(check: DiskPushCheck, expired: boolean): Promise<void> {
+  autonomy.dropDiskPushCheck(check);
+  {
     const lines: string[] = [];
     for (const folder of check.folders) {
       // the remote-tracking branches holding the commit: a push from the worktree updates them
@@ -14991,10 +15010,12 @@ async function checkDiskPushes(botId: string, threadId: string): Promise<void> {
         : `${folder.name} foi removida, mas o commit ${folder.head.slice(0, 9)}${folder.branch ? ` (branch ${folder.branch})` : ""} não está em nenhuma branch remota: ele só existe neste Mac — faça o push dessa branch agora e me confirme`);
     }
     if (lines.length) {
-      autonomy.addReport(check.botId, check.threadId, `[Servidor: push conferido no remoto] ${lines.join("; ")}.`);
-      store.appendMessage(check.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Disco: push ainda não está no remoto — ${check.folders.filter((each) => lines.some((line) => line.startsWith(each.name))).map((each) => each.name).join(", ")}`, 240), ok: false } });
+      autonomy.addReport(check.botId, check.threadId, `[Servidor: push conferido no remoto${expired ? ", 24 h depois da resposta" : ""}] ${lines.join("; ")}.`);
+      store.appendMessage(check.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Disco: push ainda não está no remoto${expired ? " (24 h depois)" : ""} — ${check.folders.filter((each) => lines.some((line) => line.startsWith(each.name))).map((each) => each.name).join(", ")}`, 240), ok: false } });
       refreshBotRow(check.botId);
-      console.log(`[disk] push checked on the remote: ${lines.join("; ")}`);
+      console.log(`[disk] push checked on the remote${expired ? " at expiry" : ""}: ${lines.join("; ")}`);
+    } else if (expired) {
+      console.log(`[disk] push check expired; every commit is on the remote (${check.folders.map((each) => each.name).join(", ")})`);
     }
   }
 }
@@ -15023,7 +15044,8 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
     const pending = covered.filter((name) => facts.get(name)?.unpushed !== false && facts.get(name)?.head && !facts.get(name)?.inUse);
     if (pending.length && answer?.text) {
       autonomy.addDiskPushCheck({
-        botId: item.botId, threadId: ownerTurnThread(item.botId, item.threadId), at: Date.now(), marker: answer.text.trim().split("\n")[0]!.slice(0, 60),
+        botId: item.botId, threadId: ownerTurnThread(item.botId, item.threadId), at: Date.now(), // the item's id with the answer's first words, as ownerPendingReplyText writes them: two items answered alike stay apart (R3-4)
+        marker: `(${item.id}): ${answer.text.trim().split("\n")[0]!.slice(0, 50)}`,
         folders: pending.map((name) => ({ name, head: facts.get(name)!.head!, ...(facts.get(name)!.branch ? { branch: facts.get(name)!.branch! } : {}) })),
       });
     }
@@ -15190,13 +15212,13 @@ function openDiskDecisionFromReply(botId: string, threadId: string, text: string
  * `git worktree remove` next to a `rm -rf`): the server's disk item opened
  * beside it for those folders, and the bot's steps without the removal
  * commands. Null when the item is not mixed or names no worktree. */
-async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: string, input: { title: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): Promise<{ steps: OwnerPendingStep[]; message: string } | null> {
+async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: string, input: { title: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): Promise<{ steps: OwnerPendingStep[]; options?: OwnerPendingOption[]; message: string } | null> {
   let names: string[];
   try { names = readdirSync(NURIA_WORKTREES); } catch { return null; }
   const split = splitMixedRemoval(input, names);
   if (!split) return null;
   const opened = await serverDiskItem(bot, threadId, input, undefined, split.folders);
-  return { steps: split.steps, message: opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor." };
+  return { steps: split.steps, ...(split.options ? { options: split.options } : {}), message: opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor." };
 }
 
 async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending, beside?: LeftFolder[]): Promise<{ message: string; opened?: OwnerPending } | null> {
@@ -21986,7 +22008,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // a mixed item (push, rm -rf… and `worktree remove`): its removal part goes to the server's item beside it,
           // its own removal commands leave it (INSP-R13fol R2-3)
           const beside = await mixedRemovalBeside(bot, threadId, { title, ...structured });
-          const own = beside ? { ...structured, steps: beside.steps } : structured;
+          const own = beside ? { ...structured, steps: beside.steps, ...(beside.options ? { options: beside.options } : {}) } : structured;
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...own });
           if (promotion) {
             autonomy.linkAskPromotion(promotion, item);
@@ -22026,7 +22048,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           // the removal part of a mixed item: beside it, its commands out of it (INSP-R13fol R2-3)
           const beside = current.key ? null : await mixedRemovalBeside(bot, current.threadId, { title: patch.title ?? current.title, ...(current.command ? { command: current.command } : {}), steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
-          const item = autonomy.updateOwnerPending(bot.id, id, beside ? { ...patch, steps: beside.steps } : patch);
+          const item = autonomy.updateOwnerPending(bot.id, id, beside ? { ...patch, steps: beside.steps, ...(beside.options ? { options: beside.options } : {}) } : patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
           const shape = practical(item);
