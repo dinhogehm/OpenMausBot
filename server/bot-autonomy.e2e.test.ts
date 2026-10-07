@@ -816,6 +816,8 @@ async function gateFake() {
   const fake = join(tools, "fake-claude.mjs");
   const calls = join(tools, "calls.jsonl");
   const gatePid = join(tools, "gate.pid");
+  const gateScript = join(tools, "local-ci.cjs");
+  writeFileSync(gateScript, `const { existsSync } = require("node:fs"); const release = process.argv[2]; setInterval(() => { if (existsSync(release)) process.exit(0); }, 100); setTimeout(() => process.exit(0), 120000);\n`);
   writeFileSync(fake, `#!/usr/bin/env node
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -826,12 +828,15 @@ let cwd = process.cwd();
 const w = argv.indexOf("-w");
 if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv }) + "\\n");
-console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+// SLOWINIT: says its init (its cwd) only past the turn limit, as a claude slow to start under load
+const slow = /SLOWINIT/.test(prompt);
+if (!slow) console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
 const release = /RELEASE:(\\S+)/.exec(prompt);
 if (release) {
-  const source = "const { existsSync } = require('node:fs'); setInterval(() => { if (existsSync(" + JSON.stringify(release[1]) + ")) process.exit(0); }, 100); setTimeout(() => process.exit(0), 120000);";
-  const gate = spawn(process.execPath, ["-e", source, "ci:local"], { cwd, detached: true, stdio: "ignore" });
+  // node running the gate's script, as npm → local-ci does
+  const gate = spawn(process.execPath, [${JSON.stringify(gateScript)}, release[1]], { cwd, detached: true, stdio: "ignore" });
   writeFileSync(${JSON.stringify(gatePid)}, String(gate.pid));
+  if (slow) setTimeout(() => console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" })), 8000);
   process.on("SIGTERM", () => { try { process.kill(-gate.pid, "SIGKILL"); } catch {} process.exit(143); });
   await new Promise((resolve) => gate.on("exit", resolve));
 }
@@ -858,13 +863,19 @@ it("does not cut a turn past its limit while its gate runs: the turn hears the g
     execFileSync("git", ["init", "-q", repo]);
     const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
     f.save({ turns: [
-      { steps: [{ tool: "cc_session_start", arguments: { title: "#9998 gate longo", brief: `RELEASE:${release}`, repo, surface: "cli" } }], reply: "Started" },
+      // its init comes after the first check: the gate is found in the worktree a first turn makes
+      { steps: [{ tool: "cc_session_start", arguments: { title: "#9998 gate longo", brief: `RELEASE:${release} SLOWINIT`, repo, surface: "cli" } }], reply: "Started" },
       { reply: "Done" },
       { reply: "spare" },
     ] });
     await f.send("Run the long gate.");
     // past the limit with its gate running: the cut waits, nothing is killed
-    await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("mas o gate (ci:local) da sessão ainda roda; o corte espera o gate terminar (até 10 min)")), { timeout: 20_000 }).toBe(true);
+    try {
+      await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("mas o gate (ci:local) da sessão ainda roda; o corte espera o gate terminar (até 10 min de turno)")), { timeout: 20_000 }).toBe(true);
+    } catch (error) {
+      // the server's own account of the turn says why
+      throw new Error(`${String(error)}\nledger: ${JSON.stringify(ccLedger()[0])}\ngate pid ${gatePid()}\n${readFileSync(f.session.info.logPath, "utf8").split("\n").filter((line) => line.includes("[cc-sessions]")).join("\n")}`);
+    }
     expect(ccLedger()[0].status).toBe("running");
     expect(() => process.kill(gatePid(), 0)).not.toThrow();
     // the gate ends: the turn ends by itself, not cut, nothing to follow
@@ -898,8 +909,11 @@ it("cuts a turn whose gate runs past the ceiling, and says the gate was stopped 
     await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("o corte espera o gate terminar")), { timeout: 20_000 }).toBe(true);
     // the ceiling passes: cut, its gate killed with it
     await expect.poll(() => ccLedger()[0].status, { timeout: 30_000 }).toBe("failed");
-    expect(ccLedger()[0].lastError).toContain("it was cut while its gate (ci:local) still ran");
-    await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("gate interrompido pelo corte, sem resultado")), { timeout: 15_000 }).toBe(true);
+    // said in the cut's own write, with how long the cut really waited (R2 B1, B7)
+    // on a failure, the server's own gate checks say why
+    const gateLog = () => readFileSync(f.session.info.logPath, "utf8").split("\n").filter((line) => line.includes("gate check")).join("\n");
+    expect(ccLedger()[0].lastError, gateLog()).toMatch(/it was cut while its gate \(ci:local\) still ran, after waiting \d+ min for it/);
+    await expect.poll(async () => (await f.chips()).some((chip: string) => /turno cortado com 1 min de turno, depois de esperar \d+ min pelo gate \(ci:local\) — gate interrompido pelo corte, sem resultado/.test(chip)), { timeout: 15_000 }).toBe(true);
     // killed by its claude on the cut (reaped by launchd a moment later)
     await expect.poll(() => { try { process.kill(gatePid(), 0); return true; } catch { return false; } }, { timeout: 5_000 }).toBe(false);
     expect(ccLedger()[0].bgJob).toBeUndefined();

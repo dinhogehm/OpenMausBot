@@ -28,8 +28,9 @@ export const sessionChips = {
   followedCut: (title: string, turn: number) => `${sessionLabel(title)} parou sem fechar o turno ${turn} — o Chief retoma (o processo que sobreviveu ao reinício terminou)`,
   survivorLimit: (title: string, turn: number, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min — o Chief retoma (turno ${turn}, acompanhado após o reinício)`,
   // R13-2 / INSP-R13res A1: a gate of the session still runs, so the cut waits for it, up to a ceiling
-  survivorGateWait: (title: string, minutes: number, gate: string, ceiling: string) => `${sessionLabel(title)} passou de ${minutes} min, mas o gate (${gate}) dela ainda roda — o corte espera o gate terminar (até ${ceiling})`,
-  survivorGateCut: (title: string, gate: string, ceiling: string) => `${sessionLabel(title)} cortada após ${ceiling} com o gate (${gate}) rodando — gate interrompido pelo corte, sem resultado; o Chief retoma`,
+  survivorGateWait: (title: string, minutes: number, gate: string, ceiling: string) => `${sessionLabel(title)} passou de ${minutes} min, mas o gate (${gate}) dela ainda roda — o corte espera o gate terminar (até ${ceiling} de turno)`,
+  // how long it really waited, not the ceiling (R2 B7); null: it was past the ceiling already
+  survivorGateCut: (title: string, gate: string, ceiling: string, waited: string | null) => `${sessionLabel(title)} cortada com ${ceiling} de turno, ${waited ? `depois de esperar ${waited} pelo gate` : "já além do teto de espera do gate"} (${gate}) — gate interrompido pelo corte, sem resultado; o Chief retoma`,
   // what really outlived the cut (a gate started with nohup): the server, not the Chief, resumes it
   survivorLimitJob: (title: string, turn: number, minutes: number, count: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min; ${plural(count, "processo seguiu rodando", "processos seguiram rodando")} — o servidor retoma a sessão quando ${count === 1 ? "terminar" : "terminarem"} (turno ${turn}, acompanhado após o reinício)`,
   survivorLimitTwice: (title: string, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min duas vezes seguidas — o servidor não retoma de novo; o Chief decide`,

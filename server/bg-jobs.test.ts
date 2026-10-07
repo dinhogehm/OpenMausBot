@@ -94,6 +94,23 @@ describe("background jobs of a headless session", () => {
     expect(isGateCommand("/bin/zsh -c source /x/snapshot.sh && eval 'npm run ci:local 2>&1 | tee /tmp/ci-local-9398.log'")).toBe(true);
     expect(isGateCommand("node scripts/pr-merge-gate.mjs 9398")).toBe(true);
     expect(isGateCommand("npm run dev")).toBe(false);
+    // R2 B3: the program decides, not a word in its argv
+    for (const text of [
+      "less scripts/local-ci.sh", "vim scripts/local-ci.sh", "nvim scripts/local-ci.sh", "code --wait scripts/local-ci.sh",
+      "less docs/runbooks/ci:local.md", "git commit -m fix ci:local flake", "git log --grep=ci:local", "gh pr comment 9398 --body run pr:merge",
+      "node /Users/o/.laya/hooks/dual-review.cjs ci:local", "claude -p --resume x run npm run ci:local and report",
+      "node /Users/o/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js -p --resume x npm run ci:local",
+      "/bin/zsh -c source /x/snapshot.sh && eval 'vim scripts/local-ci.sh'",
+    ]) expect([text, isGateCommand(text)]).toEqual([text, false]);
+    expect(isGateCommand("bash ./scripts/local-ci.sh --profile full")).toBe(true);
+    expect(isGateCommand("/bin/bash scripts/local-ci.sh --profile full")).toBe(true);
+    expect(isGateCommand("/bin/zsh -c source /x/snapshot.sh && eval './scripts/local-ci.sh --profile full' < /dev/null")).toBe(true);
+    expect(isGateCommand("node /Users/o/.npm-global/lib/node_modules/npm/bin/npm-cli.js run ci:local")).toBe(true);
+    expect(isGateCommand("pnpm ci:local")).toBe(true);
+    // R2 B4: pr-merge.sh runs `bash -c "<pr-merge-gate.sh body>" pr-merge-gate …`: a long body with its own loops
+    const body = `set -euo pipefail\n${"while read -r line; do echo \"$line\"; done < \"$file\"\n".repeat(20)}until gh pr checks; do sleep 10; done`;
+    expect(isGateCommand(`bash -c ${body} pr-merge-gate 9398 --publish`)).toBe(true);
+    expect(isPollingShell(`bash -c ${body} pr-merge-gate 9398 --publish`)).toBe(false);
     expect(isPollingShell("/bin/zsh -c until grep -q 'exit=' /tmp/ci-local-9398.log; do sleep 5; done")).toBe(true);
     expect(isPollingShell("/bin/zsh -c while pgrep -f ci:local >/dev/null; do sleep 10; done")).toBe(true);
     expect(isPollingShell("tail -f /tmp/ci-local-9398.log")).toBe(true);
