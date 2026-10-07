@@ -358,7 +358,8 @@ export function tooShortToTitle(text: string): boolean {
   const cjk = text.match(CJK) ?? [];
   if (cjk.length) {
     if (!(text.replace(CJK_ACK, "").match(CJK) ?? []).length) return true;
-    if (cjk.length >= 3) return false;
+    // beyond a "yes" and its particles, a verb is left: "好，改", "做吧" ask (INSP-R13VIS round 4)
+    if (cjk.length >= 2) return false;
   }
   return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
 }

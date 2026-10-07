@@ -130,7 +130,7 @@ describe("tasks", () => {
     for (const said of ["はい", "了解", "好的", "はい！", "ありがとうございます", "わかりました。", "没问题"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
     // INSP-R13VIS C4: every form of a thanks or "got it", and a three-character ask
     for (const said of ["ありがとうございました", "收到了谢谢", "收到，谢谢！", "谢谢你啊", "好的，谢谢！", "どうもありがとう", "了解しました！"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
-    for (const said of ["写测试", "部署吧", "直して"]) {
+    for (const said of ["写测试", "部署吧", "直して", "好，改", "做吧"]) {
       const task = store.createTask(bot.id)!;
       expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)?.title, said).toBe(said);
     }

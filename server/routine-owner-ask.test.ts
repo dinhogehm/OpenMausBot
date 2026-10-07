@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
+import { ROUTINE_ASK_CORPUS } from "./routine-owner-ask.corpus.ts";
 import { applyRoutineAsks, keepRoutineAsk, routineAskItem, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
@@ -751,7 +752,7 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
   });
 
   it("B1: agreeing to a plan, in another clause, still leaves the decision asked", () => {
-    expect(titles("O Chief concordou com o plano, e a decisão sobre a #9400 fica com você.")).toEqual(["routine-ask:issue:9400 | Decidir: #9400"]);
+    expect(titles("O Chief concordou com o plano, e a decisão sobre a #9400 fica com você.")).toEqual(["routine-ask:issue:9400 | Decidir: a #9400"]);
   });
 
   it("B3: a pronoun nothing before it agrees with is left out of the title, never \"(ela)\"", () => {
@@ -815,7 +816,7 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
   it("a fact told in the past is no title, with or without a colon (INSP-R13VIS A4)", () => {
     const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
     const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
-    expect(title("Fechei a #9403 e isso fica com você.")).toEqual(["Ver: #9403"]);
+    expect(title("Fechei a #9403 e isso fica com você.")).toEqual(["Ver: a #9403"]);
     expect(title("O Redator KB Nuria mandou o levantamento e isso fica com você.")).toEqual(["Ver o recado do Monitor na rotina \"R\""]);
   });
 
@@ -837,5 +838,19 @@ describe("R13-visual N26: a routine item's title always says what it is about", 
   it("a decision still asked keeps \"Decidir\"; a label that is no told fact stays the label", () => {
     expect(titles("Uma decisão fica com você: se o Filipe recebe a escala nova.")[0]).toMatch(/\| Decidir: se o Filipe recebe a escala nova$/);
     expect(titles("Escala de sábado do helpdesk: a conversa continua com você.")[0]).toMatch(/\| Ver: escala de sábado do helpdesk$/);
+  });
+});
+
+// INSP-R13VIS rounds 1-4: every attack phrase, with the items it must open (server/routine-owner-ask.corpus.ts)
+describe("the attack corpus", () => {
+  const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: [] };
+  const origin = { botName: "Monitor", routineName: "Atendimento", firstAt: 0, lastAt: 0 };
+  it.each(ROUTINE_ASK_CORPUS.map(([round, text, expected, note]) => [round, note ?? "", text, expected] as const))("%s %s: %s", (_round, _note, text, expected) => {
+    expect(routineOwnerAsks(text, corpusCtx).map((ask) => routineAskItem(ask, origin).title)).toEqual(expected);
+  });
+
+  it("holds every finding's phrases", () => {
+    expect(ROUTINE_ASK_CORPUS.length).toBeGreaterThanOrEqual(118);
+    expect(new Set(ROUTINE_ASK_CORPUS.map(([, text]) => text)).size).toBe(ROUTINE_ASK_CORPUS.length);
   });
 });

@@ -182,27 +182,54 @@ const PAST_DECISION = /(?<![\p{L}])(?:voc[êe]\s+(?:j[áa]\s+)?(?:decidiu|escolh
  * "concordou com o plano, e a decisão … fica com você", another clause (INSP-R13VIS A2). */
 // "concordou com você: …" and "concordou, e a #9389 fica com você" too (INSP-R13VIS B1)
 const AGREED_TO = /(?<![\p{L}])concord(?:ou|aram)(?:\s+com\s+(?:voc[êe]|\S+))?(?:\s*[:,]|\s+que(?![\p{L}]))/iu;
-/** The sentence reports a decision taken: said of it all, or an agreement whose content holds the ask. */
+/** A decision said as still to be made: "decidir", "decisão", "escolha" — not one already made ("foi decisão sua",
+ * "a decisão … foi sua", "decisão tomada", "já resolvida"). */
+const DECISION_TAKEN = /(?<![\p{L}])(?:foi|foram|ficou|ficaram|era|tinha\s+sido|tomad[oa]s?|registrad[oa]s?|j[áa])(?![\p{L}])/iu;
+const decisionAsked = (clause: string) => (DECIDE.test(clause) || /(?<![\p{L}])escolh(?:a|er)(?![\p{L}])/iu.test(clause)) && !DECISION_TAKEN.test(clause);
+/** The sentence reports a decision taken: said of it all, or an agreement whose content holds the ask — not one
+ * followed by another clause that leaves a decision with the owner ("concordou, e a decisão da #9389 fica com você",
+ * "…, e decidir a #9389 fica com você"; INSP-R13VIS D2); "concordou, e a #9389 fica com você" stays a report (B1). */
 function reportsDecision(sentence: string, owner: ReturnType<typeof ownerByName>): boolean {
   if (PAST_DECISION.test(sentence)) return true;
   const agreed = AGREED_TO.exec(sentence);
-  return Boolean(agreed) && agreed!.index < ownerAskIndex(sentence, owner?.asks);
+  if (!agreed || agreed.index >= askIndex(sentence, owner)) return false;
+  const after = sentence.slice(agreed.index + agreed[0].length);
+  // or an action left to the owner ("…, e cabe a você aprovar a #9389")
+  return !(/^\s*(?:e|mas|por[ée]m|s[óo]\s+que)\s/iu.test(after) && (decisionAsked(after) || /(?<![\p{L}])cabe\s+a\s+voc[êe]\s+\p{L}+(?:ar|er|ir)(?![\p{L}])/iu.test(after)));
 }
-/** What follows an ask in its clause and takes it back: already done ("…que você já mandou às 11:10", "…e isso já
- * está registrado") or only under a condition ("…apenas se mudar algo"). It only keeps a report a report: a
- * decision taken or what the routine left alone is not reopened by such an ask (INSP-R13VIS B2). */
-// "já" only with a verb that says the ask itself is done — never "já que", "já com", "já pode", "que já passou no
-// gate", which tell of something else (INSP-R13VIS C1)
-const ASK_TAKEN_BACK = /(?<![\p{L}])(?:(?:voc[êe]\s+)?j[áa]\s+(?:mandou|enviou|respondeu|aprovou|resolveu|deu|fez|registrou|liberou|mandei|enviei|respondi|resolvi|registrei)|j[áa]\s+(?:foi|foram|est[áa]|est[ãa]o|ficou|ficaram)\s+(?:enviad|aprovad|registrad|resolvid|respondid|feit|dad|atendid|liberad|encaminhad)\p{L}*|(?:s[óo]|apenas|somente)\s+se)(?![\p{L}])/iu;
+/** What follows an ask in its clause and takes it back, and only that: the owner did it ("…que você já mandou às
+ * 11:10"), the thing asked is done, said without anyone named ("…e isso já está registrado", "…a #9400, já
+ * resolvida"), or it holds only under a condition ("…apenas se mudar algo"). Someone else having done something
+ * ("…que o Lead já aprovou", "…o Jev já liberou o push"), a cause ("porque …", "já que …") or "já com", "já pode",
+ * "que já passou no gate" tell why it is asked, and never take it back (INSP-R13VIS B2, C1, D1). An item too many
+ * costs the owner one click; an ask lost costs the ask. */
+const YOU_DID = /(?<![\p{L}])voc[êe]\s+j[áa]\s+(?:mandou|enviou|respondeu|aprovou|resolveu|deu|fez|registrou|liberou|gravou|decidiu|escolheu|confirmou)(?![\p{L}])/iu;
+const DONE_PASSIVE = /(?<![\p{L}])j[áa]\s+(?:(?:foi|foram|est[áa]|est[ãa]o|ficou|ficaram)\s+)?(?:enviad|aprovad|registrad|resolvid|respondid|feit|dad|atendid|liberad|encaminhad|gravad|decidid|confirmad)[oa]s?(?![\p{L}])/iu;
+const ONLY_IF = /(?<![\p{L}])(?:s[óo]|apenas|somente)\s+se(?![\p{L}])/iu;
+function takesBack(clause: string): boolean {
+  if (YOU_DID.test(clause) || ONLY_IF.test(clause)) return true;
+  const passive = DONE_PASSIVE.exec(clause);
+  if (!passive) return false;
+  const before = clause.slice(0, passive.index);
+  // "porque a Marluce já…", "que o Lead já…": a cause, or someone named who did it
+  return !/(?<![\p{L}])(?:porque|pois|j[áa]\s+que)(?![\p{L}])/iu.test(before) && !/(?:^|\s)(?:[OoAa]s?\s+)?\p{Lu}[\p{L}]+\s+$/u.test(before);
+}
 /** An imperative or a question: asked whatever follows it. */
 const NEVER_TAKEN_BACK = /^(?:decida|confirme|responda|aprove|escolha|libere|me\s+(?:diga|avise|confirme|responda|passe)|\?)$/iu;
+/** A decision named as the ask ("decisão sua", "sua decisão"): asked only while it is not said to be taken already. */
+const DECISION_NOUN = /^(?:decis[ãa]o|(?:a\s+)?sua\s+decis[ãa]o)/iu;
 /** The owner is asked for something in so many words, and the clause does not take it back. */
 function explicitAsk(text: string): boolean {
   for (const match of text.matchAll(new RegExp(EXPLICIT_REQUEST.source, "giu"))) {
     if (NEVER_TAKEN_BACK.test(match[0])) return true;
     const rest = text.slice(match.index! + match[0].length);
     const clause = rest.slice(0, rest.search(/[;.!]|$/));
-    if (!ASK_TAKEN_BACK.test(clause)) return true;
+    // "a escala foi decisão sua", "a decisão sobre o prazo foi sua, ontem" (INSP-R13VIS D3)
+    if (DECISION_NOUN.test(match[0])) {
+      const whole = text.slice(Math.max(0, text.lastIndexOf(";", match.index!) + 1), match.index! + match[0].length) + clause;
+      if (DECISION_TAKEN.test(whole)) continue;
+    }
+    if (!takesBack(clause)) return true;
   }
   return false;
 }
@@ -237,8 +264,10 @@ const subjectWords = (ask: Pick<RoutineAsk, "subject" | "people" | "context">) =
 ];
 
 /** The sentence asks the owner — not under a condition, a denial, nor as a question it answers itself ("Algo depende de você? Não."). */
+/** Where the sentence asks the owner (the conversation detector's reading); -1 when it does not. */
+const askIndex = (sentence: string, owner: ReturnType<typeof ownerByName>) => ownerAskIndex(sentence, owner?.asks);
 function asks(sentence: string, next: string | undefined, owner: ReturnType<typeof ownerByName>): boolean {
-  const at = ownerAskIndex(sentence, owner?.asks);
+  const at = askIndex(sentence, owner);
   if (at < 0) return false;
   if (underCondition(sentence, at)) return false;
   // reported: "X disse que … depende de você" — the ask is in what X said (the clause of the ask, before it)
@@ -280,7 +309,8 @@ function subjectLabel(sentence: string): { text: string; article: "o" | "a"; id:
   if (!opening) return null;
   const article = opening[1]!.toLowerCase() as "o" | "a";
   const id = /^[OoAa]s?\s+[^.,;:!?]{0,50}?(?:#\d{3,6}|(?:linha|L)\s?\d{1,5}|[A-Z]{2,6}-\d{4,8}-\d{2,6})(?:\s*\([^)]{0,80}\))?\)?/u.exec(sentence)?.[0];
-  if (id) return { text: id.replace(/\s*\(https?:\/\/[^)\s]+\)/g, ""), article, id: true };
+  // "A Marluce pediu a #9400" opens with who did something, not with the thing
+  if (id && !/(?<![\p{L}])(?:\p{Ll}+(?:ou|eu|iu|aram|eram|iram)|que)\s/u.test(id)) return { text: id.replace(/\s*\(https?:\/\/[^)\s]+\)/g, ""), article, id: true };
   const name = new RegExp(`^[OoAa]s?\\s+(${NAME}(?:\\s+(?:[A-Z]{2,}|\\p{Lu}\\p{Ll}+)){0,2})`, "u").exec(sentence);
   return name ? { text: `${opening[0]}${name[1]}`.trim(), article, id: false } : null;
 }
@@ -328,11 +358,21 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
     }
     // a list's item is its own pendency; a sentence is about all it says (its lead names the conversation: "A conversa do widget continua com você: …")
     const about = unquoted(listed && what ? what : sentence);
-    const subject = subjectOf(about, exclude);
+    let subject = subjectOf(about, exclude);
+    // "Fechei a #9400, e a #9401 depende de você": the id of the clause that asks, not the first one told
+    if (!listed && (subject.subject.kind === "ticket" || subject.subject.kind === "issue" || subject.subject.kind === "linha")) {
+      const at = askIndex(about, owner);
+      const before = at > 0 ? about.slice(0, at) : "";
+      const cut = Math.max(before.lastIndexOf(";"), before.search(/,\s+(?:e|mas)\s+(?![\s\S]*,\s+(?:e|mas)\s+)/u));
+      if (cut > 0 && toldFact(about.slice(0, cut))) {
+        const own = subjectOf(about.slice(cut), exclude);
+        if (own.subject.kind !== "frase") subject = { ...subject, subject: own.subject };
+      }
+    }
     // the person it is owed to, said only in the lead ("A conversa do widget continua com você: … falar com o Luis Rossi")
     const people = subject.people ?? peopleIn(unquoted(sentence), exclude);
     const link = /https?:\/\/[^\s)>\]]+/.exec(sentence)?.[0]?.replace(/[.,;:]+$/, "");
-    found.push({ sentence, ...(quoted ? { quoted } : {}), ...(what ? { what } : {}), decide: DECIDE.test(lead ?? sentence), ...subject, ...(people ? { people } : {}), ...(link ? { link } : {}), listed });
+    found.push({ sentence, ...(quoted ? { quoted } : {}), ...(what ? { what } : {}), decide: DECIDE.test(lead ?? sentence) || /(?<![\p{L}])a\s+escolha\s+d[aeo]s?\s/iu.test(lead ?? sentence), ...subject, ...(people ? { people } : {}), ...(link ? { link } : {}), listed });
   };
   for (let index = 0; index < lines.length; index++) {
     const line = plainLine(lines[index]!);
@@ -440,8 +480,10 @@ function askTitle(ask: RoutineAsk): string {
   // a fact told in the past is no title: the subject it names, if any (INSP-R13VIS A4); else routineAskItem says whose message it is
   // with the article the bot used ("Ver: a #9314", INSP-R13VIS C3)
   if (toldFact(said) && ask.subject.label) {
-    const opened = subjectLabel(said);
-    return `${ask.decide ? "Decidir" : "Ver"}: ${opened?.id && slug(opened.text).includes(slug(ask.subject.label)) ? lower(opened.text) : ask.subject.label}`;
+    // the article right before the id, wherever it is ("concordou que a #9400 precisa…" → "a #9400")
+    // "da #9389", "na #9389": the article inside the contraction
+    const article = new RegExp(`(?<![\\p{L}])(?:[dn]|pel)?([oa]s?)\\s+${escape(ask.subject.label)}(?![\\p{L}\\d])`, "iu").exec(said)?.[1];
+    return `${ask.decide ? "Decidir" : "Ver"}: ${article ? `${article.toLowerCase()} ` : ""}${ask.subject.label}`;
   }
   // a one-word tag before the colon is no subject ("o17: a worktree da #9378…", "Jev: liberar push…"): what follows
   // is, with the tag after it — never an item's own id, which the owner sees beside it already (INSP-R13VIS B5)
