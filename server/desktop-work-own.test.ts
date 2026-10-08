@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { CcSessionLedger, type CcSession } from "./cc-sessions.ts";
 import type { DesktopRecord, DesktopStep } from "./claude-desktop.ts";
 import {
+  DESKTOP_MAX_MISSES,
   desktopBriefText,
   followDesktopSessions,
   OWN_OPEN_MAX_MISSES,
@@ -104,7 +106,7 @@ describe("a create with a worktree of the server's", () => {
     await runDesktopWork(h.deps, h.state);
     expect(h.steps.create).not.toHaveBeenCalled();
     // with the worktree's own path, by which a "trust this workspace" prompt is judged ours
-    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function) });
+    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function), trustClicks: 0, branch: "omb/9353-comprar-assentos" });
     expect(session.desktop!.sentAt).toBe(h.now);
   });
 
@@ -322,5 +324,180 @@ describe("a create with a worktree of the server's", () => {
     expect(session.desktop!.own!.state).toBe("planned");
     expect(h.logs.at(-1)).toContain("which no longer waits to open; left as it is");
     expect(h.prepareState.preparing).toBe(false);
+  });
+});
+
+// R13-dispatch: 06/10, 15 creates through the server's worktree, 1 in the
+// right folder. What the screen showed (server.log, the ledger's own.reason).
+const REAL_NO_FIELD = "the app's link did not open a new session for 9032-equipe-em-massa-tickets-n1 (no empty task field); nothing was clicked or typed";
+const REAL_NO_FIELD_SEEN = "Never skip, bypass or fake the gate; never push to main, never force. | Order of a batch: hotfix/PO/P1 first, ahead of any Cl or infrastructure PR, and released on its | own. PRs that change release scripts (scripts/*release*, watch-production-release, release- | carrier) ship in a separate carrier ";
+const REAL_PREVIOUS_CHIP = "the new session does not show the folder 9384-hook-v2-7-c2b-append-atendimento-b7fcd0 in its chips; nothing was clicked or typed";
+const REAL_PREVIOUS_CHIP_SEEN = "• Local | • 9378-supervisor-papel-… | 2º omb/9378-supervisor-papel-b... | IO worktree | Descreva uma tarefa ou faça uma pergunta | + O v";
+
+describe("the server's worktree given up on the real screens of 06/10 (R13-dispatch R13-2)", () => {
+  /** Three misses of the link: the create gives the path up. */
+  async function abandon(h: ReturnType<typeof harness>, reason: string, seen: string) {
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    for (let i = 0; i < OWN_OPEN_MAX_MISSES; i++) {
+      h.results.push({ ok: false, reason, retry: true, miss: true, touched: true, seen });
+      await runDesktopWork(h.deps, h.state);
+      h.advance(11 * 60_000);
+    }
+  }
+
+  it.each([
+    ["the link opened no new session (#9032, 0e2ba7eb and 7d8a26ca)", REAL_NO_FIELD, REAL_NO_FIELD_SEEN],
+    ["the chips showed the previous folder (#9384, b3a17a95)", REAL_PREVIOUS_CHIP, REAL_PREVIOUS_CHIP_SEEN],
+  ])("counts every give-up in the breaker: %s", async (_name, reason, seen) => {
+    const h = harness();
+    const counted: Array<[string, string, string | undefined]> = [];
+    const chip: string[] = [];
+    h.deps.own!.abandoned = (session, why, shown) => { counted.push([session.id, why, shown]); };
+    h.deps.own!.chipRefused = (session) => { chip.push(session.id); };
+    const session = h.start();
+    await abandon(h, reason, seen);
+    expect(session.desktop!.own!.state).toBe("abandoned");
+    expect(counted).toEqual([["s1", reason, seen]]);
+    expect(chip).toEqual([]);
+  });
+
+  it("both ways of the app fail (the link, then New Session): the same brief goes to the cli at once, the failure on record first, one report that says so", async () => {
+    const h = harness();
+    const handed: Array<{ id: string; status: string; failedAt?: number; why: string }> = [];
+    h.deps.own!.toCli = (session, why) => { handed.push({ id: session.id, status: session.status, failedAt: session.failedAt, why }); return { sessionId: "cli-9032" }; };
+    const session = h.start();
+    await abandon(h, REAL_NO_FIELD, REAL_NO_FIELD_SEEN);
+    // New Session, the old way: the same conversation on screen, five misses
+    for (let i = 0; i < DESKTOP_MAX_MISSES; i++) {
+      h.results.push({ ok: false, reason: "New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed", retry: true, miss: true, touched: true, seen: REAL_NO_FIELD_SEEN });
+      await runDesktopWork(h.deps, h.state);
+      h.advance(31 * 60_000);
+    }
+    expect(h.steps.create).toHaveBeenCalledTimes(DESKTOP_MAX_MISSES);
+    // handed over once, already failed (it is what frees the cli: R13-1)
+    expect(handed).toHaveLength(1);
+    expect(handed[0]).toMatchObject({ id: "s1", status: "failed", failedAt: expect.any(Number) });
+    expect(handed[0]!.why).toContain("the app did not open the session in the worktree the server made");
+    expect(handed[0]!.why).toContain("New Session failed too");
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.cliFallback).toMatchObject({ sessionId: "cli-9032" });
+    expect(session.lastError).toContain("the server started the same brief in the CLI as session cli-9032");
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]!.text).toContain("cli-9032");
+    expect(h.logs.some((line) => line.includes("failed both ways of the app — started in the cli as cli-9032"))).toBe(true);
+  });
+
+  it("New Session barred right after the link failed is both ways failed too; a cli refusal is said, not hidden", async () => {
+    const h = harness(undefined, "não abri: a sessão mais recente do app Claude abriu em …");
+    h.deps.own!.toCli = () => ({ refusal: "busy" });
+    const session = h.start();
+    await abandon(h, REAL_NO_FIELD, REAL_NO_FIELD_SEEN);
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.cliFallback).toMatchObject({ refusal: "busy" });
+    expect(session.lastError).toContain("could not start the same brief in the CLI: busy");
+  });
+
+  it("a worktree never made is not the app failing: New Session barred fails as before, nothing goes to the cli", async () => {
+    const h = harness(async () => ({ ok: false, reason: "git worktree add: invalid reference: origin/main" }), "não abri: …");
+    const toCli = vi.fn(() => ({ sessionId: "x" }));
+    h.deps.own!.toCli = toCli;
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    expect(session.status).toBe("failed");
+    expect(toCli).not.toHaveBeenCalled();
+  });
+
+  it("New Session that fails on its own (no worktree of the server's tried) does not go to the cli", async () => {
+    const h = harness(async () => { throw new Error("git: not found"); });
+    const toCli = vi.fn(() => ({ sessionId: "x" }));
+    h.deps.own!.toCli = toCli;
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    h.results.push({ ok: false, reason: "invalid", retry: false });
+    await runDesktopWork(h.deps, h.state);
+    expect(session.status).toBe("failed");
+    expect(toCli).not.toHaveBeenCalled();
+  });
+});
+
+describe("a \"trust this workspace\" click (R13-dispatch R13-3)", () => {
+  const TRUSTED = { ok: false as const, reason: "trusted the workspace 9353-comprar-assentos; nothing was typed — the app's link is opened again and the folder checked before the brief goes in", retry: true, touched: true, trusted: true };
+
+  it("is no miss: the link is opened again on the next try, and the brief goes in only then", async () => {
+    const h = harness();
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    h.results.push(TRUSTED);
+    await runDesktopWork(h.deps, h.state);
+    expect(session.desktop!.pending).toMatchObject({ kind: "create", trustClicks: 1, attempts: 1 });
+    expect(session.desktop!.pending!.misses).toBeUndefined();
+    expect(h.chips.at(-1)!.text).toContain("reabrindo o link e conferindo a pasta antes de colar");
+    h.advance(11 * 60_000);
+    await runDesktopWork(h.deps, h.state); // ok: the second open of the link
+    expect(h.steps.openIn).toHaveBeenCalledTimes(2);
+    expect(session.desktop!.sentAt).toBe(h.now);
+  });
+
+  it("one click per create: the next try is told it clicked, and the prompt or a scratch then (cliNow) sends it to the cli at once (INSP-R13dis 5)", async () => {
+    const h = harness();
+    const started: string[] = [];
+    h.deps.own!.toCli = (session) => { started.push(session.id); return { sessionId: "cli-again" }; };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    h.results.push(TRUSTED);
+    await runDesktopWork(h.deps, h.state);
+    h.advance(31 * 60_000);
+    h.results.push({ ok: false, reason: "the app asks to trust the workspace 9353-comprar-assentos again after the server clicked it once in this create; no second click — the create goes on in the cli", retry: true, miss: true, touched: true, cliNow: true });
+    await runDesktopWork(h.deps, h.state);
+    expect(h.steps.openIn.mock.calls.map((call) => (call as unknown as [unknown, { trustClicks: number }])[1].trustClicks)).toEqual([0, 1]);
+    expect(session.desktop!.own!.state).toBe("abandoned");
+    expect(session.status).toBe("failed");
+    expect(started).toEqual(["s1"]);
+    expect(h.steps.create).not.toHaveBeenCalled();
+  });
+});
+
+// INSP-R13dis 1/7: the chips on the folder before — no click ever fixes a
+// link that reuses it — go to the cli on the FIRST such give-up: no 3 misses,
+// no New Session, no new worktree per try. The 10 real screens of 05–06/10.
+const REAL_PREVIOUS_10: Array<[string, string]> = [
+  ["2f2ec068", "• Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["035161dc", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e712f070", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e712f070", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e712f070", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e0d7126a", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e0d7126a", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["e0d7126a", "• Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["b23900b6", "• Local | • 9337-sobrecarga-d1-no-….. | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta"],
+  ["b7fcd057", "• Local | • nuria-platform | gº main |O worktree | Descreva uma tarefa ou faça uma pergunta"],
+];
+
+describe("the chips on the folder before: the cli on the first such give-up (INSP-R13dis 1, 6, 7)", () => {
+  it.each(REAL_PREVIOUS_10)("%s: no click, no 2nd try, no New Session — the breaker counts it and the same brief goes to the cli; the chip says so in pt-BR", async (_session, seen) => {
+    const h = harness();
+    const counted: string[] = [];
+    const handed: string[] = [];
+    h.deps.own!.abandoned = (session, reason) => { counted.push(`${session.id}: ${reason}`); };
+    h.deps.own!.toCli = (_session, why) => { handed.push(why); return { sessionId: "c11a0000-0000-4000-8000-000000000000" }; };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    const reason = "the new session shows another folder in its chips (the folder before), not 9353-comprar-assentos; nothing was clicked or typed";
+    h.results.push({ ok: false, reason, retry: true, miss: true, touched: true, previousFolder: true, seen: `Confiar no workspace | ${seen}` });
+    await runDesktopWork(h.deps, h.state);
+    expect(h.steps.openIn).toHaveBeenCalledTimes(1);
+    expect(h.steps.create).not.toHaveBeenCalled();
+    expect(session.desktop!.own!.state).toBe("abandoned");
+    expect(counted).toEqual([`s1: ${reason}`]);
+    expect(handed).toEqual([`the app did not open the session in the worktree the server made: ${reason}`]);
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.cliFallback).toMatchObject({ sessionId: "c11a0000-0000-4000-8000-000000000000" });
+    expect(session.lastError).toContain("The Claude app did not open the session in the right folder, so the server started the same brief in the CLI as session c11a0000-0000-4000-8000-000000000000;");
+    expect(h.chips.map((chip) => chip.text)).toEqual(expect.arrayContaining([
+      "parou com um problema — o app abriu a sessão nova na pasta anterior, não na worktree do OMB",
+      "o app não abriu na pasta certa; segui pela linha de comando (sessão c11a0000)",
+    ]));
+    expect(sessionErrorPt(session.lastError!)).toBe("o app não abriu na pasta certa; segui pela linha de comando (sessão c11a0000)");
+    expect(h.reports).toHaveLength(1);
   });
 });

@@ -354,6 +354,7 @@ import {
   cliSurfaceRefusal,
   appStalledReason,
   recentAppFailure,
+  appFailureRead,
   issueTitle,
   clientIssue,
   type AppAvailability,
@@ -410,7 +411,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, breakerRepo, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, breakerRepo, cacheLine, enqueueSeededStart, groupExec, installText, prepareCliWorktree, pruneDanglingLinks, seededStartChain, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -10031,7 +10032,8 @@ function sessionTokenEnv(session: CcSession): Record<string, string> {
  * unless a reply was queued meanwhile, which then runs as the next turn. */
 function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   const expectedCwd = join(session.repo, ".claude", "worktrees", session.worktree);
-  const cwd = first ? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
+  // the first turn runs in the worktree the server made, or in the repository for claude -w to make one
+  const cwd = first ? session.cliWorktree?.path ?? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
   ccLedger.markRunning(session);
   const lines: string[] = [];
   let buffer = "";
@@ -10284,13 +10286,29 @@ function noteOwnWrongFolder(session: CcSession, folder: string): void {
 function noteOwnChipRefused(session: CcSession, option: "on" | "unknown", seen?: string): void {
   noteOwnPathFailure(session, { folder: "", chip: option, ...(seen ? { seen } : {}) }, `was given up: the new session's worktree option read ${option === "on" ? "ON" : "unreadable"}`);
 }
-function noteOwnPathFailure(session: CcSession, what: { folder: string; chip?: "on" | "unknown"; seen?: string }, said: string): void {
+/** A create of this path given up for any other miss (no new session from the link, another folder's chips): counted too (R13-2). */
+function noteOwnAbandoned(session: CcSession, reason: string, seen?: string): void {
+  noteOwnPathFailure(session, { folder: "", missed: reason.slice(0, 300), ...(seen ? { seen: seen.slice(0, 300) } : {}) }, `was given up: ${reason.slice(0, 160)}`);
+}
+/** Both ways of the app failed for a create: the same brief, started in the cli as the same bot's start (R13-2). */
+function startOwnInCli(session: CcSession, why: string): { sessionId: string } | { queueId: string } | { refusal: string } {
+  const bot = store.bot(session.ownerBotId);
+  if (!bot) return { refusal: `o bot ${session.ownerBotId} não existe mais` };
+  const brief = session.desktop?.own?.brief;
+  if (!brief) return { refusal: "a sessão não tem o brief original guardado" };
+  const started = startCcSession(bot, session.ownerThreadId, session.replyThreadId ?? session.ownerThreadId, { title: session.title, brief, repo: session.repo, surface: "cli", permissionMode: session.permissionMode, cliReason: `os dois caminhos do app Claude falharam na sessão ${session.id.slice(0, 8)}: ${chipText(why, 160)}` });
+  if (started.sessionId) return { sessionId: started.sessionId };
+  if (started.queueId) return { queueId: started.queueId };
+  const error = (started.body as { error?: unknown }).error;
+  return { refusal: typeof error === "string" ? error.slice(0, 300) : `HTTP ${started.status}` };
+}
+function noteOwnPathFailure(session: CcSession, what: { folder: string; chip?: "on" | "unknown"; missed?: string; seen?: string }, said: string): void {
   const own = session.desktop?.own;
   if (!own) return;
   const repo = breakerRepo(session.repo);
   const { state, tripped } = noteOwnFailure(ownBreaker.get(), repo, { at: Date.now(), sessionId: session.id, title: session.title, expected: own.path, ...what });
   ownBreaker.set(state);
-  console.log(`[own-worktrees] session ${session.id} ${said} (${state.repos[repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go the old way until a create works or the owner resolves the item" : ""}`);
+  console.log(`[own-worktrees] session ${session.id} ${said} (${state.repos[repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go straight to the cli until the owner resolves the item" : ""}`);
   if (!tripped) return;
   const bot = store.bot(session.ownerBotId);
   const thread = bot ? ownerChannelOf(bot.id) ?? sessionReportThread(session) : null;
@@ -10393,6 +10411,51 @@ async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnTyp
   };
 }
 const ownPrepareState = { preparing: false };
+/** The seeded headless starts, chained: each spawns after the one before it
+ * (INSP-R13dis 3), 3 min each at most, then aborted and waited for (R2-1, R3-1/2). */
+const seededStart = seededStartChain();
+/** The seeded starts' git and cp: process groups, settled on close (own-worktrees.ts groupExec). */
+const preparationExec: OwnExec = (file, args, options = {}) => groupExec({ ...process.env, PATH: augmentedPath() })(file, args, { timeoutMs: 120_000, ...options });
+/** A headless session's first turn in a worktree the server made and seeded
+ * from the same seed as the app's (R13-gate G2: `claude -p -w` made bare
+ * ones, and the first ci:local failed on a missing vite after ~14 min of
+ * lease). Its brief says whether to install; not made in time, it goes the
+ * old way under a new name (own-worktrees.ts enqueueSeededStart). */
+function startSeededCli(session: CcSession, brief: string): Promise<void> {
+  const seedRepo = breakerRepo(session.repo);
+  const settings = ownWorktreeSettings(seedRepo);
+  return enqueueSeededStart(seededStart, session, {
+    prepare: (repo, name, signal) => {
+      // every git and cp of it stops with the abort — its whole process group (hooks too), settled only once
+      // it has exited (INSP-R4-1)
+      const exec: OwnExec = (file, args, options = {}) => preparationExec(file, args, { ...options, signal });
+      return prepareCliWorktree(repo, name, {
+        add: (plan) => addOwnWorktree(repo, plan, exec, repoBaseBranch(repo)),
+        clone: async (path) => {
+          // while this clone reads the seed, the seed is not installed again (refreshOwnSeeds waits)
+          ownSeedWatch.cloning += 1;
+          try {
+            return await cloneSeedCaches(ownStore.seed(seedRepo), path, settings.lockfiles, realCloneIo(exec, nodeVersion));
+          } finally {
+            ownSeedWatch.cloning -= 1;
+          }
+        },
+      });
+    },
+    spawn: (_session, line, outcome) => {
+      // the seed behind origin/main (or never installed): refreshed on the next pass
+      if (outcome.ok && outcome.caches.mode === "install") ownSeedWatch.due.add(seedRepo);
+      console.log(`[cc-session] ${session.id}: ${outcome.ok ? `worktree ${outcome.plan.path} made, dependencies ${outcome.caches.mode === "cloned" ? `cloned (${outcome.caches.dirs.length} folders)` : `to install (${outcome.caches.reason ?? "?"})`}` : `worktree not made (${outcome.reason}); claude -w makes it, the brief says to install`}`);
+      ccChipShort(session, outcome.ok && outcome.caches.mode === "cloned" ? `dependências clonadas da semente na worktree ${session.worktree}` : `worktree sem dependências clonadas: a sessão roda ${installText(undefined, settings)} antes do gate`);
+      runCcTurn(session, `${brief}\n\n${line}`, true);
+    },
+    exists: existsSync,
+    save: () => ccLedger.save(),
+    log: (line) => console.log(`[cc-session] ${line}`),
+    rename: (name) => `${name}-${randomUUID().slice(0, 4)}`,
+    install: installText(undefined, settings),
+  });
+}
 /** The seeds of the repositories whose app sessions open in worktrees of the
  * server's: checked every `seedEveryMs` (sooner when a clone met a seed
  * behind origin/main), one at a time, never with a release on its way. */
@@ -10401,8 +10464,8 @@ async function refreshOwnSeeds(): Promise<void> {
   // a clone reading a seed now: no seed changes until it is done
   if (ownSeedWatch.running || ownSeedWatch.cloning || process.platform !== "darwin") return;
   const now = Date.now();
-  // the repositories the app sessions of the last 30 days worked in
-  const repos = [...new Set(ccLedger.all().filter((session) => session.surface === "app" && now - session.createdAt < 30 * 86_400_000).map((session) => session.repo))];
+  // the repositories the sessions of the last 30 days worked in — headless ones too, seeded the same way (R13-gate G2)
+  const repos = [...new Set(ccLedger.all().filter((session) => now - session.createdAt < 30 * 86_400_000).map((session) => breakerRepo(session.repo)))];
   const repo = repos.find((each) => {
     const settings = ownWorktreeSettings(each);
     const seed = ownStore.seed(each);
@@ -10473,6 +10536,8 @@ const desktopWork: DesktopWorkDeps = {
   rootHead: (session) => gitLine(session.repo, ["rev-parse", "--abbrev-ref", "HEAD"]),
   // the worktrees git lists for the repository (a "trust this workspace" is clicked only for one of ours)
   registeredWorktrees: (session) => parseWorktreeList(gitLine(session.repo, ["worktree", "list", "--porcelain"]) ?? "").map((entry) => entry.path),
+  // the app's own log, read only: what ties a "trust this workspace" prompt to a folder (its last 256 KiB)
+  trustLog: () => readTail(join(homedir(), "Library", "Logs", "Claude", "main.log"), 256 * 1024),
   branches: (session) => (gitLine(session.repo, ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean),
   // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
   rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),
@@ -10491,6 +10556,8 @@ const desktopWork: DesktopWorkDeps = {
     classicBlocked: (session) => classicAppRefusal(session.repo),
     wrongFolder: noteOwnWrongFolder,
     chipRefused: noteOwnChipRefused,
+    abandoned: noteOwnAbandoned,
+    toCli: startOwnInCli,
     adopted: (session) => rearmOwnPath(session.repo, `session ${session.id} opened in a worktree of its own`),
   },
 };
@@ -10506,6 +10573,12 @@ function gitLine(repo: string, args: string[]): string | null {
   } catch {
     return null;
   }
+}
+
+/** The worktrees git lists for a repository, or null when git cannot say (the worktree report's commands — INSP-R4-2). */
+function registeredWorktreePaths(repo: string): string[] | null {
+  const out = gitLine(repo, ["worktree", "list", "--porcelain"]);
+  return out === null ? null : parseWorktreeList(out).map((entry) => entry.path);
 }
 
 /** The branch origin/HEAD points to ("main"), what a new app session must show. */
@@ -10650,13 +10723,19 @@ async function cleanReleasedWorktrees(): Promise<void> {
     // a live process working inside one holds it, as for the worktrees (INSP-R12a R12b-3)
     stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, processCwds: cwds, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath, root: TASK_WORKSPACES_DIR, home: homedir() }));
     // the server's own worktrees of failed sessions (or never used): their own lines, "da sessão falhada …" (R11-dispatch R11-1)
-    const left = leftOwnWorktrees(ccLedger.all(), existsSync);
+    const left = leftOwnWorktrees(ccLedger.all(), existsSync, registeredWorktreePaths);
     const leftPaths = new Set(left.map((each) => canonPath(each.path)));
     for (let i = stale.length - 1; i >= 0; i--) if (leftPaths.has(canonPath(stale[i]!.path))) stale.splice(i, 1);
     const leftKey = left.map((each) => each.path).sort().join("\n");
     const leftTold = leftKey !== (releasedCleanup.lastKey.get("\u0000own-left") ?? "") ? leftWorktreesReport(left) : null;
     releasedCleanup.lastKey.set("\u0000own-left", leftKey);
     if (leftTold) console.log(`[worktrees] the server's worktrees left by failed or other-way sessions (told, nothing removed): ${left.map((each) => each.path).join(", ")}`);
+    // the aliases the app was given whose worktree is gone: only those symlinks go (R13-dispatch R13-2d)
+    const keepLinks = new Set(ccLedger.all().filter((each) => each.status !== "archived").map((each) => each.desktop?.own?.link).filter((link): link is string => Boolean(link)));
+    for (const repo of new Set(ccLedger.all().filter((each) => each.desktop?.own).map((each) => each.repo))) {
+      const pruned = pruneDanglingLinks(repo, keepLinks);
+      if (pruned.length) console.log(`[own-worktrees] removed ${pruned.length} alias(es) whose worktree is gone: ${pruned.join(", ")}`);
+    }
     const staleKey = stale.map((each) => each.path).sort().join("\n");
     const staleNews = staleKey !== (releasedCleanup.lastKey.get("\u0000stale") ?? "");
     releasedCleanup.lastKey.set("\u0000stale", staleKey);
@@ -11225,12 +11304,15 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
   // why it runs headless, as the server knows it (recorded on its chip)
   let cliOnRecord = cliReason;
+  // the breaker of the server's worktrees tripped and the owner was asked: straight to the cli, no app try (R13-dispatch R13-2)
+  const breakerCli = body.surface !== "cli" && process.platform === "darwin" && ownWorktreesOn(input.repo) ? ownBreakerCli(ownBreaker.get(), breakerRepo(input.repo)) : null;
+  if (breakerCli) cliOnRecord = breakerCli;
   if (body.surface === "cli") {
     // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
     const { state: app, reason: appReason } = appAvailability(input.repo);
     // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
     if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo, appFolderBlock());
-    const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null });
+    const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null, appFailureRead: appFailureRead(ccLedger.all(), input.repo, Date.now()) });
     if ("refusal" in decided) return { status: 409, body: { error: decided.refusal } };
     cliOnRecord = decided.onRecord;
   }
@@ -11256,7 +11338,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Fila de sessões: "${input.title}" é a #${queued.position} (prioridade ${priorityLabel(priority)}); abre sozinha quando uma vaga liberar`, 240), ok: true } });
     return { status: 200, queueId: queued.id, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
   }
-  if (body.surface !== "cli" && process.platform === "darwin") {
+  if (body.surface !== "cli" && !breakerCli && process.platform === "darwin") {
     const appId = randomUUID();
     // The server makes the session's worktree and opens the app right in it
     // (lote X): the app's last folder, and the worktree it would reuse, do
@@ -11307,7 +11389,16 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   if (corridor) session.corridorVersion = corridorVersionOf(corridor);
   if (delegation) delegationOpened(delegation, session);
   ccLedger.save();
-  runCcTurn(session, input.brief, true);
+  // the worktree made and seeded by the server first, as for the app (R13-gate G2); elsewhere claude -w makes a bare one
+  if (process.platform === "darwin" && ownWorktreesOn(input.repo)) {
+    // running while its worktree is made (not a turn yet: runCcTurn counts it)
+    session.status = "running";
+    session.progressAt = Date.now();
+    ccLedger.save();
+    // one at a time, in the order of the starts: a P1 the queue opened first spawns first (INSP-R13dis 3);
+    // each for 3 min at most, then aborted, waited for, and the old way (R2-1, R3-1/2)
+    void startSeededCli(session, input.brief);
+  } else runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
   noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
   if (cliOnRecord) ccChipShort(session, sessionChips.cli(session.title, `${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`));
@@ -11319,6 +11410,9 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
  * reused-folder 409 ("blocked"), else "available". */
 function appAvailability(repo: string): { state: AppAvailability; reason: string | null } {
   if (process.platform !== "darwin") return { state: "unavailable", reason: null };
+  // its breaker tripped with the owner asked: new sessions go to the cli, so one asked for there is not refused (R13-2)
+  const tripped = ownWorktreesOn(repo) ? ownBreakerCli(ownBreaker.get(), breakerRepo(repo)) : null;
+  if (tripped) return { state: "unavailable", reason: tripped };
   // with a worktree the server makes, the app's last folder and the one it would reuse do not matter (lote X)
   if (!ownPathActive(repo)) {
     const lastRepo = lastAppRepo();
@@ -28469,7 +28563,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         allTime: ownStore.summary(0, now + 1),
         latest: ownStore.allEvents().slice(-20).reverse(),
         // worktrees of failed sessions (or never used): told with the command, never removed
-        left: leftOwnWorktrees(ccLedger.all(), existsSync),
+        left: leftOwnWorktrees(ccLedger.all(), existsSync, registeredWorktreePaths),
         breaker: ownBreaker.get().repos,
       });
     }

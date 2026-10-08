@@ -63,8 +63,11 @@ export interface DesktopDriver {
  * step acted on the screen before stopping, so a retry should back off. */
 export type DesktopStep = { ok: true; suggestion?: string; note?: string } | DesktopStop;
 /** `draft`: text nobody sent sits in the field (never typed over);
- * `leftProbe`: the probe "." stayed at its end (the person came back first). */
-export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown"; trustNeeded?: string };
+ * `leftProbe`: the probe "." stayed at its end (the person came back first);
+ * `previousFolder`: the new session's chips are on another folder (or an
+ * ambiguous cut); `cliNow`: no point in trying the app again for this create
+ * (a prompt or a scratch after our one click) — both send it to the cli. */
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown"; trustNeeded?: string; trusted?: boolean; previousFolder?: boolean; cliNow?: boolean };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -76,8 +79,12 @@ const HUMAN_SLACK_MS = 500;
  * line ("Responder…", never "Responder ao cliente…"), and only where the
  * field is (see findComposer) — a line of the conversation is not it. */
 const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder|Reply)(?:\s*(?:…|\.{3}))?$/i;
-/** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
-const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
+/** The field of a new, empty session. The app (2.26454.0, ion-dist i18n)
+ * draws one of two: "Descreva uma tarefa ou faça uma pergunta" (RLloCeiLx7,
+ * the only one OCR read so far, up to 06/10 14:52Z) or, behind a flag of its
+ * own, "Descreva algo para criar, alterar ou corrigir" (sIl97ARhWm) — both
+ * taken, in pt-BR and English, until a live screen shows which (R13-dispatch). */
+const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task|Descreva algo para criar|Describe something to build)\b/i;
 const BACKSPACE = 51;
 /** The one character typed to tell an app suggestion from a draft. */
 const SUGGESTION_PROBE = ".";
@@ -412,7 +419,9 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       return { ok: false, reason: `the app asks to trust the workspace of the new session (${input.repoName}); nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.repoName, seen: seenText(bottom.slice(-8)) };
     }
     if (!showsFolder(bottom, input.repoName)) {
-      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // no new session at all (no empty field, no chips) is not "another folder": a session opened by hand would not change it (R13-dispatch R13-2c)
+      if (!newSessionScreen(bottom, input.repoName)) return { ok: false, reason: `New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      return { ok: false, reason: `the new session did not open in ${input.repoName} (it shows another folder in its chips: the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     }
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
@@ -463,10 +472,61 @@ export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null 
 // Whole lines only, never a sentence that starts so ("Confiar no workspace
 // do cliente é arriscado", "Confiar?") — INSP-R12a X3-3.
 const TRUST_BUTTON = /^(?:Confiar|Trust)$/i;
+/** A scratch folder the app makes on its own ("scratch-2026-10-06-c55113"). */
+const SCRATCH_FOLDER = /\bscratch-\d{4}-\d{2}-\d{2}\b|scratch-workspaces/i;
 const TRUST_LINE = /^(?:[•·]\s*)?(?:Confiar (?:no|neste|nesse) (?:workspace|espaço de trabalho)|Trust (?:this |the )?(?:workspace|folder))(?:\s+[\w.…-]+)?$/i;
 /** Callers pass only the new session's own band (the composer's, y > 55%), never a conversation above it. */
 export function trustPrompt(lines: OcrLine[]): OcrLine | null {
   return lines.find((line) => TRUST_BUTTON.test(line.text.trim())) ?? lines.find((line) => TRUST_LINE.test(line.text.trim())) ?? null;
+}
+
+/** The folder a prompt names in its own words, when it does ("Confiar em
+ * /Users/…/9384-… e iniciar uma sessão de código?", the app's PDCixSwULY;
+ * "Trust /… and start a code session?"), else null. */
+export function trustPromptFolder(lines: OcrLine[]): string | null {
+  for (const line of lines) {
+    const named = /^(?:Confiar em|Trust) (\/.+?)(?: e iniciar| and start|\?|$)/i.exec(line.text.trim());
+    if (named) return named[1]!.trim();
+  }
+  return null;
+}
+
+/** A line of the Claude app's own log (~/Library/Logs/Claude/main.log) about
+ * a workspace's trust: the app checking a folder it opens ("checkTrust"),
+ * saving one ("saveTrust", "Saved workspace trust for"). Local time, to the second. */
+export interface TrustLogLine { at: number; kind: "check" | "save"; folder: string }
+
+export function parseTrustLog(text: string): TrustLogLine[] {
+  const out: TrustLogLine[] = [];
+  for (const raw of text.split("\n")) {
+    const line = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) \[\w+\] (?:LocalSessions\.(checkTrust|saveTrust): cwd=(.+)|Saved workspace trust for (.+))$/.exec(raw.trimEnd());
+    if (!line) continue;
+    const [, y, mo, d, h, mi, s, kind, cwd, saved] = line;
+    out.push({ at: new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime(), kind: kind === "checkTrust" ? "check" : "save", folder: (cwd ?? saved)!.trim() });
+  }
+  return out;
+}
+
+const realOrSelf = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+
+/** Whether a trust prompt on screen is for `expected`, by what ties it to a
+ * folder: the folder the prompt names, else the newest folder the app's log
+ * checked (or saved) since our link was opened. "ours", "other" (and which),
+ * or "none" — nothing ties it to any folder. Compared by real path, so the
+ * alias the app was given is the worktree it points to. */
+export function trustPromptFor(lines: OcrLine[], log: readonly TrustLogLine[], since: number, expected: string, kinds: ReadonlyArray<TrustLogLine["kind"]> = ["check", "save"]): { is: "ours" } | { is: "other"; folder: string } | { is: "none" } {
+  const real = realOrSelf(expected);
+  const named = trustPromptFolder(lines);
+  if (named) return realOrSelf(named) === real ? { is: "ours" } : { is: "other", folder: named };
+  // the log is to the second: only seconds wholly after the link was opened
+  // count (never a line of up to 999 ms before it), and of the newest second
+  // the last line written; two folders in that second tie it to none (INSP-R13dis 4)
+  const after = log.filter((each) => kinds.includes(each.kind) && each.at >= Math.ceil(since / 1_000) * 1_000);
+  const top = Math.max(...after.map((each) => each.at));
+  const newest = after.filter((each) => each.at === top);
+  if (!newest.length || new Set(newest.map((each) => realOrSelf(each.folder))).size > 1) return { is: "none" };
+  const folder = newest.at(-1)!.folder;
+  return realOrSelf(folder) === real ? { is: "ours" } : { is: "other", folder };
 }
 
 /** The folder the app was given is the server's own worktree: its real path
@@ -499,6 +559,56 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
   }));
 }
 
+/** How the chips name `name`: "exact"; "cut" — cut short by the app to a
+ * start of it that no other worktree git lists for the repository (`others`,
+ * their folder names) also starts with; "ambiguous" — that start fits
+ * another one too (05/10 18:37Z: "9378-supervisor-do-ate…." fit both
+ * …-035161, asked for, and 472b5524's worktree, the folder before), or the
+ * branch chip ("omb/…", cut too) that does not start `branch`, ours (R2-3);
+ * "none" — a chip of ANOTHER folder was read; "unread" — no folder chip at
+ * all could be read (OCR, or the chips not drawn yet): not "another folder"
+ * (INSP-R13dis 2, R2-2). */
+export function folderChip(lines: OcrLine[], name: string, others: () => readonly string[], branch?: string): "exact" | "cut" | "ambiguous" | "none" | "unread" {
+  const wanted = name.toLowerCase();
+  const strip = (raw: string) => raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
+  const uncut = (word: string) => word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
+  let cutSeen: string | null = null;
+  for (const line of lines) {
+    for (const raw of line.text.toLowerCase().split(/\s+/)) {
+      const word = strip(raw);
+      if (word === wanted) return "exact";
+      const cut = uncut(word);
+      if (cut !== word && cut.length >= 10 && wanted.startsWith(cut)) cutSeen = cut;
+    }
+  }
+  if (!cutSeen) {
+    // a folder chip of another folder: one word of its own (a bullet before it at most) above the empty field —
+    // "• nuria-platform", "• 9337-sobrecarga-d1-no-...", "9378-supervisor-papel-..."; not "• Local", a branch, the worktree option
+    const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+    const above = field ? lines.filter((line) => line.y < field.y) : lines;
+    const folder = above.some((line) => {
+      const text = line.text.trim().replace(/^[•·]\s*/, "");
+      return /^[A-Za-z0-9][\w.-]*(?:…|\.{2,})?[.,·'"]*$/.test(text) && text.length >= 3 && !/^local$/i.test(text) && !/worktree/i.test(text);
+    });
+    return folder ? "none" : "unread";
+  }
+  const prefix = cutSeen;
+  if (others().some((other) => other.toLowerCase() !== wanted && other.toLowerCase().startsWith(prefix))) return "ambiguous";
+  // the branch chip, when read, must fit ours too ("2º omb/9378-supervisor-do-aten..." for omb/9378-supervisor-do-atendimento)
+  if (branch) {
+    const ownBranch = branch.toLowerCase();
+    for (const line of lines) {
+      for (const raw of line.text.toLowerCase().split(/\s+/)) {
+        const word = strip(raw);
+        if (!word.startsWith("omb/")) continue;
+        const shown = uncut(word);
+        if (shown === word ? shown !== ownBranch : !ownBranch.startsWith(shown)) return "ambiguous";
+      }
+    }
+  }
+  return "cut";
+}
+
 /**
  * New session in a folder the server made for it (own-worktrees.ts, lote
  * X): the app's link puts New Session in that folder, whatever folder the
@@ -509,42 +619,72 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
  * outside .claude/worktrees: the app maps folders inside it back to the
  * repository root); `folderName` is what its chip shows.
  */
-export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[] }): Promise<DesktopStep> {
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[]; trustLog?: () => string; trustClicks?: number; branch?: string }): Promise<DesktopStep> {
   if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
   return withScreen(driver, async (screen) => {
+    const opened = Date.now();
     await act(screen, () => driver.openUrl(newSessionInFolderUrl(input.folder)));
     await driver.sleep(3_000);
     let stop = await guard(screen, "new session in its folder");
     if (stop) return stop;
     const size = await driver.screenSize();
     const band = async () => mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
+    // git's list, read once and only when needed (a cut chip, a prompt to answer — INSP-R12a-r2 R2-5)
+    let listed: readonly string[] | null = null;
+    const registered = () => (listed ??= input.registered?.() ?? []);
+    const clicked = (input.trustClicks ?? 0) > 0;
     // First the screen must be the new session of OUR folder: its empty field and the folder's chip.
     const ours = (lines: OcrLine[]): { field: OcrLine } | DesktopStop => {
       const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
       if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
-      if (!showsFolderName(lines, input.folderName)) return { ok: false, reason: `the new session does not show the folder ${input.folderName} in its chips; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+      // The chips on another folder — the one the app used before — or cut
+      // short to a start another worktree shares: no click whatever the log
+      // says (it follows the composer: 06/10 03:31:25 checkTrust of the folder
+      // before), and no second try — no click fixes a link that reuses the
+      // folder before; the create goes on in the cli (INSP-R13dis 1, 2, 7).
+      const chip = folderChip(lines, input.folderName, () => registered().map((path) => path.split("/").filter(Boolean).pop() ?? path), input.branch);
+      // no folder chip read at all: a miss to try again, never "another folder" — not the cli, not the breaker (R2-2)
+      if (chip === "unread") return { ok: false, reason: `could not read the new session's folder chip (expected ${input.folderName}); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+      if (chip === "none" || chip === "ambiguous") {
+        return { ok: false, reason: chip === "none" ? `the new session shows another folder in its chips (the folder before), not ${input.folderName}; nothing was clicked or typed` : `the new session's folder chip is cut short to a start that another worktree of the repository shares, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, previousFolder: true, seen: seenText(lines.slice(-8)) };
+      }
+      // a scratch folder of the app's on screen too (where a "trust" sent b23900b6 on 06/10): never ours — after a click of ours, the cli (INSP-R13dis 5)
+      if (lines.some((line) => SCRATCH_FOLDER.test(line.text))) return { ok: false, reason: `the new session shows a scratch folder of the app's, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, ...(clicked ? { cliNow: true } : {}), seen: seenText(lines.slice(-8)) };
       return { field };
     };
     let bottom = await band();
-    let seen = ours(bottom);
+    const seen = ours(bottom);
     if ("ok" in seen) return seen;
-    // The app asks to trust a folder it has not seen ("Confiar no workspace",
-    // 05/10 #9378). Clicked only now that the screen shows our folder, and
-    // only when that folder is a worktree git lists for the repository, by
-    // its real path; anywhere else only the person decides (INSP-R12a X3-2).
     const trust = trustPrompt(bottom);
+    // The app asks to trust a folder it has not seen ("Confiar no workspace",
+    // 05/10 #9378), with our folder's chip on screen. Clicked only when that
+    // folder is a worktree git lists for the repository, by its real path;
+    // anywhere else only the person decides (INSP-R12a X3-2); never when the
+    // folder the prompt names, or the app's log since the link, is another
+    // one; and once per create: after a click the prompt again is the cli.
     if (trust) {
+      if (clicked) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName} again after the server clicked it once in this create; no second click — the create goes on in the cli`, retry: true, miss: true, touched: true, cliNow: true, seen: seenText(bottom.slice(-8)) };
+      const log = () => (input.trustLog ? parseTrustLog(input.trustLog()) : []);
+      const tie = input.expected ? trustPromptFor(bottom, log(), opened, input.expected) : { is: "none" as const };
+      if (tie.is === "other") return { ok: false, reason: `the app asks to trust the workspace ${tie.folder}, not ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
       // git's list is read only now, when there is a prompt to answer (INSP-R12a-r2 R2-5)
-      if (!ownWorktreeFolder(input.folder, input.expected, input.registered?.() ?? [])) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(bottom.slice(-8)) };
+      if (!ownWorktreeFolder(input.folder, input.expected, registered())) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(bottom.slice(-8)) };
       stop = await guard(screen, "trust the workspace");
       if (stop) return stop;
       await act(screen, () => driver.click(trust.x + trust.w / 2, trust.y + trust.h / 2));
       await driver.sleep(1_000);
       bottom = await band();
       if (trustPrompt(bottom)) return { ok: false, reason: `the app still asks to trust the workspace ${input.folderName} after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-      // and still our folder's new session after it
-      seen = ours(bottom);
-      if ("ok" in seen) return seen;
+      // what the app saved, when its log says: another folder is a miss, said
+      const saved = input.expected && input.trustLog ? trustPromptFor([], log(), opened, input.expected, ["save"]) : { is: "none" as const };
+      if (saved.is === "other") return { ok: false, reason: `the app saved the trust for ${saved.folder}, not ${input.folderName}, after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // Never pasted on the screen of the click: both times the server
+      // clicked it (06/10 11:06 and 12:01 BRT) the app saved the trust and
+      // then started the session in a scratch folder of its own, a second
+      // later, with our chip still read. The link is opened again on the
+      // next try, the folder now trusted, and checked from the start
+      // (R13-dispatch R13-3).
+      return { ok: false, reason: `trusted the workspace ${input.folderName}; nothing was typed — the app's link is opened again and the folder checked before the brief goes in`, retry: true, touched: true, trusted: true, seen: seenText(bottom.slice(-8)) };
     }
     const { field } = seen;
     // the folder IS the worktree: with the app's worktree option on, the app

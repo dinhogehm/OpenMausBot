@@ -290,13 +290,22 @@ it("has no command that removes, prunes or unlocks a worktree anywhere in its co
     // never as arguments to run; "worktree remove" appears only as the text told to a person
     expect(source).not.toMatch(/"worktree",\s*"(?:remove|prune|unlock)"|"branch",\s*"-[dD]"/);
     const told = source.split("\n").filter((line) => /worktree (?:remove|prune)/.test(line) && !line.trim().startsWith("//") && !line.trim().startsWith("*"));
-    expect(told.every((line) => /command: `git -C \$\{quote\(session\.repo\)\} worktree remove \$\{quote\(own\.path\)\}`/.test(line))).toBe(true);
+    // the person's commands only: the report's, and the ones for a folder a seeded start left half made (INSP-R4-2)
+    const forPeople = [
+      /command: `git -C \$\{quote\(session\.repo\)\} worktree remove \$\{quote\(own\.path\)\}`/,
+      /^ {2}const listed = `\$\{git\} worktree remove --force \$\{quote\(path\)\}`;$/,
+      /^ {2}const unlisted = `\$\{git\} worktree prune, e mova a pasta para o Lixo \(mv \$\{quote\(path\)\} ~\/\.Trash\/\)`;$/,
+    ];
+    expect(told.filter((line) => !forPeople.some((each) => each.test(line)))).toEqual([]);
   }
   // the one rm in own-worktrees.ts takes back a temporary clone or probe, never a worktree
   const own = readFileSync(join(here, "own-worktrees.ts"), "utf8");
   expect(own.match(/rmSync\(/g)).toHaveLength(1);
-  expect(own).toMatch(/dropTemp: \(path\) => rmSync\(path, \{ recursive: true, force: true \}\)/);
+  expect(own).toMatch(/dropTemp: \(path\) => rmSync\(path, \{ recursive: true, force: true, maxRetries: 3, retryDelay: 100 \}\)/);
   // the probe, a temporary copy a stopped server left, and the one a failed cp left
   expect([...own.matchAll(/io\.dropTemp\((\w+)\)/g)].map((match) => match[1])).toEqual(["probe", "temp", "temp"]);
   expect(own).toContain("const temp = `${target}.omb-clone`;");
+  // the one unlink takes back an alias (a symlink) whose worktree is gone, never the worktree (R13-2d)
+  expect(own.match(/unlinkSync\(/g)).toHaveLength(1);
+  expect(own).toMatch(/readlink: \(path\) => \{ try \{ return lstatSync\(path\)\.isSymbolicLink\(\) \? readlinkSync\(path\) : null;/);
 });
