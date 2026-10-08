@@ -191,10 +191,11 @@ it("a mixed item keeps its other ask; its worktree removal goes to the server's 
   expect(own.steps[1].command).toBeUndefined();
   expect(own.steps[1].text).toContain("a remoção vai pelo item de disco do servidor");
   expect(disk.key).toBe(`disk-decision:${dirty}`);
-  // R5-1: the bot's decisions that removed in words point to the server's item; the folders taken there are kept on the item
+  // R6-2: both decisions only report what the owner did, so they stay as written (the
+  // answer still carries the server's note, R6-1/INSP-R13int I1); the folders taken are kept on the item
   expect(own.options.map((option: any) => option.reply)).toEqual([
-    "Apaguei as duas: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
-    "Só as pastas: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
+    "Apaguei as pastas paradas e a worktree, confira o disco.",
+    "Apaguei só as pastas paradas.",
   ]);
   expect(own.diskMoved).toEqual([dirty]);
   const said = await f.reply(f.bot.id, own.id, { text: "Pode remover a 503 também" });
