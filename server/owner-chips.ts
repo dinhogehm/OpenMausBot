@@ -27,6 +27,13 @@ export const sessionChips = {
   followedEnded: (title: string, turn: number) => `${sessionLabel(title)} terminou o turno ${turn}, acompanhado após o reinício`,
   followedCut: (title: string, turn: number) => `${sessionLabel(title)} parou sem fechar o turno ${turn} — o Chief retoma (o processo que sobreviveu ao reinício terminou)`,
   survivorLimit: (title: string, turn: number, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min — o Chief retoma (turno ${turn}, acompanhado após o reinício)`,
+  // R13-2 / INSP-R13res A1: a gate of the session still runs, so the cut waits for it, up to a ceiling
+  survivorGateWait: (title: string, minutes: number, gate: string, ceiling: string) => `${sessionLabel(title)} passou de ${minutes} min, mas o gate (${gate}) dela ainda roda — o corte espera o gate terminar (até ${ceiling} de turno)`,
+  // how long it really waited, not the ceiling (R2 B7); null: it was past the ceiling already
+  survivorGateCut: (title: string, gate: string, ceiling: string, waited: string | null) => `${sessionLabel(title)} cortada com ${ceiling} de turno, ${waited ? `depois de esperar ${waited} pelo gate` : "já além do teto de espera do gate"} (${gate}) — gate interrompido pelo corte, sem resultado; o Chief retoma`,
+  // what really outlived the cut (a gate started with nohup): the server, not the Chief, resumes it
+  survivorLimitJob: (title: string, turn: number, minutes: number, count: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min; ${plural(count, "processo seguiu rodando", "processos seguiram rodando")} — o servidor retoma a sessão quando ${count === 1 ? "terminar" : "terminarem"} (turno ${turn}, acompanhado após o reinício)`,
+  survivorLimitTwice: (title: string, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min duas vezes seguidas — o servidor não retoma de novo; o Chief decide`,
   survivorStopped: (title: string) => `${sessionLabel(title)} parada: o processo que seguia após o reinício foi encerrado`,
   movedHere: (titles: string[], why: string) => `${titles.length === 1 ? "1 sessão passa" : `${titles.length} sessões passam`} a relatar aqui (${why}): ${titles.map(sessionLabel).map((label) => label.replace(/^Sessão /, "")).join(", ")}`,
   movedAway: (title: string) => `${sessionLabel(title)}: os relatórios agora vão para o canal do dono`,

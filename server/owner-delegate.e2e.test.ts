@@ -146,3 +146,78 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     await session.close();
   }
 }, 120_000);
+
+// INSP-R13res A2: a delegated session cut at its limit with a job the server
+// follows (one that outlived the cut) is resumed by the server itself; the
+// item waits for that turn instead of going back to the owner as "falhou"
+// (whence a second delegation, a second session on the same item).
+it("keeps a delegated item waiting while the server follows its cut session's job, and settles it by the resumed turn", async () => {
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-del-cut-"));
+  const release = join(tools, "release");
+  const calls = join(tools, "calls.jsonl");
+  const fake = join(tools, "fake-claude.mjs");
+  // the delegated turn leaves a job that outlives the cut (nohup-like, its own
+  // group) and hangs past the limit; the resumption reports and ends
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+const prompt = argv[argv.length - 1];
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify(prompt.split("\\n")[0]) + "\\n");
+let cwd = process.cwd();
+const w = argv.indexOf("-w");
+if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
+console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+if (prompt.includes("item delegado")) {
+  const source = "const { existsSync } = require('node:fs'); setInterval(() => { if (existsSync(" + JSON.stringify(${JSON.stringify(release)}) + ")) process.exit(0); }, 100); setTimeout(() => process.exit(0), 120000);";
+  spawn(process.execPath, ["-e", source, "long-job"], { cwd, detached: true, stdio: "ignore" }).unref();
+  await new Promise(() => setInterval(() => {}, 1000));
+}
+const result = prompt.includes("[The server resumed you") ? "Retomei depois do job.\\nFEITO: conferi o job\\nRESULTADO: parcial" : "Comecei.\\nRESULTADO: parcial";
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result, total_cost_usd: 0.01 }));
+`);
+  chmodSync(fake, 0o755);
+  const session = await launchVerificationServer({
+    ...process.env, OMB_TEST_GRANT_PATH: GIT_DIR, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50",
+    OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000",
+  }, undefined, undefined, undefined, undefined, { scripted: true });
+  const url = session.info.url;
+  const data = session.info.dataDir;
+  writeFileSync(join(data, "own-worktrees-settings.json"), JSON.stringify({ enabled: false }));
+  const cli = (...args: string[]) => runControlOmb(args, { env: { OPENMAUSBOT_URL: url } }) as Promise<any>;
+  try {
+    const { execFileSync } = await import("node:child_process");
+    const repo = join(data, "widget-app");
+    execFileSync(GIT, ["init", "-q", repo]);
+    execFileSync(GIT, ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "init"]);
+    const bot = (await cli("new-bot", "--name", "Delivery")).bot;
+    writeFileSync(join(data, "room-plan.json"), JSON.stringify({ [bot.id]: { turns: [
+      { steps: [
+        { tool: "cc_session_start", arguments: { title: "#9998 origem", brief: "investigue o log", repo, surface: "cli" } },
+        { tool: "owner_pending", arguments: { action: "add", title: "Investigar o erro 500 da #9401 no widget-app", why: "O widget-app depende disso.", steps: [{ text: "Leia os logs e reproduza o erro" }] } },
+      ], reply: "Anotado." },
+      ...Array.from({ length: 10 }, () => ({ reply: "ok" })),
+    ] } }));
+    await cli("send", "--bot", bot.id, "--task", bot.activeTaskId, "--text", "Liste o que é meu.");
+    const sessions = () => (existsSync(join(data, "cc-sessions.json")) ? JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions : []) as any[];
+    const wire = async () => ((await request("/api/bots", {}, url) as any).bots.find((each: any) => each.id === bot.id).tasks ?? []).flatMap((task: any) => task.ownerPending ?? []) as any[];
+    await expect.poll(async () => (await wire()).length, { timeout: 30_000 }).toBe(1);
+    await expect.poll(() => sessions().filter((each) => each.status === "idle").length, { timeout: 20_000 }).toBe(1);
+    const item = (await wire())[0];
+    const response = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${item.id}/delegate`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(response.status).toBe(202);
+    const delegated = () => sessions().find((each) => each.delegatedItem?.itemId === item.id);
+    // cut at the limit, its job followed: the item stays delegated, not "falhou"
+    await expect.poll(() => delegated()?.bgJob?.afterCut ?? false, { timeout: 20_000 }).toBe(true);
+    expect(delegated().status).toBe("failed");
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect((await wire())[0].delegationBack).toBeUndefined();
+    // the job ends: the server resumes the session, and that turn's report settles the item
+    writeFileSync(release, "");
+    await expect.poll(async () => (await wire())[0]?.delegationBack ?? null, { timeout: 20_000 }).toMatchObject({ outcome: "parcial", text: expect.stringContaining("conferi o job") });
+    expect(readFileSync(calls, "utf8")).toContain("[The server resumed you");
+  } finally {
+    await session.close();
+  }
+}, 120_000);

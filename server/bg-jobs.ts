@@ -80,6 +80,74 @@ export function isToolProcess(command: string): boolean {
     || /^(?:\S*\/)?sleep\s+[\d.]+[smhd]?$/.test(cmd);
 }
 
+/** Longer than this, a shell command is a script body (pr-merge.sh runs
+ * `bash -c "<pr-merge-gate.sh>"`, thousands of characters with its own
+ * while loops), not a one-line poll. */
+const POLL_MAX_CHARS = 600;
+
+/** A shell the agent left waiting on something ("until grep -q exit= …log;
+ * do sleep 5; done", "pgrep -f ci:local", "tail -f …"): short, it does no
+ * work of its own, so it is neither a gate nor a job to follow
+ * (INSP-R13res A6, R2 B4). */
+export function isPollingShell(command: string): boolean {
+  const cmd = command.trim();
+  if (cmd.length > POLL_MAX_CHARS) return false;
+  return /\b(?:until|while)\b[\s\S]*\bdo\b/.test(cmd)
+    || /(?:^|[\s/'"(;&|])(?:pgrep|pkill)\s/.test(cmd)
+    || /^(?:\S*\/)?(?:grep|tail|watch)\s/.test(cmd);
+}
+
+/** The gate's own scripts, as a program runs them. */
+const GATE_SCRIPT = /^(?:\S*\/)?(?:local-ci|pr-merge-gate)(?:\.(?:sh|mjs|cjs|js|ts))?$/;
+/** A package script that is a gate: `npm run ci:local`, `pnpm pr:merge`. */
+const GATE_RUN = /(?:^|[\s;&|('"])(?:\S*\/)?(?:npm|pnpm|yarn)(?:\s+--?\S+)*\s+(?:run(?:-script)?\s+)?(?:ci:local|pr:merge)(?=$|[\s;&|)'"])/;
+
+/** A gate at work: the platform's `ci:local` (npm → local-ci.sh) or the
+ * merge gate (`pr:merge`, pr-merge-gate) — by the program that runs it, not
+ * by the words in its argv (R2 B3): npm/pnpm/yarn running the script; node
+ * or a shell running a gate script; a shell whose body runs one, or named
+ * pr-merge-gate (pr-merge.sh's `bash -c "<body>" pr-merge-gate`). An editor,
+ * a pager, git, gh or a claude whose argv only mentions "ci:local" is not
+ * one, nor is a short shell polling for it. */
+export function isGateCommand(command: string): boolean {
+  const cmd = command.trim();
+  const tokens = cmd.split(/\s+/);
+  const program = (tokens[0] ?? "").replace(/^.*\//, "");
+  if (/^(?:npm|pnpm|yarn)$/.test(program)) return GATE_RUN.test(cmd);
+  if (program === "node") return tokens.slice(1).some((token) => GATE_SCRIPT.test(token)) || /\bnpm-cli\.js(?:\s+--?\S+)*\s+run(?:-script)?\s+(?:ci:local|pr:merge)(?=$|\s)/.test(cmd);
+  if (/^-?(?:bash|sh|zsh)$/.test(program)) {
+    if (isPollingShell(cmd)) return false;
+    // a gate script where a command starts (not `vim local-ci.sh`), or the
+    // bare $0 "pr-merge-gate" that pr-merge.sh gives its `bash -c` body
+    const runsScript = tokens.some((token, i) => i > 0
+      && GATE_SCRIPT.test(token.replace(/^['"(]+|['";)]+$/g, ""))
+      && (i === 1 || /^['"(]/.test(token) || /^(?:bash|sh|zsh|exec|nohup|eval|then|do|-c|&&|\|\||;|\|)$/.test(tokens[i - 1]!) || /[;&|]$/.test(tokens[i - 1]!)));
+    return runsScript || tokens.includes("pr-merge-gate") || GATE_RUN.test(cmd);
+  }
+  return false;
+}
+
+/** How the owner names a gate: "pr:merge" or "ci:local". */
+export function gateLabel(gates: readonly Pick<BgProcess, "command">[]): string {
+  return gates.some((gate) => /\bpr:merge\b|pr-merge-gate/.test(gate.command)) ? "pr:merge" : "ci:local";
+}
+
+/** The gates running in `folder`, whoever their parent is: one started with
+ * nohup or `&` belongs to launchd by now, not to the turn's tree. */
+export function gatesIn(folder: string, rows: readonly PsRow[], cwds: ReadonlyArray<{ pid: number; cwd: string }>, exclude: readonly number[] = []): BgProcess[] {
+  const inFolder = new Map(leftoversIn(folder, [...cwds], exclude).map((proc) => [proc.pid, proc.cwd]));
+  return rows
+    .filter((row) => inFolder.has(row.pid) && isGateCommand(row.command))
+    .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start, pgid: row.pgid }));
+}
+
+/** The same processes once, by pid. */
+export function mergeProcesses(...lists: ReadonlyArray<readonly BgProcess[]>): BgProcess[] {
+  const byPid = new Map<number, BgProcess>();
+  for (const proc of lists.flat()) if (!byPid.has(proc.pid)) byPid.set(proc.pid, proc);
+  return [...byPid.values()];
+}
+
 /** What the server saw under a turn's `claude` process: pid → start, and their process groups. */
 export interface TurnTree { rootPid: number; seen: Map<number, string>; groups: Set<number> }
 
@@ -108,7 +176,7 @@ export function sessionLeftovers(folder: string, tree: TurnTree, rows: readonly 
   noteDescendants(tree, rows);
   const inFolder = new Map(leftoversIn(folder, [...cwds], exclude).map((proc) => [proc.pid, proc.cwd]));
   return rows
-    .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command) && !isToolProcess(row.command))
+    .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command) && !isToolProcess(row.command) && !isPollingShell(row.command))
     .filter((row) => tree.seen.get(row.pid) === row.start || (!tree.seen.has(row.pid) && tree.groups.has(row.pgid)))
     .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start, pgid: row.pgid }));
 }
@@ -131,6 +199,37 @@ export async function backgroundProcesses(folder: string, tree: TurnTree): Promi
   if (!candidates.length) return [];
   const cwds = parseLsofCwd(await run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", candidates.join(",")]));
   return sessionLeftovers(folder, tree, rows, cwds, [process.pid]);
+}
+
+/** Like `run`, but says whether the program answered: null on a timeout, a
+ * kill or a failure to start. An exit status is an answer: lsof exits 1 when
+ * some of its pids are gone or unreadable (a zombie, another user's), and
+ * prints the rest. */
+const runChecked = (file: string, args: string[]) => new Promise<string | null>((resolve) => {
+  execFile(file, args, { timeout: 15_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }, (error, stdout) => {
+    if (!error) return resolve(String(stdout ?? ""));
+    const failed = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+    resolve(failed.killed || failed.signal || typeof failed.code === "string" ? null : String(stdout ?? ""));
+  });
+});
+
+/** The gates running in `folder` anywhere on the machine (ps, then lsof on
+ * those only), or null when that could not be told — ps or lsof failed or
+ * timed out — so a cut never takes "unknown" for "no gate" (R2 B2).
+ * `exclude` holds the sessions' claude processes: never a gate, even when
+ * a prompt in their argv names one. */
+export async function sessionGates(folder: string, exclude: readonly number[] = []): Promise<BgProcess[] | null> {
+  if (process.platform === "win32") return [];
+  const table = await runChecked("/bin/ps", ["-axo", "pid=,ppid=,pgid=,lstart=,command="]);
+  if (table === null) return null;
+  const all = parsePsTable(table);
+  if (!all.length) return null;
+  const rows = all.filter((row) => row.pid !== process.pid && !exclude.includes(row.pid) && isGateCommand(row.command));
+  if (!rows.length) return [];
+  const listing = await runChecked("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", rows.map((row) => row.pid).join(",")]);
+  // lsof did not answer: unknown, unless every candidate is gone by now
+  if (listing === null) return rows.some((row) => pidAlive(row.pid)) ? null : [];
+  return gatesIn(folder, rows, parseLsofCwd(listing), [process.pid]);
 }
 
 export function pidAlive(pid: number): boolean {
@@ -165,7 +264,8 @@ export function bgJobResumePrompt(job: { pids: number[]; commands: string[]; sin
   return [
     `[The server resumed you: the process(es) you left running when your last turn ended have finished, after ${minutes} min.]`,
     ...job.commands.map((command, i) => `- PID ${job.pids[i]}: ${command}`),
-    "Check how it ended (its log or receipt, the gate's status) and continue from where you stopped. End with your report as usual.",
+    // they were not the server's children: how they exited is not known here
+    "The server cannot see their exit code: they may have passed, failed or been killed. Check how it ended (its log or receipt, the gate's status) before going on from where you stopped. End with your report as usual.",
   ].join("\n");
 }
 

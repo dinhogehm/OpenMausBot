@@ -412,7 +412,7 @@ import {
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
 import { addOwnWorktree, breakerRepo, cacheLine, enqueueSeededStart, groupExec, installText, prepareCliWorktree, pruneDanglingLinks, seededStartChain, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
-import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
+import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, gateLabel, mergeProcesses, sessionGates, type BgProcess, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
 import { climbStopLadder, ownerItemCiting } from "./stop-ladder.ts";
@@ -9854,10 +9854,40 @@ function reportResumptionToChief(): void {
   autonomy.addReport(chief.id, desk, text);
 }
 const ccProcesses = new Map<string, CcChildProcess>();
+/** Sessions whose ended turn is being checked for what it left running (its background job). */
+const ccLeftoverChecks = new Set<string>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
 const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
 // OMB_CC_TURN_TIMEOUT_MS shortens the turn cut for end-to-end tests only.
 const ccTurnTimeoutMs = Number(process.env.OMB_CC_TURN_TIMEOUT_MS) > 0 ? Number(process.env.OMB_CC_TURN_TIMEOUT_MS) : CC_TURN_TIMEOUT_MS;
+// The gate wait (INSP-R13res A1, R2 B6). A turn past its limit while a gate
+// of its session runs is not cut: on a cut Claude Code kills its own
+// background shells, the gate with them. The cut waits for the gate, checked
+// once a minute, and the rule is the same for a turn the server runs and for
+// one followed after a restart: never past this long from the turn's start.
+// The wait of a ci:local queued behind a release is a separate excuse, never
+// added to it: the cut comes at whichever ends later, so a turn lasts at
+// most what the release queue alone allowed before (~6,5 h), or 3 h.
+// Unknown (ps or lsof failed) counts as a gate still running: the next check
+// decides, and the ceiling still holds (R2 B2). OMB_CC_GATE_WAIT_MAX_MS
+// shortens it for tests.
+const ccGateWaitMaxMs = Number(process.env.OMB_CC_GATE_WAIT_MAX_MS) > 0 ? Number(process.env.OMB_CC_GATE_WAIT_MAX_MS) : 3 * 3_600_000;
+/** How long a cut waited for the gate, as it was (R2 B7): "depois de esperar 90 min pelo gate". */
+const gateWaitPt = (waitedMs: number) => (waitedMs > 0 ? `depois de esperar ${spanPt(waitedMs)} pelo gate` : "já além do teto de espera do gate");
+const gateWaitEn = (waitedMs: number) => (waitedMs > 0 ? `after waiting ${spanPt(waitedMs)} for it` : "already past the gate wait's ceiling");
+/** How often a gate wait is checked again. */
+const ccGateRecheckMs = Math.min(60_000, ccTurnTimeoutMs);
+/** Sessions whose cut waits for their gate, and since when: a delegated item does not time out meanwhile. */
+const ccGateWaits = new Map<string, number>();
+/** Every session's claude: never a gate, even when its prompt names one (R2 B3). */
+const ccClaudePids = (): number[] => [
+  ...[...ccProcesses.values()].map((child) => child.pid ?? 0),
+  ...ccLedger.all().map((session) => session.proc?.pid ?? 0),
+].filter((pid) => pid > 0);
+/** "3 h", "90 min": how long, for the owner. */
+const spanPt = (ms: number) => (ms >= 3_600_000 ? `${Math.round(ms / 360_000) / 10} h`.replace(".", ",") : `${Math.max(1, Math.round(ms / 60_000))} min`);
+/** The turn's worktree, when it has one: only there a gate is the session's. */
+const worktreeFolder = (folder: string | undefined) => (folder && folder.includes("/.claude/worktrees/") ? folder : null);
 const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. When you merge a batch of PRs: hotfix/P0/P1 work (by label, title or the linked issue's priority) goes first, ahead of CI or infrastructure PRs, released on its own; PRs that change release scripts (release, carrier, merge-gate or production-watch scripts) go last, in a separate release, with a dry run first. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report. Write your reports and summaries — everything the person reads in the app — in Brazilian Portuguese (pt-BR); keep code, commands and identifiers as they are.";
 /** The footer of a first turn: the general rules, plus the repository's own corridor. */
 const ccTurnFooter = (session: CcSession): string => `${CC_TURN_FOOTER}${repoCorridor(session.repo)}`;
@@ -10039,7 +10069,15 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   let buffer = "";
   let timedOut = false;
   let settled = false;
+  // where this turn works, as its init event says: its gate runs there
+  let initCwd: string | undefined;
   const keep = (line: string) => {
+    if (initCwd === undefined && line.includes('"subtype":"init"')) {
+      try {
+        const said = (JSON.parse(line) as { cwd?: unknown }).cwd;
+        if (typeof said === "string") initCwd = said;
+      } catch { /* not the event */ }
+    }
     // Tool output can be huge; only the init and result events matter here.
     if (line.includes('"subtype":"init"') || line.includes('"type":"result"') || !line.startsWith("{")) {
       lines.push(line);
@@ -10125,7 +10163,14 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   };
   const sampler = setInterval(sample, 30_000);
   sampler.unref();
+  // the gate this turn's cut waited for, past the ceiling: cut with it, and how long it waited (INSP-R13res A1, R2 B7)
+  let gateCut = "";
+  let gateWaitedMs = 0;
+  let gateWaitSince = 0;
+  // the last gates a check could see: an unknown check keeps them (R2 B2)
+  let gatesSeen: BgProcess[] = [];
   const cutOrWait = () => {
+    if (settled) return;
     const now = Date.now();
     const due = turnStartedAt + ccTurnTimeoutMs + queuedMs + (queuedSince ? now - queuedSince : 0);
     if (queuedSince || now < due) {
@@ -10133,10 +10178,39 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
       timer.unref();
       return;
     }
-    timedOut = true;
-    if (overdueReason) ccChip(session, `turno cortado: ${overdueReason}`, false);
-    child.kill("SIGTERM");
-    setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+    // A gate of this session still at work: on a cut Claude Code kills its
+    // background shells, the gate with them. The cut waits for the gate (the
+    // turn goes on, and hears its result) up to the ceiling.
+    // its worktree as its init event said it, else as the ledger knows it, else
+    // where a first turn's `-w` makes it (a claude slow to start has said nothing yet)
+    let expected: string | undefined;
+    try { expected = realpathSync(expectedCwd); } catch { /* not made yet */ }
+    const folder = worktreeFolder(initCwd ?? session.cwd ?? expected);
+    void (folder ? sessionGates(folder, ccClaudePids()) : Promise.resolve([])).catch(() => null).then((found) => {
+      if (settled) return;
+      if (found) gatesSeen = found;
+      const running = found === null || found.length > 0;
+      if (running && Date.now() < turnStartedAt + ccGateWaitMaxMs) {
+        if (!gateWaitSince) {
+          gateWaitSince = Date.now();
+          ccGateWaits.set(session.id, gateWaitSince);
+          ccChip(session, `turno passou de ${Math.round(ccTurnTimeoutMs / 60_000)} min, mas o gate (${gateLabel(gatesSeen)}) da sessão ainda roda; o corte espera o gate terminar (até ${spanPt(ccGateWaitMaxMs)} de turno)`);
+        }
+        console.log(`[cc-sessions] ${session.id}: past the turn limit, gate check: ${found === null ? "unknown (ps/lsof failed)" : `running (${found.map((gate) => gate.pid).join(", ")})`}: the cut waits`);
+        timer = setTimeout(cutOrWait, ccGateRecheckMs);
+        timer.unref();
+        return;
+      }
+      if (gateWaitSince) gateWaitedMs = Date.now() - gateWaitSince;
+      ccGateWaits.delete(session.id);
+      // past the ceiling: the gate it waited for, or the last one seen when this check could not tell
+      if (running && (found?.length || gatesSeen.length)) gateCut = gateLabel(found?.length ? found : gatesSeen);
+      console.log(`[cc-sessions] ${session.id}: cut at the turn limit, gate check: ${!folder ? "no worktree known" : found === null ? "unknown" : found.length ? `running (${found.map((gate) => gate.pid).join(", ")}), past the ceiling` : "none"}`);
+      timedOut = true;
+      if (overdueReason) ccChip(session, `turno cortado: ${overdueReason}`, false);
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+    });
   };
   let timer = setTimeout(cutOrWait, ccTurnTimeoutMs);
   timer.unref();
@@ -10161,7 +10235,10 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     clearInterval(sampler);
     ccProcesses.delete(session.id);
     if (buffer) keep(buffer);
+    ccGateWaits.delete(session.id);
     const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
+    // cut with its gate running: said in the same write as the cut (R2 B1)
+    if (gateCut && timedOut && !outcome.ok) outcome.error = `${outcome.error ?? "its turn was cut"}; it was cut while its gate (${gateCut}) still ran, ${gateWaitEn(gateWaitedMs)}`;
     ccLedger.finishTurn(session, outcome);
     // this turn was the resumption after a cut: at most one per cut in a row
     const resumedAfterCut = session.resumedAfterCut === true;
@@ -10194,27 +10271,46 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
       ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn was cut at the ${limitMin}-min limit twice in a row: the second turn was the server's resumption after the first cut. The server does not resume it again. Check whether it is stuck — a loop, a wait that never ends — then send it a message with cc_session_send, or stop it.)`);
       return;
     }
+    // cut past the gate's ceiling, and nothing of it outlived the cut: said as it is
+    const gateLost = () => {
+      ccChip(session, `turno cortado com ${spanPt(ccGateWaitMaxMs)} de turno, ${gateWaitPt(gateWaitedMs)} (${gateCut}) — gate interrompido pelo corte, sem resultado`, false);
+      ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn passed the ${limitMin}-min limit while its gate (${gateCut}) ran; it was cut at the ${spanPt(ccGateWaitMaxMs)} ceiling from the turn's start, ${gateWaitEn(gateWaitedMs)}, and the gate was stopped with it: there is no gate result. Check why the gate ran that long before having it run again.)`);
+    };
     if ((session.status === "idle" || cut) && tree && folder && folder.includes("/.claude/worktrees/")) {
-      void backgroundProcesses(folder, tree).then((found) => {
-        // after a cut only a group of its own counts (the gate); the claude's own group (MCP servers) dies with it
-        const left = cut ? cutLeftovers(found, tree.rootPid) : found;
+      // until it is known whether a job is left, a delegated item does not settle on this turn
+      ccLeftoverChecks.add(session.id);
+      void Promise.all([backgroundProcesses(folder, tree), cut ? sessionGates(folder, [tree.rootPid, ...ccClaudePids()]).then((gates) => gates ?? []).catch(() => []) : Promise.resolve([])]).finally(() => ccLeftoverChecks.delete(session.id)).then(([found, gates]) => {
+        // after a cut only a group of its own counts (the gate), and a gate
+        // that outlived the cut wherever it runs (nohup); the claude's own
+        // group (MCP servers) dies with it
+        const left = cut ? mergeProcesses(cutLeftovers(found, tree.rootPid), gates) : found;
         if (!left.length || (session.status !== "idle" && !(cut && session.status === "failed"))) {
-          ccReport(session, desktopReportFor(desktopWork, session));
+          if (gateCut && cut) gateLost();
+          else ccReport(session, desktopReportFor(desktopWork, session));
           return;
         }
-        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now(), ...(cut ? { afterCut: true as const } : {}) };
-        ccLedger.save();
-        ccChip(session, cut
+        followBgJob(session, left, cut, limitMin, () => ccChip(session, cut
           ? `turno cortado em ${limitMin} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
-          : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
-        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ${cut ? `was cut at the ${limitMin}-min limit` : "ended"} with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.${cut ? " One of them may be what stalled the turn; the server resumes it once at most — cut again, it waits for you." : ""})`);
+          : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`));
       }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
       return;
     }
-    ccReport(session, desktopReportFor(desktopWork, session));
+    if (gateCut && cut) gateLost();
+    else ccReport(session, desktopReportFor(desktopWork, session));
   };
   child.on("error", (error) => finish(null, null, `could not run ${ccBin()}: ${error.message}`));
   child.on("close", (code, signal) => finish(code, signal));
+}
+
+/** What a turn left running in its worktree, followed as the session's
+ * background job: the tick resumes the session with a new turn once it is
+ * all gone (watchBackgroundJobs), once at most after a cut. `chip` says it
+ * where the session is followed; the report tells the owner. */
+function followBgJob(session: CcSession, left: readonly BgProcess[], cut: boolean, limitMin: number, chip: () => void): void {
+  session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now(), ...(cut ? { afterCut: true as const } : {}) };
+  ccLedger.save();
+  chip();
+  ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ${cut ? `was cut at the ${limitMin}-min limit` : "ended"} with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.${cut ? " One of them may be what stalled the turn; the server resumes it once at most — cut again, it waits for you." : ""})`);
 }
 
 // ── Claude Code sessions in the Claude desktop app (server/claude-desktop.ts)
@@ -11544,6 +11640,9 @@ function settleDelegation(session: CcSession): void {
   const item = autonomy.ownerPendingById(ref.botId, ref.itemId);
   // resolved meanwhile, or delegated again to another session
   if (!item || (item.delegation ? item.delegation.sessionId !== session.id : item.delegationBack?.sessionId !== session.id)) return;
+  // a cut turn whose job the server follows: it resumes the session itself, so the item waits (INSP-R13res A2)
+  // (or about to be: its ended turn is still being checked for one)
+  if (session.bgJob || ccLeftoverChecks.has(session.id)) return;
   if (session.status === "failed") {
     if (item.delegationBack?.sessionId === session.id && item.delegationBack.outcome === "falhou") return;
     delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `a sessão parou com um problema: ${(session.lastError ?? "erro desconhecido").slice(0, 300)}`, sessionId: session.id });
@@ -11642,6 +11741,8 @@ function reconcileDelegations(): void {
       const session = delegation.sessionId ? ccLedger.get(delegation.sessionId) ?? null : null;
       // too long without a report, stalled, or silent: back to the owner, whatever its state (INSP-DEL A8)
       const stuck = delegationStuck(delegation, session ? { status: session.status, lastActivityAt: session.lastActivityAt, progressAt: session.progressAt } : null, Date.now());
+      // its turn's cut waits for its gate: a legitimate wait, the item's time is extended while it lasts (R2 B6)
+      if (stuck && session && ccGateWaits.has(session.id)) continue;
       if (stuck) {
         delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `${stuck}; confira a sessão${session ? ` ${session.id}` : ""} antes de delegar de novo`, ...(session ? { sessionId: session.id } : {}) });
         continue;
@@ -11908,28 +12009,112 @@ function watchDelivery(): void {
  * finished (the last answer is its report) or cut short — and the owner
  * hears it like any other turn's end. */
 const survivorWatch = { lastAt: 0 };
+
+/** A survivor past the turn limit is cut like any turn (INSP-H r1 #10), but
+ * not while a gate of its session runs (R13-2, INSP-R13res A1): on SIGTERM
+ * Claude Code kills its own background shells, the gate with them, whatever
+ * their process group. So the cut waits for the gate — the turn goes on and
+ * hears the result — up to ccGateWaitMaxMs from the turn's start; past that it
+ * is cut and said as it is: the gate stopped, no result. Only what really
+ * outlives the cut (a gate started with nohup) is followed as a background
+ * job, and the session resumed when it is gone. The wait is checked once a
+ * minute, as a turn the server runs (R2 B5), with the same ceiling (B6). */
+const survivorCuts = new Set<string>();
+/** When each survivor's gate wait was last checked. */
+const survivorGateCheckedAt = new Map<string, number>();
+/** The last gates a check could see, per survivor: an unknown check keeps them (R2 B2). */
+const survivorGatesSeen = new Map<string, BgProcess[]>();
+async function cutSurvivor(session: CcSession, transcript: string | null): Promise<void> {
+  const proc = session.proc!;
+  const pid = proc.pid;
+  survivorCuts.add(session.id);
+  survivorGateCheckedAt.set(session.id, Date.now());
+  try {
+    const minutes = Math.max(1, Math.round(ccTurnTimeoutMs / 60_000));
+    const folder = worktreeFolder(session.cwd);
+    const found = folder ? await sessionGates(folder, ccClaudePids()).catch(() => null) : [];
+    // stopped, archived or ended by itself meanwhile: the next pass settles it (INSP-R13res A5)
+    if ((session.status !== "running" && session.status !== "stalled") || session.proc?.pid !== pid || !ccProcAlive(proc)) return;
+    if (found) survivorGatesSeen.set(session.id, found);
+    const seen = survivorGatesSeen.get(session.id) ?? [];
+    const running = found === null || found.length > 0;
+    if (running && Date.now() < session.lastActivityAt + ccGateWaitMaxMs) {
+      if (!ccGateWaits.has(session.id)) {
+        ccGateWaits.set(session.id, Date.now());
+        ccChipShort(session, sessionChips.survivorGateWait(session.title, minutes, gateLabel(seen), spanPt(ccGateWaitMaxMs)));
+      }
+      console.log(`[cc-sessions] ${session.id}: the claude that outlived the restart (PID ${pid}) passed the ${minutes}-min turn limit, gate check: ${found === null ? "unknown (ps/lsof failed)" : `running (${found.map((gate) => gate.pid).join(", ")})`}: the cut waits`);
+      return;
+    }
+    const since = ccGateWaits.get(session.id);
+    const waitedMs = since ? Date.now() - since : 0;
+    ccGateWaits.delete(session.id);
+    survivorGateCheckedAt.delete(session.id);
+    survivorGatesSeen.delete(session.id);
+    const gates = running ? (found?.length ? found : seen) : [];
+    // its tree, seen while its claude still lives (its children go to launchd once it dies)
+    const tree = newTurnTree(pid);
+    if (folder) await backgroundProcesses(folder, tree).catch(() => []);
+    if ((session.status !== "running" && session.status !== "stalled") || session.proc?.pid !== pid || !ccProcAlive(proc)) return;
+    try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* gone meanwhile */ } }
+    // what outlives the cut is known once its claude is gone (it kills its own background shells)
+    for (let waited = 0; waited < 10_000 && pidAlive(pid); waited += 200) {
+      if (waited === 5_000) try { process.kill(-pid, "SIGKILL"); } catch { /* gone meanwhile */ }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    const left = folder ? mergeProcesses(cutLeftovers(await backgroundProcesses(folder, tree).catch(() => []), pid), (await sessionGates(folder, [pid, ...ccClaudePids()]).catch(() => null)) ?? []) : [];
+    // stopped or archived while its claude was going: that already settled it
+    if (session.status !== "running" && session.status !== "stalled") return;
+    // the resumption of a cut, cut again: no second resumption (INSP-R13res A3)
+    const again = session.resumedAfterCut === true;
+    delete session.resumedAfterCut;
+    const gate = gates.length ? gateLabel(gates) : "";
+    const follow = left.length > 0 && !again;
+    const next = follow ? "the server resumes it when the process(es) still running finish"
+      : gate && !left.length ? `its gate (${gate}) was stopped with it, with no result; resume it with a new message`
+      : "resume it with a new message if the work is not done";
+    ccLedger.finishTurn(session, { ok: false, report: transcript ? lastAssistantText(transcript) : "", costUsd: 0, error: `its turn, followed after the server restart, was cut at the ${minutes}-min turn limit${gate ? ` with its gate (${gate}) still running, ${spanPt(ccGateWaitMaxMs)} into the turn, ${gateWaitEn(waitedMs)}` : ""} (its claude, outliving the restart, was stopped); ${next}` });
+    console.log(`[cc-sessions] ${session.id}: the claude that outlived the restart (PID ${pid}) passed the ${minutes}-min turn limit${gate ? ` and the ${spanPt(ccGateWaitMaxMs)} ceiling of its gate wait` : ""}, gate check: ${found === null ? "unknown" : found.length ? "running" : "none"}: stopped${left.length ? `; ${left.length} process(es) outlived it (${left.map((each) => each.pid).join(", ")})` : gate ? "; its gate was stopped with it" : ""}`);
+    if (again) {
+      ccChipShort(session, sessionChips.survivorLimitTwice(session.title, minutes), false);
+      ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn was cut at the ${minutes}-min limit twice in a row: the second turn was the server's resumption after the first cut. The server does not resume it again. Check whether it is stuck — a loop, a wait that never ends — then send it a message with cc_session_send, or stop it.)`);
+      return;
+    }
+    if (follow) {
+      followBgJob(session, left, true, minutes, () => ccChipShort(session, sessionChips.survivorLimitJob(session.title, session.turns, minutes, left.length), false));
+      return;
+    }
+    if (gate) {
+      ccChipShort(session, sessionChips.survivorGateCut(session.title, gate, spanPt(ccGateWaitMaxMs), waitedMs > 0 ? spanPt(waitedMs) : null), false);
+      ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn passed the ${minutes}-min limit while its gate (${gate}) ran; it was cut at the ${spanPt(ccGateWaitMaxMs)} ceiling from the turn's start, ${gateWaitEn(waitedMs)}, and the gate was stopped with it: there is no gate result. Check why the gate ran that long before having it run again.)`);
+      return;
+    }
+    ccChipShort(session, sessionChips.survivorLimit(session.title, session.turns, minutes), false);
+    ccReport(session, desktopReportFor(desktopWork, session));
+  } finally {
+    survivorCuts.delete(session.id);
+  }
+}
+
 function followSurvivingSessions(): void {
   if (Date.now() - survivorWatch.lastAt < 10_000) return;
   survivorWatch.lastAt = Date.now();
   for (const session of ccLedger.all()) {
-    if (session.survivedRestartAt === undefined || ccProcesses.has(session.id)) continue;
+    // being cut (cutSurvivor): settled there
+    if (session.survivedRestartAt === undefined || ccProcesses.has(session.id) || survivorCuts.has(session.id)) continue;
     if (session.status !== "running" && session.status !== "stalled") {
       delete session.survivedRestartAt;
       delete session.proc;
+      ccGateWaits.delete(session.id);
       ccLedger.save();
       continue;
     }
     const transcript = transcriptPath({ cliSessionId: session.id });
     const step = survivorStep(session, Boolean(session.proc && ccProcAlive(session.proc)), Date.now(), ccTurnTimeoutMs);
     if (step === "limit" && session.proc) {
-      // past the turn limit like any turn: its group is stopped, the turn is cut and said (INSP-H r1 #10)
-      const pid = session.proc.pid;
-      try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* gone meanwhile */ } }
-      const minutes = Math.max(1, Math.round(ccTurnTimeoutMs / 60_000));
-      ccLedger.finishTurn(session, { ok: false, report: transcript ? lastAssistantText(transcript) : "", costUsd: 0, error: `its turn, followed after the server restart, was cut at the ${minutes}-min turn limit (its claude, outliving the restart, was stopped); resume it with a new message if the work is not done` });
-      console.log(`[cc-sessions] ${session.id}: the claude that outlived the restart (PID ${pid}) passed the ${minutes}-min turn limit: stopped`);
-      ccChipShort(session, sessionChips.survivorLimit(session.title, session.turns, minutes), false);
-      ccReport(session, desktopReportFor(desktopWork, session));
+      // waiting for its gate: checked again once a minute, not every pass (R2 B5)
+      if (ccGateWaits.has(session.id) && Date.now() - (survivorGateCheckedAt.get(session.id) ?? 0) < ccGateRecheckMs) continue;
+      void cutSurvivor(session, transcript).catch((error) => console.error(`[cc-sessions] ${session.id}: cutting the claude that outlived the restart failed: ${error instanceof Error ? error.message : String(error)}`));
       continue;
     }
     if (step === "follow") {
@@ -11945,6 +12130,11 @@ function followSurvivingSessions(): void {
     const ended = transcript !== null && transcriptTurnEnded(transcript);
     const report = transcript ? lastAssistantText(transcript) : "";
     const pid = session.proc?.pid;
+    ccGateWaits.delete(session.id);
+    survivorGateCheckedAt.delete(session.id);
+    survivorGatesSeen.delete(session.id);
+    // its turn ended by itself: a flag of an earlier cut would make the next cut look like a second one (INSP-R13res A3)
+    delete session.resumedAfterCut;
     ccLedger.finishTurn(session, ended
       ? { ok: true, report, costUsd: 0 }
       : { ok: false, report, costUsd: 0, error: `its claude (PID ${pid ?? "?"}), which outlived the server restart, ended without finishing its turn (no turn end in its transcript); resume it with cc_session_send` });
