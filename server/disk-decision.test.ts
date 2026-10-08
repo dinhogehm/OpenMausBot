@@ -719,9 +719,19 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     // R6-1: any bot item about worktrees — not only a mixed one — gets the server's note on a removal ask
     const disk0410 = { title: "Decidir como liberar disco: está em 4 GiB livres", why: "3 worktrees órfãs em .claude/worktrees e cache de CI", steps: [{ text: "Ver tamanho", command: "du -sh ~/Projetos/nuria-platform/.claude/worktrees/*" }] };
     expect(d.asksBotItemRemoval("pode salvar as órfãs no GitHub e remover, e pode apagar o cache antigo de CI", disk0410)).toBe(true);
-    expect(d.asksBotItemRemoval("Removi as órfãs no terminal", disk0410)).toBe(false);
+    // INSP-R13int I1/I2: any answer to an item about worktrees carries the note, whatever its verbs
+    for (const answer of ["Removi a 9378; remova também a merge-deploy", "Apaguei o cache; agora apague as worktrees órfãs",
+      "Não removi nada; remova você", "Exclui a worktree X", "Sim", "Concordo, faça isso", "pode deletar", "tira",
+      "rode rm -rf …/.claude/worktrees/merge-deploy", "Removi as órfãs no terminal"]) {
+      expect(d.asksBotItemRemoval(answer, disk0410), answer).toBe(true);
+    }
+    // an item that never mentions worktrees, answered without the word: no note
     expect(d.asksBotItemRemoval("Pode remover o arquivo de log", { title: "Logs grandes", steps: [] })).toBe(false);
     expect(d.asksBotItemRemoval("Pode remover a worktree OpenMausBot-r13fol", { title: "Disco", steps: [] })).toBe(true);
+    // I4: sibling checkouts under ~/Projetos, with no "worktree" word, still count
+    expect(d.itemTalksWorktrees({ title: "Liberar espaço", steps: [{ text: "Ver", command: "du -sh ~/Projetos/OpenMausBot-r13fol" }] })).toBe(true);
+    // I2: the label of a decision counts too
+    expect(d.itemTalksWorktrees({ title: "Disco", options: [{ label: "Remover worktrees", reply: "Pode." }] })).toBe(true);
     expect(d.DISK_BOT_ITEM_NOT_AUTHORIZED).toMatch(/não autoriza remover nenhuma worktree/);
     // an answer to the bot's item about the folders taken to the server authorizes nothing
     expect(d.answerTouchesMoved("pode remover a 9378 também", [w9378], [w9378])).toBe(true);

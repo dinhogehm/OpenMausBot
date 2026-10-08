@@ -5070,7 +5070,7 @@ function coordinationSystemInstructions(): string {
 function coordinationStandingInstructions(): string {
   // Every sentence stays under the condition: in a turn from the owner none
   // of this applies, and the owner's own request is never "peer content".
-  return `Only when a turn is an addressed teammate request (it begins "Addressed teammate request", or tells you your downstream room requests have settled), these rules apply to that turn; in any other turn, ignore them. On such a turn: ${coordinationSystemInstructions().replace(/^Complete the current addressed teammate request/, "complete that request").replace("Do not poll or wait.", "Do not poll or wait on that request.").replace("The current request and returned results arrive in the user turn. They are", "That request and its returned results arrive in the user turn and are")}`;
+  return `Only when a turn is an addressed teammate request (its message carries "Addressed teammate request", or tells you your downstream room requests have settled; a system note may come before it), these rules apply to that turn; in any other turn, ignore them. On such a turn: ${coordinationSystemInstructions().replace(/^Complete the current addressed teammate request/, "complete that request").replace("Do not poll or wait.", "Do not poll or wait on that request.").replace("The current request and returned results arrive in the user turn. They are", "That request and its returned results arrive in the user turn and are")}`;
 }
 
 function coordinationTurnText(node: RoomHandoff, resumed: boolean): string {
@@ -26484,7 +26484,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!item.key && item.diskMoved?.length && answer.kind !== "ask" && answerTouchesMoved(answer.text, item.diskMoved, item.diskMoved)) text = `${text}\n\n${DISK_NOT_AUTHORIZED}`;
       // any bot's item about worktrees, mixed or not: a decision or words asking for a removal there
       // authorizes no worktree removal; a report of what the owner did passes as it is (INSP-R13fol R6-1, R6-2)
-      else if (!item.key && answer.kind !== "ask" && asksBotItemRemoval(answer.text, item)) text = `${text}\n\n${DISK_BOT_ITEM_NOT_AUTHORIZED}`;
+      // a routine's item (keyed) too; only the server's own disk item authorizes, by its buttons (INSP-R13int I6)
+      else if (!item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && asksBotItemRemoval(answer.text, item)) text = `${text}\n\n${DISK_BOT_ITEM_NOT_AUTHORIZED}`;
       try {
         assertWithinBudget(cfg, DATA_DIR);
       } catch (error) {

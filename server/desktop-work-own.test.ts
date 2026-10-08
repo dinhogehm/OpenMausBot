@@ -494,7 +494,7 @@ describe("the chips on the folder before: the cli on the first such give-up (INS
     expect(session.desktop!.cliFallback).toMatchObject({ sessionId: "c11a0000-0000-4000-8000-000000000000" });
     expect(session.lastError).toContain("The Claude app did not open the session in the right folder, so the server started the same brief in the CLI as session c11a0000-0000-4000-8000-000000000000;");
     expect(h.chips.map((chip) => chip.text)).toEqual(expect.arrayContaining([
-      "parou com um problema — o app abriu a sessão nova na pasta anterior, não na worktree do OMB",
+      "parou com um problema — o app abriu a sessão nova na pasta anterior, não na worktree do OpenMausBot",
       "o app não abriu na pasta certa; segui pela linha de comando (sessão c11a0000)",
     ]));
     expect(sessionErrorPt(session.lastError!)).toBe("o app não abriu na pasta certa; segui pela linha de comando (sessão c11a0000)");

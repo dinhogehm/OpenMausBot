@@ -150,17 +150,18 @@ export function answerTouchesMoved(text: string, moved: readonly string[], folde
 }
 
 /** An item of a bot (no server key) that is about worktrees: its words or commands name one. */
-export function itemTalksWorktrees(item: { title?: string; why?: string; command?: string; steps?: readonly { text: string; command?: string }[] }): boolean {
-  const said = [item.title, item.why, item.command, ...(item.steps ?? []).flatMap((step) => [step.text, step.command])].filter(Boolean).join("\n");
-  return WORKTREE_WORD.test(said) || /\/\.claude\/worktrees\//.test(said);
+export function itemTalksWorktrees(item: { title?: string; why?: string; command?: string; steps?: readonly { text: string; command?: string }[]; options?: readonly { label: string; reply: string }[] }): boolean {
+  const said = [item.title, item.why, item.command, ...(item.steps ?? []).flatMap((step) => [step.text, step.command]), ...(item.options ?? []).flatMap((option) => [option.label, option.reply])].filter(Boolean).join("\n");
+  // the word, a worktree folder, or a sibling checkout under ~/Projetos named like one (INSP-R13int I4)
+  return WORKTREE_WORD.test(said) || /\/\.claude\/worktrees\/|\/\.worktrees\//.test(said) || /\/Projetos\/[\w.]+-[\w.-]+/.test(said);
 }
 
-/** An answer to a bot's item that asks for a removal there (a decision or words; not a report of
- * what the owner did) while that item is about worktrees: the server says it authorizes no worktree
- * removal, whatever kind of item it is (INSP-R13fol R6-1: "Órfãs + cache" in a non-mixed item). */
+/** Any answer to a bot's item about worktrees, whatever its words ("Sim", "Concordo", "Removi a X;
+ * remova a Y", a label that says it): the server adds that the item authorizes no worktree removal.
+ * Reading the verbs missed requests next to reports (INSP-R13int I1, I2); the note is harmless on a
+ * plain report, so it goes on every answer but a request for steps or a recommendation. */
 export function asksBotItemRemoval(answerText: string, item: Parameters<typeof itemTalksWorktrees>[0]): boolean {
-  if (reportsOwnRemoval(answerText) || !REMOVAL_WORD.test(answerText)) return false;
-  return WORKTREE_WORD.test(answerText) || itemTalksWorktrees(item);
+  return itemTalksWorktrees(item) || WORKTREE_WORD.test(answerText);
 }
 
 export const DISK_BOT_ITEM_NOT_AUTHORIZED = "[Servidor: este item do bot não autoriza remover nenhuma worktree, por decisão ou por texto. Não remova worktree por ele; a remoção de worktree só sai de um item de disco do servidor, pelos botões dele (uso, segredos e push conferidos no Mac). O resto da decisão vale.]";
