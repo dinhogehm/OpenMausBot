@@ -87,12 +87,20 @@ Account bearer tokens are rejected.
   recoverable from GET or D1. After an idle reclaim the same call allocates a
   new tunnel behind the **same hostname**, so a paired phone keeps its
   address; it may also take back an endpoint whose reclaim is still pending.
+  The desktop app (Remote access on) and `openmausbot serve --tunnel` ask
+  `GET` every 15 minutes, even while their connector reports ready, and make
+  this call when the endpoint is gone or in `error`; a `401` from `GET` (the
+  90-day installation credential expired) sends them through account
+  recovery, or to a "sign-in expired" prompt.
 - When Cloudflare's tunnel quota (`1045`) or the zone's DNS record quota
   (`81045`) refuses an allocation, `POST` returns
   `503 endpoint_capacity` with `Retry-After: 600`. For the next ten minutes
   (or until scheduled cleanup frees a resource) further allocations that
   would need a new tunnel are answered the same way without calling
-  Cloudflare, protecting the shared API budget. Every other provider failure
+  Cloudflare, protecting the shared API budget. When Cloudflare's API rate
+  limit answers `429` (`cf_rate_limited`), `POST` returns
+  `503 endpoint_rate_limited` with Cloudflare's `Retry-After` clamped to
+  30–300 seconds (60 when Cloudflare sent none). Every other provider failure
   remains `502 endpoint_unavailable`.
 - `DELETE` removes DNS first and then the tunnel. It returns `204` when done or
   when already deleted. A partial Cloudflare failure returns
@@ -198,7 +206,9 @@ on them; a full quota must not hide sign-in or recovery) and adds a
 ```
 
 `status` is `full` while a recent quota rejection is gating allocations,
-`unknown` when the snapshot is more than 30 minutes old.
+`unknown` when the snapshot is more than 30 minutes old. Each Cloudflare data
+center reuses one read of the snapshot for up to two minutes, so `capacity`
+can trail D1 by that long; allocation gating always reads D1.
 
 ## Local checks
 
@@ -226,8 +236,10 @@ Do not commit `.dev.vars`.
 
 `endpoint_capacity` means Cloudflare refused a new tunnel (`cf_api_1045`) or
 DNS record (`cf_api_81045`): see **Tunnel capacity and idle reclaim** and the
-`capacity` object in `/healthz`. `endpoint_unavailable` is every other
-failure. Both come from authenticated endpoint provisioning, before
+`capacity` object in `/healthz`. `endpoint_rate_limited` means Cloudflare's
+API rate limit (shared by every request this Worker makes) pushed back; it
+clears on its own within minutes. `endpoint_unavailable` is every other
+failure. All three come from authenticated endpoint provisioning, before
 the desktop starts its connector or a phone connects. A successful `/healthz`
 response only validates Worker configuration; it does **not** check provider
 capacity, API permissions, DNS writes, or tunnel creation. A reachable LAN

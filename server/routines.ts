@@ -107,7 +107,8 @@ export interface Routine {
   /** Conversation that created this routine in chat. Calendar/import-created
    * routines intentionally have no source, and older files migrate in place. */
   sourceThreadId?: string;
-  /** Stable visible report destination; execution still gets a fresh task. */
+  /** Stable visible report destination (the bot's main thread unless the
+   * person chose another); execution still gets a fresh task. */
   resultsThreadId?: string;
   /** Server-private: added from the organization's library. Never on the
    * wire (routineWithHealth drops it); packageStamps() reads it. */
@@ -241,7 +242,7 @@ export interface RoutineInput {
   attachments?: RoutineContextAttachment[];
   continuity?: boolean;
   overlap?: "skip" | "queue";
-  /** Omission preserves routing; null creates a new dedicated results task. */
+  /** Omission preserves routing; null resets it to the bot's main thread. */
   resultsThreadId?: string | null;
 }
 
@@ -282,14 +283,15 @@ export interface RoutineManagerOptions {
   /** `routineId`: which routine asks (the intake lock times each one apart). */
   botState: (botId: string, routineId?: string) => "ready" | "busy" | "missing";
   goalState?: (groupId: string, coordinatorBotId: string) => "ready" | "busy" | "missing";
-  /** A task for one run of `routineId` (it may name who the run is for). */
-  createTask: (botId: string, title: string, activate?: boolean, routineId?: string) => { threadId: string } | null;
+  /** A task for one run (it may name who the run is for). */
+  createTask: (botId: string, title: string, activate?: boolean, run?: RoutineRun) => { threadId: string } | null;
   /** When set, run this bot's routine in that existing conversation instead of
    * a new hidden task. Room goals never use it. */
   joinConversation?: (run: RoutineRun) => string | null;
   createGoalTask?: (groupId: string, title: string) => { threadId: string } | null;
   isResultsThread?: (botId: string, threadId: string) => boolean;
-  /** Reuse routine.resultsThreadId, keep a trusted chat source, or allocate a new ID. */
+  /** Reuse a chosen routine.resultsThreadId, else the bot's main thread (a
+   * Cloud guest's routine may allocate its own). `forceNew` ignores the choice. */
   resolveResultsThread?: (routine: Routine, forceNew: boolean) => string | undefined;
   /** Compensate an uncommitted allocation, only while still empty. */
   discardResultsThread?: (botId: string, threadId: string) => void;
@@ -310,7 +312,7 @@ export interface RoutineManagerOptions {
     runId: string,
     onDispatchError: (message: string) => void,
   ) => Promise<void>;
-  interruptTurn?: (botId: string, threadId: string, runOn: RoutineRunOn) => Promise<void>;
+  interruptTurn?: (botId: string, threadId: string) => Promise<void>;
   interruptGoal?: (
     groupId: string,
     threadId: string,
@@ -633,7 +635,10 @@ function loadSchedule(value: unknown, after: number): RoutineSchedule | null {
   }
 }
 
-function intervalHasRestrictions(schedule: RoutineIntervalSchedule): boolean {
+/** Whether an interval only runs on some weekdays, in a window or until an end. */
+export function intervalHasRestrictions(
+  schedule: Pick<RoutineIntervalSchedule, "weekdays" | "window" | "endsAt">,
+): boolean {
   return schedule.weekdays !== undefined || schedule.window !== undefined || schedule.endsAt !== undefined;
 }
 
@@ -1191,7 +1196,7 @@ export class RoutineManager {
         if (run.target === "room-goal" && run.groupId) {
           void this.options.interruptGoal?.(run.groupId, run.threadId).catch(() => {});
         } else {
-          void this.options.interruptTurn?.(run.botId, run.threadId, run.runOn ?? "maus").catch(() => {});
+          void this.options.interruptTurn?.(run.botId, run.threadId).catch(() => {});
         }
       }
       changed = true;
@@ -1245,7 +1250,7 @@ export class RoutineManager {
     this.commitMutation(() => {
       run = this.newRun(routine, this.now(), true, allocations, request?.threadId ?? routine.sourceThreadId);
       // Preserve the invoking chat as provenance/fallback for this run.
-      // An explicitly configured results destination continues to win.
+      // The routine's results destination continues to win.
       if (request) run.sourceThreadId = request.threadId;
       if (request) this.rememberRoutineRequest(request, run.id, this.now());
     }, () => this.discardResultsThreads(allocations));
@@ -1386,7 +1391,7 @@ export class RoutineManager {
       if (run.target === "room-goal" && run.groupId) {
         await this.options.interruptGoal?.(run.groupId, run.threadId).catch(() => {});
       } else {
-        await this.options.interruptTurn?.(run.botId, run.threadId, run.runOn ?? "maus").catch(() => {});
+        await this.options.interruptTurn?.(run.botId, run.threadId).catch(() => {});
       }
     }
     queueMicrotask(() => void this.tick());
@@ -1460,7 +1465,7 @@ export class RoutineManager {
             detail,
           }).catch(() => {});
         } else {
-          await this.options.interruptTurn?.(run.botId, threadId, run.runOn ?? "maus").catch(() => {});
+          await this.options.interruptTurn?.(run.botId, threadId).catch(() => {});
         }
       }
       const dueRoutines = this.routines.filter(
@@ -1583,14 +1588,17 @@ export class RoutineManager {
         // A webhook is an incoming message, so make its task the bot's live
         // chat immediately. Scheduled work stays in its own task unless the
         // workspace has asked for runs to join the conversation they report to.
+        const startedAt = this.now();
+        const suffix = ` · ${new Date(startedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
+        const title = `${run.routineName.slice(0, 80 - suffix.length).trimEnd()}${suffix}`;
         const joined = run.target === "room-goal" ? null : this.options.joinConversation?.(run) || null;
         const task = joined
           ? { threadId: joined }
           : run.target === "room-goal"
           ? run.groupId
-            ? this.options.createGoalTask?.(run.groupId, run.routineName) ?? null
+            ? this.options.createGoalTask?.(run.groupId, title) ?? null
             : null
-          : this.options.createTask(run.botId, run.routineName, run.triggerSource === "webhook", run.routineId);
+          : this.options.createTask(run.botId, title, run.triggerSource === "webhook", run);
         if (!task) {
           this.failRun(run, run.target === "room-goal"
             ? "Could not create a room task for this goal"
@@ -1598,7 +1606,7 @@ export class RoutineManager {
           continue;
         }
         run.threadId = task.threadId;
-        run.startedAt = this.now();
+        run.startedAt = startedAt;
         run.status = "running";
         this.save();
         this.emitRun(run);
@@ -1681,7 +1689,14 @@ export class RoutineManager {
       if (event.cost != null) run.cost = (run.cost ?? 0) + event.cost;
       if (event.denials?.length) run.denials = [...new Set([...(run.denials ?? []), ...event.denials])];
       if (!event.ok) {
-        this.failRun(run, event.stopReason ?? run.error ?? "The bot did not complete this run");
+        const genericStopReason = event.stopReason === "error" || event.stopReason === "tool_error";
+        this.failRun(
+          run,
+          (genericStopReason ? run.error : undefined) ??
+            event.stopReason ??
+            run.error ??
+            "The bot did not complete this run",
+        );
         queueMicrotask(() => void this.tick());
         return cloneRun(run);
       }
@@ -1847,7 +1862,7 @@ export class RoutineManager {
     if (value === undefined) return;
     if (value === null) {
       const destination = this.options.resolveResultsThread?.(routine, true);
-      if (!destination) throw new Error("Could not create a results thread for this routine");
+      if (!destination) throw new Error("Could not find a results thread for this routine");
       routine.resultsThreadId = destination;
       return () => this.options.discardResultsThread?.(routine.botId, destination);
     }

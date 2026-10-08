@@ -2,11 +2,8 @@
 // strikethrough, autolinks) with a chromed code block — language label, copy
 // button, lazy Shiki highlighting. Model output never reaches the DOM as raw
 // HTML: no rehype-raw, so HTML in the text renders as text; Shiki's output is
-// generator-escaped. While a message is still streaming, a code block renders
-// as plain <pre> until its content has held still for STREAM_SETTLE_MS (the
-// fence is very likely complete), then highlights and caches — so the settled
-// bubble, a fresh component instance, mounts straight from cache instead of
-// popping from plain to highlighted.
+// generator-escaped. A message renders once it is finished, so a code block
+// highlights straight away and caches the result for the next mount.
 //
 // Bidi: message text is written in the user's or the model's language, which
 // is independent of the UI language, so every block resolves its own
@@ -15,11 +12,12 @@
 // exception: fenced blocks and inline spans pin dir="ltr" and isolate
 // themselves, so a snippet never reorders and never scrambles the RTL
 // sentence holding it.
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import Markdown, { defaultUrlTransform } from "react-markdown";
+import { createContext, memo, use, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import Markdown, { defaultUrlTransform, type Components, type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import { fromMarkdown, type Options as MarkdownParseOptions } from "mdast-util-from-markdown";
 import { Check, Copy, Download, LoaderCircle, RotateCcw, WrapText } from "lucide-react";
 import { remarkMentions, type MentionPeer } from "@/lib/mentions";
 
@@ -32,31 +30,43 @@ import {
   WRAP_ONE_LINE_OVER,
 } from "../lib/code-block";
 import { repairMarkdownTables } from "../lib/markdown-tables";
+import { TRANSCRIPT_WINDOW_SIZE } from "../lib/transcript-window";
 import { windowsPathDestinations } from "../../shared/markdown-windows-paths";
 import { looksLikeThreadRefUrl, parseThreadRefUrl, resolveThreadRefAddress, remarkThreadRefs } from "../lib/thread-refs";
-import { MarkdownImagePreview, useLocalFileSave, type MessageAttachmentContext } from "./AttachmentPreview";
-import { ThreadLink, threadLinkFromProps, useThreadRefs } from "./ThreadRefs";
+import { MarkdownImagePreview, OutsideWorkspaceFile, useLocalFileSave, type MessageAttachmentContext } from "./AttachmentPreview";
+import { ThreadLink, ThreadRefsContext, threadLinkFromProps, type ThreadRefsValue } from "./ThreadRefs";
+import { MarkdownTable } from "./MarkdownTable";
+import { TableFileButton } from "./TableFilePreview";
 import { t } from "../lib/i18n";
 
-// tiny highlight cache so revisiting a thread doesn't re-tokenize settled
-// blocks; keys are content-hashed and capped. Streamed partials may land here
-// under their own hash — harmless (never collides with the final content's
-// key, and the cap evicts it), and the final content's entry is exactly what
-// makes the settled bubble render highlighted on mount.
+// highlighted code, so revisiting a thread doesn't re-tokenize settled
+// blocks; keys are content hashes. The two-theme HTML is about 20 to 28 times
+// the size of the code, so the cache is bounded by size as well as by count
+// (200 large blocks alone held 23 MB). Past either bound the oldest go first.
 const highlightCache = new Map<string, string>();
-const CACHE_MAX = 200;
+export const HIGHLIGHT_CACHE_MAX = 200;
+// about 4 MB of HTML, counted in characters; 200 typical snippets take ~1 MB
+export const HIGHLIGHT_CACHE_MAX_CHARS = 4 * 1024 * 1024;
+function rememberHighlight(key: string, html: string) {
+  // one block bigger than the whole bound would only push everything else out
+  if (html.length > HIGHLIGHT_CACHE_MAX_CHARS) return;
+  highlightCache.set(key, html);
+  let chars = 0;
+  for (const cached of highlightCache.values()) chars += cached.length;
+  for (const [oldest, oldestHtml] of highlightCache) {
+    if (highlightCache.size <= HIGHLIGHT_CACHE_MAX && chars <= HIGHLIGHT_CACHE_MAX_CHARS) break;
+    highlightCache.delete(oldest);
+    chars -= oldestHtml.length;
+  }
+}
 // rendered mermaid SVGs, keyed by skin scheme + content hash so revisiting a
 // thread re-mounts straight from cache — same idea as highlightCache, smaller
-// cap because SVGs are bigger than token streams
+// cap because SVGs are bigger than highlighted code
 const mermaidCache = new Map<string, string>();
 const MERMAID_CACHE_MAX = 50;
 // every mermaid.render() call needs an id no earlier call used, including the
 // calls that failed and may have left an orphan element behind
 let mermaidRenderId = 0;
-// how long a streaming block's content must be unchanged before we spend a
-// tokenize on it — long enough to skip per-token churn mid-fence, short
-// enough that the highlight lands before the stream settles
-const STREAM_SETTLE_MS = 250;
 const hash = (s: string) => {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
@@ -65,6 +75,8 @@ const hash = (s: string) => {
   }
   return (h >>> 0).toString(36);
 };
+const highlightKey = (lang: string, code: string) => `${lang}:${hash(code)}`;
+const mermaidKey = (scheme: "dark" | "light", code: string) => `${scheme}:${hash(code)}`;
 
 // A markdown link whose target is a file on this machine: bots hand over
 // bot-created documents as absolute paths or file:// URLs. Web links stay
@@ -127,6 +139,17 @@ function remarkWindowsPathDestinations(this: { data(): object }) {
   const data = this.data() as { fromMarkdownExtensions?: unknown[] };
   (data.fromMarkdownExtensions ??= []).push(windowsPathDestinations);
 }
+
+// Reuse the renderer's installed GFM plugin, including literal autolinks.
+const gfmParseData: {
+  micromarkExtensions?: MarkdownParseOptions["extensions"];
+  fromMarkdownExtensions?: MarkdownParseOptions["mdastExtensions"];
+} = {};
+remarkGfm.call({ data: () => gfmParseData });
+const normalizationParseOptions: MarkdownParseOptions = {
+  extensions: gfmParseData.micromarkExtensions,
+  mdastExtensions: [...(gfmParseData.fromMarkdownExtensions ?? []), windowsPathDestinations],
+};
 
 function unwrapLinkedImages() {
   return (tree: { children?: any[] }) => {
@@ -200,8 +223,6 @@ export interface CodeBlockProps {
   code: string;
   /** Language identifier from markdown fence, e.g. "ts", "python". */
   lang: string;
-  /** Whether the parent message is still actively receiving tokens. */
-  streaming: boolean;
 }
 
 /**
@@ -209,11 +230,16 @@ export interface CodeBlockProps {
  * Features syntax highlighting with Shiki, language normalization badge,
  * line count indicator, word wrap toggle, and accessible clipboard copy with status feedback.
  *
- * @param props - Component props containing code string, language identifier, and streaming flag.
+ * @param props - Component props containing code string and language identifier.
  * @returns Rendered code block element.
  */
-export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
-  const [html, setHtml] = useState<string | null>(null);
+export function CodeBlock({ code, lang }: CodeBlockProps) {
+  // a block highlighted before (revisiting a thread) paints highlighted in
+  // its first frame instead of plain first and highlighted after the effect
+  const [html, setHtml] = useState<string | null>(() => highlightCache.get(highlightKey(lang, code)) ?? null);
+  // React compares dangerouslySetInnerHTML by identity: a fresh object each
+  // render would rebuild the highlighted DOM on every re-render
+  const markup = useMemo(() => (html ? { __html: html } : null), [html]);
   const [copied, setCopied] = useState(false);
   // a single long line (a command to copy) starts wrapped: never cut at the bubble's edge
   const [wrapLines, setWrapLines] = useState(() => countLines(code) === 1 && code.length > WRAP_ONE_LINE_OVER);
@@ -228,51 +254,33 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
   }, []);
 
   useEffect(() => {
-    const key = `${lang}:${hash(code)}`;
+    const key = highlightKey(lang, code);
     const cached = highlightCache.get(key);
     if (cached) return setHtml(cached);
     let alive = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const highlight = () => {
-      import("shiki")
-        .then((shiki) =>
-          shiki.codeToHtml(code, {
-            lang: lang || "text",
-            themes: {
-              light: "github-light-default",
-              dark: "github-dark-default",
-            },
-            defaultColor: "light-dark()",
-          }),
-        )
-        .then((out) => {
-          if (!alive) return;
-          if (highlightCache.size >= CACHE_MAX) {
-            const first = highlightCache.keys().next().value;
-            if (first) highlightCache.delete(first);
-          }
-          highlightCache.set(key, out);
-          setHtml(out);
-        })
-        .catch(() => {
-          /* unknown language or shiki failed — the plain <pre> stays */
-        });
-    };
-    if (streaming) {
-      // any earlier highlight is of a shorter snapshot — drop it so the
-      // growing plain <pre> shows the real content, then wait for the block
-      // to hold still. The effect re-runs (and this cleanup clears the timer)
-      // on every content change, which is the debounce.
-      setHtml(null);
-      timer = setTimeout(highlight, STREAM_SETTLE_MS);
-    } else {
-      highlight();
-    }
+    import("shiki")
+      .then((shiki) =>
+        shiki.codeToHtml(code, {
+          lang: lang || "text",
+          themes: {
+            light: "github-light-default",
+            dark: "github-dark-default",
+          },
+          defaultColor: "light-dark()",
+        }),
+      )
+      .then((out) => {
+        if (!alive) return;
+        rememberHighlight(key, out);
+        setHtml(out);
+      })
+      .catch(() => {
+        /* unknown language or shiki failed — the plain <pre> stays */
+      });
     return () => {
       alive = false;
-      if (timer !== undefined) clearTimeout(timer);
     };
-  }, [code, lang, streaming]);
+  }, [code, lang]);
 
   const copy = () => {
     if (!navigator.clipboard?.writeText) return;
@@ -360,14 +368,14 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
           </button>
         </div>
       </div>
-      {html ? (
+      {markup ? (
         <div
           className={`text-[13px] leading-relaxed [&_pre]:!bg-transparent [&_pre]:m-0 [&_pre]:p-3 ${
             wrapLines
               ? "whitespace-pre-wrap break-words overflow-x-hidden [&_pre]:!whitespace-pre-wrap [&_pre]:!break-words [&_code]:!whitespace-pre-wrap [&_code]:!break-words"
               : "overflow-x-auto"
           }`}
-          dangerouslySetInnerHTML={{ __html: html }}
+          dangerouslySetInnerHTML={markup}
         />
       ) : (
         <pre
@@ -402,8 +410,6 @@ function mermaidScheme(element: HTMLElement | null): "dark" | "light" {
 export interface MermaidDiagramProps {
   /** Mermaid diagram source from a fenced code block. */
   code: string;
-  /** Whether the parent message is still actively receiving tokens. */
-  streaming: boolean;
 }
 
 const MERMAID_FONT = '"Inter", -apple-system, BlinkMacSystemFont, "SF UI Text", "Segoe UI", system-ui, sans-serif';
@@ -414,16 +420,20 @@ const MERMAID_FONT = '"Inter", -apple-system, BlinkMacSystemFont, "SF UI Text", 
  * actually appears — the same lazy pattern Shiki uses. The SVG
  * mermaid.render() returns under securityLevel "strict" is the only thing
  * injected; a diagram that fails to parse falls back to its source with the
- * error above it, and a still-streaming block stays plain source so a
- * half-arrived diagram never flashes a parse error.
+ * error above it.
  *
- * @param props - Component props containing the mermaid source and streaming flag.
+ * @param props - Component props containing the mermaid source.
  * @returns Rendered diagram, or the source with the parse error.
  */
-export function MermaidDiagram({ code, streaming }: MermaidDiagramProps) {
+export function MermaidDiagram({ code }: MermaidDiagramProps) {
   const frame = useRef<HTMLDivElement | null>(null);
   const [skinEpoch, setSkinEpoch] = useState(0);
-  const [svg, setSvg] = useState<string | null>(null);
+  // a diagram drawn before paints in its first frame, in the page's scheme;
+  // the effect below re-checks the scheme against the frame itself
+  const [svg, setSvg] = useState<string | null>(() =>
+    mermaidCache.get(mermaidKey(mermaidScheme(typeof document === "undefined" ? null : document.documentElement), code)) ?? null);
+  // stable for the same SVG, so a re-render keeps the drawn diagram's DOM
+  const markup = useMemo(() => (svg ? { __html: svg } : null), [svg]);
   const [error, setError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -441,7 +451,7 @@ export function MermaidDiagram({ code, streaming }: MermaidDiagramProps) {
 
   useEffect(() => {
     const scheme = mermaidScheme(frame.current);
-    const key = `${scheme}:${hash(code)}`;
+    const key = mermaidKey(scheme, code);
     const cached = mermaidCache.get(key);
     if (cached) {
       setSvg(cached);
@@ -449,52 +459,37 @@ export function MermaidDiagram({ code, streaming }: MermaidDiagramProps) {
       return;
     }
     let alive = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const render = () => {
-      import("mermaid")
-        .then((module) => {
-          mermaidRenderId += 1;
-          module.default.initialize({
-            startOnLoad: false,
-            securityLevel: "strict",
-            suppressErrorRendering: true,
-            theme: scheme === "light" ? "default" : "dark",
-            fontFamily: MERMAID_FONT,
-          });
-          return module.default.render(`omb-mermaid-${mermaidRenderId}`, code);
-        })
-        .then((out) => {
-          if (!alive) return;
-          if (mermaidCache.size >= MERMAID_CACHE_MAX) {
-            const first = mermaidCache.keys().next().value;
-            if (first) mermaidCache.delete(first);
-          }
-          mermaidCache.set(key, out.svg);
-          setSvg(out.svg);
-          setError(null);
-        })
-        .catch((cause: unknown) => {
-          // a streaming diagram is probably just incomplete: keep the source
-          // up and stay quiet until the stream settles and re-runs this effect
-          if (!alive || streaming) return;
-          const message = cause instanceof Error ? cause.message : String(cause);
-          setError(message.length > 300 ? `${message.slice(0, 300)}…` : message);
+    import("mermaid")
+      .then((module) => {
+        mermaidRenderId += 1;
+        module.default.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          suppressErrorRendering: true,
+          theme: scheme === "light" ? "default" : "dark",
+          fontFamily: MERMAID_FONT,
         });
-    };
-    if (streaming) {
-      // an earlier render is of a shorter snapshot — drop it so the growing
-      // source shows the real content, then wait for the block to hold still
-      setSvg(null);
-      setError(null);
-      timer = setTimeout(render, STREAM_SETTLE_MS);
-    } else {
-      render();
-    }
+        return module.default.render(`omb-mermaid-${mermaidRenderId}`, code);
+      })
+      .then((out) => {
+        if (!alive) return;
+        if (mermaidCache.size >= MERMAID_CACHE_MAX) {
+          const first = mermaidCache.keys().next().value;
+          if (first) mermaidCache.delete(first);
+        }
+        mermaidCache.set(key, out.svg);
+        setSvg(out.svg);
+        setError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!alive) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(message.length > 300 ? `${message.slice(0, 300)}…` : message);
+      });
     return () => {
       alive = false;
-      if (timer !== undefined) clearTimeout(timer);
     };
-  }, [code, streaming, skinEpoch]);
+  }, [code, skinEpoch]);
 
   useEffect(() => {
     return () => {
@@ -570,10 +565,10 @@ export function MermaidDiagram({ code, streaming }: MermaidDiagramProps) {
           Diagram could not be rendered: {error}
         </p>
       )}
-      {svg && (
+      {markup && (
         <div
           className="overflow-x-auto p-3 [&_svg]:!max-w-full"
-          dangerouslySetInnerHTML={{ __html: svg }}
+          dangerouslySetInnerHTML={markup}
         />
       )}
       {(showSource || !svg || error) && (
@@ -605,6 +600,7 @@ function LocalFileLink({ filePath, children, message }: { filePath: string; chil
 
   return (
     <span dir="ltr" className="inline-flex flex-wrap items-center gap-x-1.5 [unicode-bidi:isolate]">
+      <TableFileButton path={filePath} name={filePath.split(/[\\/]/).at(-1) ?? filePath} message={message} />
       <button
         type="button"
         onClick={() => void save.save()}
@@ -630,6 +626,11 @@ function LocalFileLink({ filePath, children, message }: { filePath: string; chil
           className={`text-[12px] ${save.state === "saved" ? "text-success" : save.state === "failed" ? "text-danger" : "text-ink-secondary"}`}
         >
           {save.state === "failed" ? save.reason : label}
+        </span>
+      )}
+      {save.state === "failed" && save.outsideWorkspace && (
+        <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[12px]">
+          <OutsideWorkspaceFile filePath={filePath} />
         </span>
       )}
     </span>
@@ -702,219 +703,316 @@ function Spoiler({ children }: { children?: ReactNode }) {
 
 const NO_MENTION_PEERS: readonly MentionPeer[] = [];
 
-// A markdown image resolves its attachment by source offset, so a message
-// holding one must reach the parser byte-for-byte as written.
+// A markdown image resolves its attachment by its original source offset.
 const MARKDOWN_IMAGE = "![";
 
-/** Replace CommonMark fenced code blocks with opaque tokens while text is normalized. */
-function protectFencedCode(text: string, protect: (value: string) => string): string {
-  const opener =
-    /(^|\r?\n)((?: {0,3}>[ \t]?)* {0,3})(?:(`{3,})([^`\r\n]*)|(~{3,})([^\r\n]*))(?:\r?\n|$)/g;
-  let cursor = 0;
-  let tokenized = "";
-  let match: RegExpExecArray | null;
+// A currency sign glued to its code and followed by an amount ("R$ 120",
+// "US$5") is money, never a math delimiter.
+const CURRENCY_DOLLAR = /(?<![$\p{L}\p{N}])(?:R|US|AU|A|CA|C|NZ|HK|SG|S|MX|NT|BZ|Z)\$(?=[ \t\u00a0]?\d)/gu;
 
-  while ((match = opener.exec(text)) !== null) {
-    const fence = match[3] ?? match[5];
-    const fenceCharacter = fence[0];
-    const closer = new RegExp(
-      `(^|\\r?\\n)(?: {0,3}>[ \\t]?)* {0,3}${fenceCharacter}{${fence.length},}[ \\t]*(?=\\r?\\n|$)`,
-      "g",
-    );
-    closer.lastIndex = opener.lastIndex;
-    const closingMatch = closer.exec(text);
-    const end = closingMatch === null
-      ? text.length
-      : closingMatch.index + closingMatch[0].length;
-    tokenized += text.slice(cursor, match.index);
-    tokenized += protect(text.slice(match.index, end));
-    cursor = end;
-    opener.lastIndex = end;
+/** Escape every single `$` that cannot delimit inline math, so prices such as
+ * "$5 and $10" or "R$ 120 ... R$ 120" stay prose instead of turning the text
+ * between them into a formula. Follows Pandoc's rule: an opening `$` is
+ * followed by non-space, a closing `$` is preceded by non-space and not
+ * followed by a digit, and the pair stays inside one paragraph. A `$` that
+ * fails as a closer abandons the open span rather than skipping past it. */
+function escapeLiteralDollars(text: string): string {
+  const display: string[] = [];
+  const hidden = text
+    .replace(/\$\$[\s\S]*?\$\$/g, (math) => `\u0000OMB_MATH_${display.push(math) - 1}\u0000`)
+    .replace(CURRENCY_DOLLAR, (sign) => `${sign.slice(0, -1)}\\$`);
+  const literal = new Set<number>();
+  const singles: number[] = [];
+  for (let i = 0; i < hidden.length; i++) {
+    if (hidden[i] === "\\") i++;
+    else if (hidden[i] === "$") singles.push(i);
   }
-
-  return tokenized + text.slice(cursor);
+  let open: number | null = null;
+  for (const at of singles) {
+    if (open !== null) {
+      const closes = !/\s/.test(hidden[at - 1]) && !/\d/.test(hidden[at + 1] ?? "")
+        && !/\n[ \t]*\n/.test(hidden.slice(open, at));
+      if (closes) { open = null; continue; }
+      literal.add(open);
+    }
+    open = /\S/.test(hidden[at + 1] ?? "") ? at : null;
+    if (open === null) literal.add(at);
+  }
+  if (open !== null) literal.add(open);
+  let escaped = "";
+  for (let i = 0; i < hidden.length; i++) escaped += literal.has(i) ? "\\$" : hidden[i];
+  display.forEach((math, index) => {
+    escaped = escaped.split(`\u0000OMB_MATH_${index}\u0000`).join(math);
+  });
+  return escaped;
 }
 
 /** Convert the TeX delimiters models commonly emit into remark-math syntax.
  * Fenced and inline code are protected so examples such as `\\(x\\)` remain
- * literal. Unmatched delimiters are left untouched while a response streams. */
-export function normalizeMathDelimiters(text: string): string {
-  const protectedCode: string[] = [];
-  const protect = (value: string): string => {
+ * literal. Unmatched delimiters are left untouched, and dollar signs that
+ * read as money are escaped. */
+export function normalizeMathDelimiters(text: string, imageOffsets?: Map<number, number>): string {
+  const protectedCode: Array<{ value: string; sourceOffset: number }> = [];
+  const protect = (value: string, sourceOffset: number): string => {
     const token = `\u0000OMB_CODE_${protectedCode.length}\u0000`;
-    protectedCode.push(value);
+    protectedCode.push({ value, sourceOffset });
     return token;
   };
-  const tokenized = protectFencedCode(text, protect)
-    .replace(/(`+)[\s\S]*?\1/g, protect);
-  let normalized = tokenized
+  const spans: Array<{ start: number; end: number }> = [];
+  const imageStarts: number[] = [];
+  const visit = (node: { type: string; children?: any[]; position?: { start: { offset?: number }; end: { offset?: number } } }, protectedParent = false) => {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    const image = node.type === "image" || node.type === "imageReference";
+    if (image && start !== undefined) imageStarts.push(start);
+    // Explicit links leave their labels available for math normalization;
+    // protect only the trailing destination syntax. Autolinks stay intact.
+    const labelEnd = node.type === "link" && start !== undefined && text[start] === "["
+      ? node.children?.at(-1)?.position?.end.offset : undefined;
+    const protectedNode = node.type === "code" || node.type === "inlineCode" || node.type === "definition" || node.type === "linkReference" || node.type === "link" || (imageOffsets !== undefined && image);
+    if (!protectedParent && protectedNode && start !== undefined && end !== undefined) {
+      spans.push({ start: labelEnd ?? start, end });
+    }
+    node.children?.forEach((child) => visit(child, protectedParent || (protectedNode && labelEnd === undefined)));
+  };
+  visit(fromMarkdown(text, normalizationParseOptions));
+  for (const { start, end } of spans.sort((a, b) => b.start - a.start)) {
+    text = text.slice(0, start) + protect(text.slice(start, end), start) + text.slice(end);
+  }
+  let normalized = text
     .replace(/\\\[([\s\S]*?)\\\]/g, (_match, math: string) => `$$\n${math}\n$$`)
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, math: string) => `$${math}$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, math: string) => `$${math.trim()}$`)
     // remark-math treats flow math as a block only when the fences occupy
     // their own lines; accept the compact form models commonly produce.
     .replace(/\$\$[ \t]*([^\n][\s\S]*?)[ \t]*\$\$/g, (_match, math: string) => `$$\n${math}\n$$`);
-  protectedCode.forEach((value, index) => {
-    normalized = normalized.split(`\u0000OMB_CODE_${index}\u0000`).join(value);
+  normalized = escapeLiteralDollars(normalized);
+  let shift = 0;
+  // oxlint-disable-next-line no-control-regex -- restore opaque code and image sentinels
+  normalized = normalized.replace(/\u0000OMB_CODE_(\d+)\u0000/g, (token, index: string, at: number) => {
+    const part = protectedCode[Number(index)];
+    if (!part) return token;
+    const { value, sourceOffset } = part;
+    // A protected reference link can contain images of its own. Their raw
+    // positions stay relative to that unchanged span when it is restored.
+    for (const imageOffset of imageStarts) {
+      if (imageOffset >= sourceOffset && imageOffset < sourceOffset + value.length) {
+        imageOffsets?.set(at + shift + imageOffset - sourceOffset, imageOffset);
+      }
+    }
+    shift += value.length - token.length;
+    return value;
   });
   return normalized;
 }
 
+// Table repair and math normalization each parse the whole message on top of
+// react-markdown's own parse, and what they produce depends on the text alone.
+// Keep it per text, so a bubble that renders again (a thread list change under
+// a message holding a '#') or mounts again (a thread revisited, the raw view
+// toggled off) skips both parses. Two transcript windows' worth: the open
+// thread and the one before it.
+const normalizedCache = new Map<string, Pick<MessageScope, "imageOffsets"> & { source: string }>();
+const NORMALIZED_CACHE_MAX = TRANSCRIPT_WINDOW_SIZE * 2;
+
+function normalizeMessageMarkdown(text: string) {
+  const cached = normalizedCache.get(text);
+  if (cached) return cached;
+  // A near-miss table from a model renders as an unreadable run of pipes
+  // unless it is repaired before parsing. Table repair moves image source
+  // offsets, so image messages skip that repair but still normalize math.
+  const imageOffsets = text.includes(MARKDOWN_IMAGE) ? new Map<number, number>() : undefined;
+  const source = normalizeMathDelimiters(imageOffsets ? text : repairMarkdownTables(text), imageOffsets);
+  if (normalizedCache.size >= NORMALIZED_CACHE_MAX) {
+    const first = normalizedCache.keys().next().value;
+    if (first !== undefined) normalizedCache.delete(first);
+  }
+  const normalized = { source, imageOffsets };
+  normalizedCache.set(text, normalized);
+  return normalized;
+}
+
+/** What a message's element renderers need from that message. The renderers
+ * are defined once, below: react-markdown makes each one an element type,
+ * and a fresh function per render would hand React a new type for every
+ * element, so a re-render with unchanged text would throw the whole message
+ * away and build it again (code highlights, wrap, copy, spoiler and save
+ * state included). Per-message values reach them through this context. */
+interface MessageScope {
+  message?: MessageAttachmentContext;
+  /** markdown image offsets after math normalization → offsets in the stored text */
+  imageOffsets?: Map<number, number>;
+  threads: ThreadRefsValue["threads"];
+  currentBotId?: string;
+}
+
+const MessageScopeContext = createContext<MessageScope>({ threads: [] });
+
+function MarkdownCode({ children }: { children?: ReactNode }) {
+  // fenced code arrives as <pre><code class="language-x">…</code></pre>
+  const child: any = Array.isArray(children) ? children[0] : children;
+  const className: string = child?.props?.className ?? "";
+  const lang = /language-([^\s]+)/.exec(className)?.[1] ?? "";
+  // children can be a string OR an array of strings/nodes — flatten
+  // strings only, so String() never comma-joins an array
+  const flat = (n: any): string =>
+    typeof n === "string" ? n : Array.isArray(n) ? n.map(flat).join("") : (n?.props?.children ? flat(n.props.children) : "");
+  const code = flat(child?.props?.children).replace(/\n$/, "");
+  // a mermaid fence is a picture, not a program: hand it to the
+  // diagram renderer instead of the highlighter
+  if (lang.trim().toLowerCase() === "mermaid") {
+    return <MermaidDiagram code={code} />;
+  }
+  return <CodeBlock code={code} lang={lang} />;
+}
+
+function MarkdownImage(props: ComponentProps<"img"> & ExtraProps) {
+  const { message, imageOffsets } = useContext(MessageScopeContext);
+  const { src, alt } = props;
+  if (!src) {
+    return <span className="text-[12px] text-danger" role="alert">Image unavailable</span>;
+  }
+  const filePath = localFilePath(src) ?? undefined;
+  const sourceOffset = props.node?.position?.start.offset;
+  return (
+    <MarkdownImagePreview
+      src={src}
+      name={markdownImageName(src, alt)}
+      openUrl={markdownImageOpenUrl(typeof (props as Record<string, unknown>)["data-open-url"] === "string" ? String((props as Record<string, unknown>)["data-open-url"]) : src)}
+      filePath={filePath}
+      message={filePath ? message : undefined}
+      sourceOffset={sourceOffset === undefined ? undefined : imageOffsets?.get(sourceOffset) ?? sourceOffset}
+    />
+  );
+}
+
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const { threads, currentBotId, message } = useContext(MessageScopeContext);
+  // a canonical thread link is a chip whatever text carries it;
+  // a dead one keeps its label as plain text rather than handing
+  // the app's own scheme to the shell
+  const address = href ? parseThreadRefUrl(href) : null;
+  const ref = address ? resolveThreadRefAddress(threads, address, currentBotId) : null;
+  if (ref) return <ThreadLink target={ref} ambiguous={ref.ambiguous}>{children}</ThreadLink>;
+  if (address || (href && looksLikeThreadRefUrl(href))) return <span className="break-words">{children}</span>;
+  const localPath = localFilePath(href);
+  if (localPath) return <LocalFileLink filePath={localPath} message={message}>{children}</LocalFileLink>;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      dir="auto"
+      className="break-words text-accent underline decoration-accent/40 hover:decoration-accent [unicode-bidi:isolate]"
+    >
+      {children}
+    </a>
+  );
+}
+
+const MARKDOWN_COMPONENTS: Components = {
+  pre: MarkdownCode,
+  img: MarkdownImage,
+  code({ children }: { children?: ReactNode }) {
+    // break-words because a path or an identifier can be longer than
+    // the bubble is wide, and an unbreakable token has nowhere to go
+    // but outside it — off the left edge in a right-to-left paragraph,
+    // where the line ends.
+    return (
+      <code dir="ltr" className="rounded bg-inset px-1 py-px text-[13px] break-words [unicode-bidi:isolate]">{children}</code>
+    );
+  },
+  // markdown never emits a span itself (no raw HTML); the only
+  // spans are the ones our remark plugins produced — a thread link,
+  // or an @mention highlight that must keep its class and colour
+  span(props) {
+    // SAFETY: react-markdown hands hast data-* attributes through as string props
+    const link = threadLinkFromProps(props as Record<string, unknown>);
+    if (link) return <ThreadLink target={link.target} ambiguous={link.ambiguous}>{props.children}</ThreadLink>;
+    const { node: _node, children, ...rest } = props;
+    return <span {...rest}>{children}</span>;
+  },
+  a: MarkdownLink,
+  table({ node, children }: BlockProps) {
+    return <MarkdownTable direction={blockDirection(node)}>{children}</MarkdownTable>;
+  },
+  th({ children }: { children?: ReactNode }) {
+    return (
+      <th className="border-b border-hairline/40 px-2 py-1.5 text-start font-semibold">{children}</th>
+    );
+  },
+  td({ children }: { children?: ReactNode }) {
+    return <td className="border-b border-hairline/20 px-2 py-1.5 align-top">{children}</td>;
+  },
+  p({ node, children }: BlockProps) {
+    return <p dir={blockDirection(node)}>{children}</p>;
+  },
+  ul({ node, children }: BlockProps) {
+    return <ul dir={blockDirection(node)} className="list-disc space-y-1 ps-5">{children}</ul>;
+  },
+  ol({ node, children }: BlockProps) {
+    return <ol dir={blockDirection(node)} className="list-decimal space-y-1 ps-5">{children}</ol>;
+  },
+  h1({ node, children }: BlockProps) {
+    return <div dir={blockDirection(node)} className="mt-2 text-[16px] font-semibold">{children}</div>;
+  },
+  h2({ node, children }: BlockProps) {
+    return <div dir={blockDirection(node)} className="mt-2 text-[15.5px] font-semibold">{children}</div>;
+  },
+  h3({ node, children }: BlockProps) {
+    return <div dir={blockDirection(node)} className="mt-1.5 font-semibold">{children}</div>;
+  },
+  h4({ node, children }: BlockProps) {
+    return <div dir={blockDirection(node)} className="mt-1.5 font-semibold">{children}</div>;
+  },
+  h5({ node, children }: BlockProps) {
+    return <div dir={blockDirection(node)} className="mt-1.5 text-[14px] font-semibold">{children}</div>;
+  },
+  h6({ node, children }: BlockProps) {
+    return <div dir={blockDirection(node)} className="mt-1.5 text-[13.5px] font-semibold text-ink-secondary">{children}</div>;
+  },
+  blockquote({ node, children }: BlockProps) {
+    return (
+      <blockquote dir={blockDirection(node)} className="border-s-2 border-hairline ps-3 text-ink-secondary">{children}</blockquote>
+    );
+  },
+  del({ children }: { children?: ReactNode }) {
+    return <Spoiler>{children}</Spoiler>;
+  },
+  hr() {
+    return <hr className="border-hairline/40" />;
+  },
+};
+
+// A thread link only ever comes from a "#Title" run or a canonical
+// openmausbot://thread/ link, whatever case or escaping its scheme uses.
+const MAY_LINK_THREAD = /#|openmausbot/i;
+const NO_THREAD_REFS: ThreadRefsValue = { threads: [] };
+
 /** Render message Markdown with math, protected code, scoped attachments, and mentions. */
-function ChatMarkdownComponent({ text, streaming = false, message, mentionPeers = NO_MENTION_PEERS, everyone = false }: {
-  text: string; streaming?: boolean; message?: MessageAttachmentContext;
+function ChatMarkdownComponent({ text, message, mentionPeers = NO_MENTION_PEERS, everyone = false }: {
+  text: string; message?: MessageAttachmentContext;
   mentionPeers?: readonly MentionPeer[]; everyone?: boolean;
 }) {
   // "#Title" mentions link to the threads the person can see (ThreadRefs);
   // @mentions were already decorated by remarkMentions, which runs first.
-  const { threads, currentBotId } = useThreadRefs();
-  // A near-miss table from a model renders as an unreadable run of pipes
-  // unless it is repaired before parsing. Table repair moves image source
-  // offsets, so image messages skip that repair but still normalize math.
-  const source = normalizeMathDelimiters(text.includes(MARKDOWN_IMAGE)
-    ? text
-    : repairMarkdownTables(text));
+  // Only a message that can hold a thread link reads the thread list (use()
+  // may be called conditionally), so opening or renaming a thread, renaming
+  // a bot or changing the selection leaves every other bubble alone.
+  const { threads, currentBotId } = MAY_LINK_THREAD.test(text) ? use(ThreadRefsContext) : NO_THREAD_REFS;
+  const { source, imageOffsets } = normalizeMessageMarkdown(text);
   return (
-    <div className="chat-md min-w-0 [&>*+*]:mt-2">
-      <Markdown
-        remarkPlugins={[remarkGfm, remarkMath, remarkWindowsPathDestinations, unwrapLinkedImages, [remarkMentions, { peers: mentionPeers, everyone }], remarkThreadRefs(threads, currentBotId)]}
-        rehypePlugins={[rehypeKatex]}
-        urlTransform={chatUrlTransform}
-        components={{
-          pre({ children }: { children?: ReactNode }) {
-            // fenced code arrives as <pre><code class="language-x">…</code></pre>
-            const child: any = Array.isArray(children) ? children[0] : children;
-            const className: string = child?.props?.className ?? "";
-            const lang = /language-([^\s]+)/.exec(className)?.[1] ?? "";
-            // children can be a string OR an array of strings/nodes — flatten
-            // strings only, so String() never comma-joins an array
-            const flat = (n: any): string =>
-              typeof n === "string" ? n : Array.isArray(n) ? n.map(flat).join("") : (n?.props?.children ? flat(n.props.children) : "");
-            const code = flat(child?.props?.children).replace(/\n$/, "");
-            // a mermaid fence is a picture, not a program: hand it to the
-            // diagram renderer instead of the highlighter
-            if (lang.trim().toLowerCase() === "mermaid") {
-              return <MermaidDiagram code={code} streaming={streaming} />;
-            }
-            return <CodeBlock code={code} lang={lang} streaming={streaming} />;
-          },
-          img(props) {
-            const { src, alt } = props;
-            if (!src) {
-              return <span className="text-[12px] text-danger" role="alert">Image unavailable</span>;
-            }
-            const filePath = localFilePath(src) ?? undefined;
-            const sourceOffset = (props as { node?: { position?: { start?: { offset?: number } } } })
-              .node?.position?.start?.offset;
-            return (
-              <MarkdownImagePreview
-                src={src}
-                name={markdownImageName(src, alt)}
-                openUrl={markdownImageOpenUrl(typeof (props as Record<string, unknown>)["data-open-url"] === "string" ? String((props as Record<string, unknown>)["data-open-url"]) : src)}
-                filePath={filePath}
-                message={filePath ? message : undefined}
-                sourceOffset={sourceOffset}
-              />
-            );
-          },
-          code({ children }: { children?: ReactNode }) {
-            // break-words because a path or an identifier can be longer than
-            // the bubble is wide, and an unbreakable token has nowhere to go
-            // but outside it — off the left edge in a right-to-left paragraph,
-            // where the line ends.
-            return (
-              <code dir="ltr" className="rounded bg-inset px-1 py-px text-[13px] break-words [unicode-bidi:isolate]">{children}</code>
-            );
-          },
-          // markdown never emits a span itself (no raw HTML); the only
-          // spans are the ones our remark plugins produced — a thread link,
-          // or an @mention highlight that must keep its class and colour
-          span(props) {
-            // SAFETY: react-markdown hands hast data-* attributes through as string props
-            const link = threadLinkFromProps(props as Record<string, unknown>);
-            if (link) return <ThreadLink target={link.target} ambiguous={link.ambiguous}>{props.children}</ThreadLink>;
-            const { node: _node, children, ...rest } = props;
-            return <span {...rest}>{children}</span>;
-          },
-          a({ href, children }: { href?: string; children?: ReactNode }) {
-            // a canonical thread link is a chip whatever text carries it;
-            // a dead one keeps its label as plain text rather than handing
-            // the app's own scheme to the shell
-            const address = href ? parseThreadRefUrl(href) : null;
-            const ref = address ? resolveThreadRefAddress(threads, address, currentBotId) : null;
-            if (ref) return <ThreadLink target={ref} ambiguous={ref.ambiguous}>{children}</ThreadLink>;
-            if (address || (href && looksLikeThreadRefUrl(href))) return <span className="break-words">{children}</span>;
-            const localPath = localFilePath(href);
-            if (localPath) return <LocalFileLink filePath={localPath} message={message}>{children}</LocalFileLink>;
-            return (
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer"
-                dir="auto"
-                className="break-words text-accent underline decoration-accent/40 hover:decoration-accent [unicode-bidi:isolate]"
-              >
-                {children}
-              </a>
-            );
-          },
-          table({ node, children }: BlockProps) {
-            return (
-              <div className="overflow-x-auto">
-                <table dir={blockDirection(node)} className="w-full border-collapse text-[13.5px]">{children}</table>
-              </div>
-            );
-          },
-          th({ children }: { children?: ReactNode }) {
-            return (
-              <th className="border-b border-hairline/40 px-2 py-1.5 text-start font-semibold">{children}</th>
-            );
-          },
-          td({ children }: { children?: ReactNode }) {
-            return <td className="border-b border-hairline/20 px-2 py-1.5 align-top">{children}</td>;
-          },
-          p({ node, children }: BlockProps) {
-            return <p dir={blockDirection(node)}>{children}</p>;
-          },
-          ul({ node, children }: BlockProps) {
-            return <ul dir={blockDirection(node)} className="list-disc space-y-1 ps-5">{children}</ul>;
-          },
-          ol({ node, children }: BlockProps) {
-            return <ol dir={blockDirection(node)} className="list-decimal space-y-1 ps-5">{children}</ol>;
-          },
-          h1({ node, children }: BlockProps) {
-            return <div dir={blockDirection(node)} className="mt-2 text-[16px] font-semibold">{children}</div>;
-          },
-          h2({ node, children }: BlockProps) {
-            return <div dir={blockDirection(node)} className="mt-2 text-[15.5px] font-semibold">{children}</div>;
-          },
-          h3({ node, children }: BlockProps) {
-            return <div dir={blockDirection(node)} className="mt-1.5 font-semibold">{children}</div>;
-          },
-          h4({ node, children }: BlockProps) {
-            return <div dir={blockDirection(node)} className="mt-1.5 font-semibold">{children}</div>;
-          },
-          h5({ node, children }: BlockProps) {
-            return <div dir={blockDirection(node)} className="mt-1.5 text-[14px] font-semibold">{children}</div>;
-          },
-          h6({ node, children }: BlockProps) {
-            return <div dir={blockDirection(node)} className="mt-1.5 text-[13.5px] font-semibold text-ink-secondary">{children}</div>;
-          },
-          blockquote({ node, children }: BlockProps) {
-            return (
-              <blockquote dir={blockDirection(node)} className="border-s-2 border-hairline ps-3 text-ink-secondary">{children}</blockquote>
-            );
-          },
-          del({ children }: { children?: ReactNode }) {
-            return <Spoiler>{children}</Spoiler>;
-          },
-          hr() {
-            return <hr className="border-hairline/40" />;
-          },
-        }}
-      >
-        {source}
-      </Markdown>
-    </div>
+    <MessageScopeContext.Provider value={{ message, imageOffsets, threads, currentBotId }}>
+      <div className="chat-md min-w-0 [&>*+*]:mt-2">
+        <Markdown
+          remarkPlugins={[remarkGfm, remarkMath, remarkWindowsPathDestinations, unwrapLinkedImages, [remarkMentions, { peers: mentionPeers, everyone }], remarkThreadRefs(threads, currentBotId)]}
+          rehypePlugins={[rehypeKatex]}
+          urlTransform={chatUrlTransform}
+          components={MARKDOWN_COMPONENTS}
+        >
+          {source}
+        </Markdown>
+      </div>
+    </MessageScopeContext.Provider>
   );
 }
 
@@ -937,7 +1035,6 @@ export const ChatMarkdown = memo(ChatMarkdownComponent, (previous, next) => (
   previous.text === next.text
   && samePeers(previous.mentionPeers ?? NO_MENTION_PEERS, next.mentionPeers ?? NO_MENTION_PEERS)
   && previous.everyone === next.everyone
-  && Boolean(previous.streaming) === Boolean(next.streaming)
   && previous.message?.threadId === next.message?.threadId
   && previous.message?.messageId === next.message?.messageId
 ));

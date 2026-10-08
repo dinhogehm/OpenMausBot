@@ -35,7 +35,16 @@ describe("routine delegation through the isolated harness", () => {
     }, { timeout: 15_000 }).toBe(true);
     return parsed;
   };
-  const runState = async (id: string) => (await api("GET", "/api/routines")).runs.find((run: any) => run.id === id);
+  // What a launch put in front of the model: the system prompt and its first
+  // message, which carries the turn-specific sections (system-prompt.ts).
+  const launchContext = async (threadId: string) => {
+    const launched = await dump(threadId);
+    return `${launched.systemPrompt ?? ""}\n${JSON.stringify(launched.prompt ?? "")}`;
+  };
+  // Every message the thread's CLI processes received, in order.
+  const sentTo = (threadId: string) => readFileSync(file(threadId, "prompts.jsonl"), "utf8").trim().split("\n")
+    .map((line) => JSON.stringify(JSON.parse(line).message?.content ?? ""));
+  const runState =async (id: string) => (await api("GET", "/api/routines")).runs.find((run: any) => run.id === id);
   const messages = async (threadId: string) => (await api("GET", `/api/threads/${threadId}/messages?limit=100`)).messages as any[];
   const start = async () => {
     const { routine } = await api("POST", "/api/routines", {
@@ -69,6 +78,7 @@ describe("routine delegation through the isolated harness", () => {
       `process.env.FAKE_CLAUDE_MODE = thread === "probe" && !existsSync(${JSON.stringify(join(fixture.info.dataDir, "gate-peer"))}) ? "happy" : "slow";`,
       `process.env.FAKE_CLAUDE_SLOW_FINISH_GATE = join(${JSON.stringify(fixture.info.dataDir)}, thread + ".gate");`,
       `process.env.FAKE_CLAUDE_DUMP = join(${JSON.stringify(fixture.info.dataDir)}, thread + ".json");`,
+      `process.env.FAKE_CLAUDE_PROMPTS = join(${JSON.stringify(fixture.info.dataDir)}, thread + ".prompts.jsonl");`,
       `await import(${JSON.stringify(pathToFileURL(join(process.cwd(), "server/testing/fake-claude-cli.ts")).href)});`,
     ].join("\n"), { mode: 0o700 });
     await api("PATCH", "/api/instances/claude", { cli: wrapper });
@@ -86,10 +96,11 @@ describe("routine delegation through the isolated harness", () => {
     const { bots } = await api("GET", "/api/bots");
     const peerThread = bots.find((bot: any) => bot.id === peer.id).threadId;
     await control(["send", "--bot", peer.id, "--text", "An existing task occupies the peer."]);
-    expect((await dump(peerThread)).systemPrompt).not.toContain("Execute this routine now:");
+    expect(await launchContext(peerThread)).not.toContain("Execute this routine now:");
     const run = await start();
-    expect((await dump(run.threadId)).systemPrompt).toContain("Execute this routine now:");
-    expect((await dump(run.threadId)).systemPrompt).toContain("after an accepted delegation, end this turn for automatic resumption");
+    expect(await launchContext(run.threadId)).toContain("Execute this routine now:");
+    expect(await launchContext(run.threadId)).toContain("after an accepted delegation, end this turn for automatic resumption");
+    expect((await dump(run.threadId)).systemPrompt).not.toContain("Execute this routine now:");
     await delegate(run.threadId);
     finish(run.threadId);
     await expect.poll(async () => (await runState(run.id))?.status, { timeout: 15_000 }).toBe("waiting");
@@ -99,7 +110,10 @@ describe("routine delegation through the isolated harness", () => {
     await expect.poll(async () => (await runState(run.id))?.status, { timeout: 20_000 }).toBe("completed");
     const transcript = await messages(run.threadId);
     expect(transcript.some((message) => message.text?.includes("@Routine peer respondeu à tarefa delegada"))).toBe(true);
-    expect((await runState(run.id)).output).toContain("[A delegated task just completed]");
+    // the report replies to the delegated-completion wake; the wake's message
+    // may open with the turn's context note, so read what was sent
+    expect((await runState(run.id)).output).toContain("reply to:");
+    expect(sentTo(run.threadId).at(-1)).toContain("[A delegated task just completed]");
     evidence.push({ waitedForBusyPeer: true, resumedRoutine: run.id, threadId: run.threadId, transcript });
   }, 60_000);
 
@@ -164,7 +178,8 @@ describe("routine delegation through the isolated harness", () => {
       }, { timeout: 15_000 }).toBe(false);
     }
     await expect.poll(async () => (await runState(run.id))?.status, { timeout: 15_000 }).toBe("completed");
-    expect((await runState(run.id)).output).toContain("[A delegated task just completed]");
+    expect((await runState(run.id)).output).toContain("reply to:");
+    expect(sentTo(run.threadId).at(-1)).toContain("[A delegated task just completed]");
     const bot = (await api("GET", "/api/bots?messages=0")).bots.find((bot: any) => bot.id === source.id);
     expect(occupiedThreads.map(threadId => bot.tasks.find((task: any) => task.threadId === threadId).busy))
       .toEqual(resume === "raise" ? [true] : [false, true, true]);
@@ -185,10 +200,10 @@ describe("routine delegation through the isolated harness", () => {
     await api("POST", `/api/bots/${source.id}/messages`, { threadId: run.threadId, text: "A new request: ask the peer for a fresh report." });
     const launched = await dump(run.threadId);
     const coordinated = await api("POST", "/api/internal/coordinate-bots", {
-      botIds: [peer.id], requestKey: "fresh-report", message: "Produce a fresh fixture report.",
+      botIds: [peer.id], message: "Produce a fresh fixture report.",
     }, launched.mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN);
-    expect(coordinated.accepted).toHaveLength(1);
-    const requestId = coordinated.accepted[0].requestId;
+    expect(coordinated.receipts).toHaveLength(1);
+    const requestId = coordinated.receipts[0].requestId;
     const handoff = () => JSON.parse(readFileSync(join(fixture.info.dataDir, "room-handoffs.json"), "utf8"))
       .find((node: any) => node.id === requestId);
     finish(run.threadId);

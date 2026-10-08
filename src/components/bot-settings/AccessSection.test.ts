@@ -52,7 +52,6 @@ function makeDerived(overrides: Partial<ReturnType<typeof useBotSettingsDerived>
     engine: undefined,
     canCoordinate: false,
     canUseConnectedApps: true,
-    canUseVps: false,
     connectedAppsConfigured: true,
     connectedAppsEnabled: true,
     canUseBrowser: false,
@@ -80,6 +79,36 @@ function render(bot: Bot, derived = makeDerived()) {
     createElement(StoreProvider, null, createElement(AccessSection, { bot, derived })),
   );
 }
+
+describe("owner tool selection status", () => {
+  it("distinguishes the legacy catalog from an explicit no-tools selection", () => {
+    expect(render(makeBot())).toContain("All current tools");
+    const empty = render(makeBot({ toolScope: { allow: [] } } as Partial<Bot>));
+    expect(empty).toContain("No tools selected");
+    expect(empty).not.toContain("All current tools</p>");
+    expect(empty).toContain("Existing approvals still apply");
+  });
+
+  it("shows corrupt saved restrictions as a blocked setup, never all tools", () => {
+    const corrupt = render(makeBot({ toolScope: { allow: "native:*" } } as unknown as Partial<Bot>));
+    expect(corrupt).toContain("Invalid saved selection. This bot cannot start until it is repaired.");
+    expect(corrupt).toContain('role="alert"');
+  });
+
+  it("explains native restrictions that the selected engine cannot enforce", () => {
+    const engine = { driverKind: "claudeAgent" } as NonNullable<ReturnType<typeof useBotSettingsDerived>["engine"]>;
+    const markup = render(makeBot({ toolScope: { allow: ["native:read"] } } as Partial<Bot>), makeDerived({ engine }));
+    expect(markup).toContain("This engine cannot limit native tools");
+    expect(markup).toContain("native:*");
+    expect(markup).toContain("will stop before sending a prompt");
+  });
+
+  it("keeps the selection editor disabled while a task is active", () => {
+    const markup = render(makeBot({ busy: true }));
+    expect(markup).toContain('aria-label="Tool selection" disabled=""');
+    expect(markup).toContain("Wait until this bot finishes all active tasks before changing its tool selection.");
+  });
+});
 
 describe("AccessSection always-allowed list", () => {
   it("keeps per-bot MCP changes disabled while any task is active", () => {
@@ -140,16 +169,36 @@ describe("AccessSection always-allowed list", () => {
 });
 
 describe("AccessSection Works on", () => {
-  const places = (markup: string) => [...markup.matchAll(/>(Auto|Cloud|Local VM|This computer|Browser|Off)<\/button>/g)].map((match) => match[1]);
+  type Node = ReactElement<{ children?: ReactNode; onClick?: () => void; [key: string]: unknown }>;
+  const nodes = (value: ReactNode): Node[] => {
+    if (!isValidElement(value)) return [];
+    const node = value as Node;
+    return [node, ...Children.toArray(node.props.children).flatMap(nodes)];
+  };
 
-  it("offers this computer and a Local VM on a desktop or self-hosted server", () => {
-    expect(places(render(makeBot()))).toEqual(["Auto", "Cloud", "Local VM", "This computer", "Browser", "Off"]);
-    fixture.config = { cloudHome: false } as Partial<ConfigStatus>;
-    expect(places(render(makeBot()))).toEqual(["Auto", "Cloud", "Local VM", "This computer", "Browser", "Off"]);
+  it("is one line and the way to the Computer panel, where the place is chosen", () => {
+    const markup = render(makeBot());
+    expect(markup).toContain("Where Scout works: Chooses for you");
+    expect(markup).toContain("Open Computer panel");
+    // No second picker here: the six places live in the Computer panel only.
+    expect([...markup.matchAll(/>(Auto|Cloud|Local VM|This computer|Browser|Off)<\/button>/g)]).toEqual([]);
+    expect(render(makeBot({ computer: "off" }))).toContain("Where Scout works: No screen");
+
+    let tree!: ReturnType<typeof AccessSection>;
+    function Capture() { tree = AccessSection({ bot: makeBot(), derived: makeDerived() }); return tree; }
+    renderToStaticMarkup(createElement(StoreProvider, null, createElement(Capture)));
+    const open = nodes(tree).find((node) => node.type === "button" && renderToStaticMarkup(node).includes("Open Computer panel"))!;
+    open.props.onClick!();
+    expect(fixture.dispatch.mock.calls).toEqual([
+      [{ type: "toggleSettings", open: false }],
+      [{ type: "toggleComputer", open: true }],
+    ]);
   });
 
-  it("never offers them on an OMB Cloud home", () => {
+  it("hides the Boat or VPS choice on My Cloud, whose cloud computers are the plan's", () => {
+    expect(render(makeBot())).toContain("Cloud backend");
     fixture.config = { cloudHome: true } as Partial<ConfigStatus>;
-    expect(places(render(makeBot()))).toEqual(["Auto", "Cloud", "Browser", "Off"]);
+    expect(render(makeBot())).not.toContain("Cloud backend");
+    expect(render(makeBot({ computer: "cloud" }))).not.toContain("Boat");
   });
 });

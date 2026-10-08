@@ -6,7 +6,8 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, mkdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { writeFileAtomic } from "./atomic.ts";
+import { writeFileAtomic, writeFileAtomicIfChanged } from "./atomic.ts";
+import { parseToolScope, toolScopeWidens } from "../shared/tool-scope.ts";
 import { ensureSections, readSections, changeEmptySection } from "./section-context.ts";
 import type { TeamComputers } from "./team-computers.ts";
 import { removeBotFolder, soulFile, soulHash, writeSoulMirror } from "./bot-folder.ts";
@@ -21,7 +22,8 @@ import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { AVATAR_FOCUS_CENTER, AVATAR_ZOOM_MIN, botAvatarProfile, clampAvatarFocus, clampAvatarZoom } from "../shared/bot-avatar.ts";
-import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
+import { approvalModeFor, isApprovalMode, modelSwitchNeedsAsk } from "../shared/approval-mode.ts";
+import { REMOVED_COMPUTER_DRIVER, type ComputerEngineMove } from "./computer-engine-removal.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
@@ -34,6 +36,7 @@ import type {
   WireMessage, WireTask, BotProject as BotProjectRecord,
 } from "../shared/wire.ts";
 import { CONNECTOR_SLUG_PATTERN, CONNECTOR_TOOL_NAME_PATTERN } from "../shared/wire.ts";
+import { sameModelSelection } from "../shared/thread-model.ts";
 // Re-exported under their historical names so server-side importers keep working.
 export type {
   BotActivity, ConnectorCardData, GroupDefaultResponder, OptionCardData,
@@ -73,9 +76,9 @@ export function isProjectEmoji(value: unknown): value is string {
 }
 
 /** One task = one conversation with its own context. Extends the shared
- * wire shape; the extras below are server-private bookkeeping the wire
- * projection (toWireTask) strips. */
-export interface TaskRecord extends WireTask {
+ * wire shape, less the fields the wire projection (toWireTask) derives; the
+ * extras below are server-private bookkeeping that projection strips. */
+export interface TaskRecord extends Omit<WireTask, TaskWireDerivedKeys> {
   /** provider-native continuation per instance, for THIS task only */
   resumeCursors: Record<string, unknown>;
   /** which instance dispatched the most recent turn. A cursor alone can't
@@ -92,7 +95,8 @@ export interface TaskRecord extends WireTask {
   /** Who pinned this conversation's surface: "user" when a person chose it
    * (composer chip or thread setting), "auto" when a turn recorded where
    * it landed. Absent means legacy/unknown: it may be a person's choice,
-   * so only positively identified auto pins yield to Works on changes. */
+   * so only positively identified auto pins yield to Works on changes.
+   * Clients see only whether a pin is an auto pin (WireTask.surfaceAuto). */
   surfaceSource?: "user" | "auto";
 }
 
@@ -100,7 +104,9 @@ export interface TaskRecord extends WireTask {
  * the exactness assertion below fails to compile when either side drifts,
  * so a new server field forces a decision — wire-visible or private here. */
 export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages" | "appliedCompactionId" | "contextFloor" | "lastContextModel" | "surfaceSource";
-export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>>;
+/** WireTask fields computed by toWireTask and never stored on a TaskRecord. */
+export type TaskWireDerivedKeys = "surfaceAuto" | "followsBotModel";
+export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>> & Pick<WireTask, TaskWireDerivedKeys>;
 type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 type AssertSameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
 /** Structural exactness alone lets an optional extra field through (a type
@@ -109,13 +115,22 @@ export type TaskWireProjectionIsExact = AssertExact<WireTask, TaskWireProjection
 export const taskWireProjectionIsExact: TaskWireProjectionIsExact = true;
 
 /** The typed wire projection for one task. Pairs with the assertion above:
- * returning WireTask means an undeclared server field cannot ride silently. */
-export function toWireTask(task: TaskRecord): WireTask {
+ * returning WireTask means an undeclared server field cannot ride silently.
+ * A thread with no model of its own follows its bot: the wire carries the
+ * model it runs on either way, so every client reads one effective model. */
+export function toWireTask(task: TaskRecord, botModel: ModelSelection): WireTask {
   const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages,
     appliedCompactionId: _appliedCompactionId, contextFloor: _contextFloor, lastContextModel: _lastContextModel,
-    surfaceSource: _surfaceSource, ...wire } = task;
-  return wire;
+    surfaceSource, ...stored } = task;
+  const wire: WireTask = { ...stored, modelSelection: structuredClone(task.modelSelection ?? botModel), followsBotModel: task.modelSelection === undefined };
+  // Who pinned stays private. A client learns only whether the pin is the
+  // machine's own record, so it never presents one as the person's choice.
+  return surfaceSource === "auto" && wire.surface !== undefined ? { ...wire, surfaceAuto: true } : wire;
 }
+
+/** The level a thread drops to when its engine changes under a level the new
+ * engine would have to confirm (modelSwitchNeedsAsk), as on every switch. */
+const ASK_NOW = { approvalMode: "ask" as const, autoApprove: false, alwaysAllow: [] as string[] };
 
 const TASK_PATCH_FIELDS = [
   "title", "projectId", "modelSelection", "approvalMode", "autoApprove", "alwaysAllow",
@@ -330,6 +345,25 @@ export function threadTitleFrom(title?: string): string {
 }
 
 /** A task's name, taken from the first thing you asked it to do. */
+/** The words of a "yes", "OK", "got it" or "thanks" in Chinese and Japanese, and the particles around them. */
+const CJK_ACK = /ありがとう|ありがと|ございました|ございます|どうも|はい|了解|承知|しました|かしこまりました|わかりました|分かりました|大丈夫|です|ます|お願いします|よろしく|谢谢|謝謝|多谢|多謝|感谢|感謝|收到|好的|没问题|沒問題|没事|知道了|明白|可以|[好行嗯了啊吧呢哦呀你的ねよなぁ]/gu;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+/** A first message too short to name what the conversation is about: one
+ * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
+ * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
+export function tooShortToTitle(text: string): boolean {
+  // a script written without spaces (Chinese, Japanese) counts its characters: three name it ("写测试", "直して");
+  // a "yes", "OK", "got it" or "thanks" in any of its forms ("はい", "ありがとうございました", "收到了谢谢") never does.
+  // Korean is spaced like pt-BR (INSP-R13VIS A7, B4, C4)
+  const cjk = text.match(CJK) ?? [];
+  if (cjk.length) {
+    if (!(text.replace(CJK_ACK, "").match(CJK) ?? []).length) return true;
+    // beyond a "yes" and its particles, a verb is left: "好，改", "做吧" ask (INSP-R13VIS round 4)
+    if (cjk.length >= 2) return false;
+  }
+  return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
+}
+
 export function titleFromMessage(text: string): string {
   const line = text.trim().split("\n")[0]!.trim();
   return line.length > 48 ? `${line.slice(0, 47)}…` : line || UNTITLED_TASK;
@@ -379,18 +413,21 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
     threadId?: string;
     /** Composer grant: leave the bot default and other threads unchanged. */
     threadOnly?: true;
+    /** Copy the saved bot default onto threadId, including standing approvals. */
+    refreshPermissions?: true;
     /** Explicit bot-wide grant, including existing threads. */
     allThreads?: true;
   };
   /** Receipt committed with a confirmed profile, for retrying card settlement. */
   lastProfileRequestId?: string;
-  /** Receipt committed with a confirmed authority tightening, for retrying card settlement. */
-  lastTighteningRequestId?: string;
   /** Receipt committed with a reviewed team batch; prevents replay after a lost response. */
   lastTeamSetupReceipt?: { requestId: string; result: TeamSetupResult };
   /** Organization library only: each part's release and written hashes
    * (server/package-parts.ts), for the later automatic update. */
   packageBase?: Partial<Record<AgentPart, PartPair>>;
+  /** Skills library (features.skillsLibrary): names of library skills
+   * assigned to this bot. Server-private until the Skills UI ships. */
+  assignedSkills?: string[];
 }
 
 /** BotRecord fields no client may see, plus the two the projection
@@ -398,7 +435,7 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
  * WireTask[], avatarUrl is coerced to always-present). The exactness
  * assertion fails to compile when either side drifts, so a new server
  * field forces a decision — wire-visible or private here. */
-export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTighteningRequestId" | "lastTeamSetupReceipt" | "packageBase";
+export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt" | "packageBase" | "assignedSkills";
 export type BotWireProjection = Pick<BotRecord, Exclude<keyof BotRecord, BotWirePrivateKeys>>;
 export type BotWireProjectionIsExact = AssertExact<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection> & AssertSameKeys<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection>;
 export const botWireProjectionIsExact: BotWireProjectionIsExact = true;
@@ -458,6 +495,9 @@ export function parseConnectorTools(value: unknown): { ok: true; grants: Record<
 
 const BOTS_FILE = join(DATA_DIR, "bots.json");
 const GROUPS_FILE = join(DATA_DIR, "groups.json");
+/** Written once the copies older builds made of a bot's model on its threads
+ * are cleared (Store load), so that cleanup runs once per data directory. */
+const THREAD_MODEL_COPIES_CLEARED = join(DATA_DIR, "thread-model-copies-cleared");
 
 /** The registries carry souls, project paths and per-bot settings, so they are
  * owner-only like the other data-dir stores. A file written by an older
@@ -603,6 +643,7 @@ export class Store {
   private threads = new Map<string, ThreadState>();
   private defaultSelection: () => ModelSelection;
   private completeNewBotSelection: (selection: ModelSelection) => ModelSelection;
+  private driverKindOf: (instanceId: string) => string | undefined;
   private listeners = new Set<(change: StoreChange) => void>();
   /** A broken team registry must not prevent loading independent chat data. */
   private registeringInitialSections = true;
@@ -615,13 +656,23 @@ export class Store {
     /** Workspace-wide new-bot defaults (config newBots), applied to every
      * new bot's selection whichever path created it. */
     completeNewBotSelection: (selection: ModelSelection) => ModelSelection = (selection) => selection,
+    /** The driver an engine instance runs, for the level a thread keeps when
+     * its engine changes (modelSwitchNeedsAsk). Unknown counts as another
+     * driver, so Full and Custom fall back to Ask. */
+    driverKindOf: (instanceId: string) => string | undefined = () => undefined,
   ) {
     this.defaultSelection = defaultSelection;
     this.completeNewBotSelection = completeNewBotSelection;
+    this.driverKindOf = driverKindOf;
     mkdirSync(DATA_DIR, { recursive: true });
     for (const file of [BOTS_FILE, GROUPS_FILE]) tightenRegistryFile(file);
+    // Whether the bot list is the real one. Room repair below trusts it to
+    // say which members no longer exist; an unreadable file must never read
+    // as "every member was deleted".
+    let botsLoaded = false;
     try {
       this.bots = JSON.parse(readFileSync(BOTS_FILE, "utf8"));
+      botsLoaded = Array.isArray(this.bots);
     } catch {
       this.bots = [];
     }
@@ -774,9 +825,17 @@ export class Store {
         botsMigrated = true;
       }
     }
+    const botIds = new Set(this.bots.map((b) => b.id));
     for (const g of this.groups) {
       g.busyBotId = null;
       delete g.turnStartedAt;
+      // A deleted bot used to stay a member for good: counted on the room's
+      // Save button and refused by the roster check on every save (MOCA-264).
+      // Bot-to-bot channels keep their pair; they are not edited as rooms.
+      if (botsLoaded && !g.dm && g.memberIds.some((id) => !botIds.has(id))) {
+        g.memberIds = g.memberIds.filter((id) => botIds.has(id));
+        groupsMigrated = true;
+      }
       const normalized = normalizeGroupDefaultResponder(g.defaultResponder, g.memberIds, Boolean(g.dm));
       if (JSON.stringify(normalized) !== JSON.stringify(g.defaultResponder)) groupsMigrated = true;
       g.defaultResponder = normalized;
@@ -812,11 +871,17 @@ export class Store {
       g.pinnedMessageId = active.pinnedMessageId;
     }
     if (groupsMigrated) this.saveGroups();
+    // Older builds copied a bot's model onto every thread it made, so a
+    // thread on exactly its bot's model is a copy, not a person's pick: once
+    // per data directory it is cleared and the thread follows its bot. A
+    // different model can't be told apart from a pick and stays. Only over a
+    // bot list this load could read, so an unreadable file is not skipped.
+    const clearModelCopies = !existsSync(THREAD_MODEL_COPIES_CLEARED) && (botsLoaded || !existsSync(BOTS_FILE));
     // bots saved before tasks existed have one endless thread; adopt it as
     // their first task so nothing is lost and nothing special-cases it
     for (const b of this.bots) {
-      // Folders are organizational only. Preserve existing thread model
-      // snapshots while discarding the unshipped folder-default setting.
+      // Folders are organizational only. Preserve threads' own models while
+      // discarding the unshipped folder-default setting.
       if (b.projects?.some((project) => "modelSelection" in project)) {
         b.projects = b.projects.map(({ id, name, emoji }) => ({ id, name, ...(isProjectEmoji(emoji) ? { emoji } : {}) }));
         botsMigrated = true;
@@ -846,8 +911,8 @@ export class Store {
         botsMigrated = true;
       }
       for (const task of b.tasks) {
-        if (task.modelSelection === undefined) {
-          task.modelSelection = structuredClone(b.modelSelection);
+        if (clearModelCopies && task.modelSelection !== undefined && sameModelSelection(task.modelSelection, b.modelSelection)) {
+          delete task.modelSelection;
           botsMigrated = true;
         }
         if (!task.resumeCursors) {
@@ -888,6 +953,7 @@ export class Store {
       b.unread = b.tasks.some(taskCountsAsBotUnread);
     }
     if (botsMigrated) this.saveBots();
+    if (clearModelCopies) writeFileAtomic(THREAD_MODEL_COPIES_CLEARED, "Threads follow their bot's model; the copies older builds made are cleared.\n", { mode: 0o600 });
     // Search reads SQLite directly, so migrate every known legacy transcript
     // at startup rather than waiting until the user happens to open it. Only
     // pending JSON files are touched; already-migrated threads stay lazy.
@@ -999,9 +1065,12 @@ export class Store {
     if (botsDirty) this.saveBots();
   }
 
+  // Many saves repeat what is already on disk (the same resume cursor, an
+  // unchanged task field), so both registries skip a byte-identical write.
+  // Events are still emitted by the callers either way.
   private saveBots(bots: BotRecord[] = this.bots, registerSections = true) {
     if (registerSections) this.rememberSections([...this.bots, ...bots].map((bot) => bot.section));
-    writeFileAtomic(BOTS_FILE, JSON.stringify(bots.map(({ busy: _busy, activity: _activity, ...bot }) => ({
+    writeFileAtomicIfChanged(BOTS_FILE, JSON.stringify(bots.map(({ busy: _busy, activity: _activity, ...bot }) => ({
       ...bot,
       tasks: bot.tasks?.map(({ busy: _taskBusy, activity: _taskActivity, turnStartedAt: _taskTurnStarted, ...task }) => persistedPin(task)),
     })), null, 2), { mode: 0o600 });
@@ -1009,7 +1078,7 @@ export class Store {
 
   private saveGroups(groups: GroupRecord[] = this.groups, registerSections = true) {
     if (registerSections) this.rememberSections(groups.map((group) => group.section));
-    writeFileAtomic(GROUPS_FILE, JSON.stringify(groups.map(({ busyBotId: _busyBotId, turnStartedAt: _turnStartedAt, ...g }) => ({
+    writeFileAtomicIfChanged(GROUPS_FILE, JSON.stringify(groups.map(({ busyBotId: _busyBotId, turnStartedAt: _turnStartedAt, ...g }) => ({
       ...g,
       ...(g.tasks ? { tasks: g.tasks.map((task) => persistedPin(task)) } : {}),
     })), null, 2), { mode: 0o600 });
@@ -1203,7 +1272,7 @@ export class Store {
     );
   }
 
-  patchGroup(id: string, patch: Partial<Pick<GroupRecord, "name" | "memberIds" | "defaultResponder" | "bulletin" | "unread" | "busyBotId" | "cwd" | "pinnedMessageId" | "section" | "setupCompletedAt" | "setupSkippedAt" | "audienceFloor" | "installedPackage">>): GroupRecord | null {
+  patchGroup(id: string, patch: Partial<Pick<GroupRecord, "name" | "memberIds" | "defaultResponder" | "bulletin" | "unread" | "busyBotId" | "cwd" | "pinnedMessageId" | "section" | "setupCompletedAt" | "setupSkippedAt" | "audienceFloor" | "installedPackage" | "turnTimeoutMinutes">>): GroupRecord | null {
     const group = this.group(id);
     if (!group) return null;
     if (Object.prototype.hasOwnProperty.call(patch, "section")) {
@@ -1219,6 +1288,9 @@ export class Store {
     if (Object.prototype.hasOwnProperty.call(patch, "busyBotId")) {
       if (patch.busyBotId && patch.busyBotId !== previousBusyBotId) group.turnStartedAt = Date.now();
       else if (!patch.busyBotId) delete group.turnStartedAt;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "turnTimeoutMinutes") && patch.turnTimeoutMinutes == null) {
+      delete group.turnTimeoutMinutes;
     }
     if (!group.dm && Object.prototype.hasOwnProperty.call(patch, "pinnedMessageId")) {
       const active = this.activeGroupTask(group.id);
@@ -1369,6 +1441,18 @@ export class Store {
     if (!task) return null;
     if (pinned) task.pinned = true;
     else delete task.pinned;
+    this.saveGroups();
+    this.emit({ type: "group", groupId });
+    return task;
+  }
+
+  /** Null removes the conversation's own ceiling so the next turn uses the
+   * global group limit. A sibling conversation is left alone. */
+  setGroupTaskTurnTimeout(groupId: string, threadId: string, minutes: number | null): GroupTaskRecord | null {
+    const task = this.groupTaskByThread(groupId, threadId);
+    if (!task) return null;
+    if (minutes == null) delete task.turnTimeoutMinutes;
+    else task.turnTimeoutMinutes = minutes;
     this.saveGroups();
     this.emit({ type: "group", groupId });
     return task;
@@ -1576,7 +1660,7 @@ export class Store {
     const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message), parentId: anchorId };
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);
-    mdb.appendMessage(threadId, full);
+    mdb.insertMessage(threadId, full); // the leaf stays where it was, in SQLite too
     if (full.kind === "screen") {
       for (const pruned of this.pruneScreenFrames(t)) {
         mdb.updateMessage(threadId, pruned);
@@ -1604,7 +1688,7 @@ export class Store {
   /** Screen frames are ~100-500KB of base64 each; keeping every frame of a
    * long computer session bloats the transcript for nothing the client
    * would ever show. The newest few keep their pixels; older ones stay in
-   * the transcript as placeholders. Mirrors the client's own frame cap.
+   * the transcript as placeholders.
    * Returns the messages whose pixels were dropped so the caller can
    * persist exactly those. */
   private pruneScreenFrames(t: { messages: Message[] }, keep = 4): Message[] {
@@ -1708,7 +1792,7 @@ export class Store {
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "cwd" | "visibility"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "cwd" | "visibility" | "toolScope"
       >
     > = {},
     opts: {
@@ -1717,6 +1801,8 @@ export class Store {
       seedMessages?: boolean;
     } = {},
   ): BotRecord {
+    const toolScope = parseToolScope(profile.toolScope);
+    if (!toolScope.ok) throw new Error(toolScope.error);
     this.rememberSections([profile.section]);
     const name = profile.name?.trim() || pickBotName(this.bots.map((b) => b.name));
     const section = sectionKey(profile.section);
@@ -1734,6 +1820,7 @@ export class Store {
       ...(profile.mascotBody ? { mascotBody: profile.mascotBody } : {}),
       // Restricted from its first frame: no one else is ever told it exists.
       ...(profile.visibility && profile.visibility !== "everyone" ? { visibility: structuredClone(profile.visibility) } : {}),
+      ...(toolScope.scope ? { toolScope: toolScope.scope } : {}),
       unread: false,
       modelSelection: this.newBotSelection(profile.modelSelection),
       resumeCursors: {},
@@ -1747,13 +1834,14 @@ export class Store {
       createdAt: bot.createdAt,
       updatedAt: bot.createdAt,
       resumeCursors: {},
-      modelSelection: structuredClone(bot.modelSelection),
       unread: false,
       activity: "idle",
       busy: false,
     }];
+    // Persist the selection in the first record, before publishing the bot
+    // or starting its greeting. An interrupted creation cannot inherit tools.
+    this.saveBots([bot, ...this.bots]);
     this.bots.unshift(bot);
-    this.saveBots();
     // The folder exists from the first moment, so the user can open
     // SOUL.md before the bot has said a word. The record is canonical: a
     // mirror-write failure must never fail bot creation.
@@ -1777,7 +1865,8 @@ export class Store {
   }
 
   /** All setup fields and the Chief's receipt commit before publishing any
-   * mutation. Model defaults never rewrite saved thread selections. */
+   * mutation. A new model moves the threads that follow the bot, never a
+   * thread's own model. */
   applyTeamSetup(request: TeamSetupRequest): TeamSetupResult {
     const chief = this.bot(request.botId);
     if (!chief) throw new Error("The requesting Chief no longer exists");
@@ -1802,7 +1891,7 @@ export class Store {
           // a restricted Chief never creates a bot everyone sees.
           ...(chief.visibility && chief.visibility !== "everyone" ? { visibility: structuredClone(chief.visibility) } : {}),
           tasks: [{ threadId: operation.threadId, title: UNTITLED_THREAD, createdAt, updatedAt: createdAt, resumeCursors: {},
-            modelSelection: structuredClone(modelSelection), approvalMode: "ask", autoApprove: false,
+            approvalMode: "ask", autoApprove: false,
             unread: false, activity: "idle", busy: false }],
         };
         // "" is the private-workspace spelling on proposal; the record
@@ -1813,13 +1902,7 @@ export class Store {
         if (at < 0) throw new Error("A setup target no longer exists");
         const previous = nextBots[at];
         next = { ...previous, ...operation.fields };
-        if (operation.fields.modelSelection) next.tasks = previous.tasks?.map((task) => ({
-          ...task,
-          modelSelection: structuredClone(task.modelSelection ?? previous.modelSelection),
-          approvalMode: approvalModeFor(this.projectBotForTask(previous.id, task.threadId)!),
-          autoApprove: task.autoApprove ?? previous.autoApprove,
-          alwaysAllow: structuredClone(task.alwaysAllow ?? previous.alwaysAllow ?? []),
-        }));
+        if (operation.fields.modelSelection) next.tasks = this.withDefaultModel(previous, operation.fields.modelSelection);
         nextBots[at] = next;
       }
       if (operation.fields.chiefOfStaff === false) delete next.managedSections;
@@ -1851,22 +1934,38 @@ export class Store {
     return result;
   }
 
-  /** One reviewed default-model change (propose_model): task stamping is
-   * identical to applyTeamSetup's update branch — saved per-thread
-   * selections are never rewritten, and a thread with no selection of its
-   * own is pinned to the previous default so it does not silently follow
-   * the new one. */
+  /** Moving this thread from one model to another takes its level back to
+   * Ask where the new engine would have to confirm it (modelSwitchNeedsAsk),
+   * as on every engine switch. Read before anything changes. */
+  private switchNeedsAsk(botId: string, threadId: string, from: ModelSelection, to: ModelSelection): boolean {
+    if (from.instanceId === to.instanceId) return false;
+    const thread = this.projectBotForTask(botId, threadId);
+    return Boolean(thread) && modelSwitchNeedsAsk(approvalModeFor(thread!), this.driverKindOf(from.instanceId), this.driverKindOf(to.instanceId));
+  }
+
+  /** A bot's threads as a change of its model to `next` leaves them. Each
+   * keeps the level it runs at now (older threads may still inherit the
+   * bot's, which may change in the same write); one that follows the bot
+   * moves with it, back to Ask where the new engine would have to confirm
+   * its level; a thread's own model stays. */
+  private withDefaultModel(bot: BotRecord, next: ModelSelection): TaskRecord[] | undefined {
+    return bot.tasks?.map((task) => ({
+      ...task,
+      approvalMode: approvalModeFor(this.projectBotForTask(bot.id, task.threadId)!),
+      autoApprove: task.autoApprove ?? bot.autoApprove,
+      alwaysAllow: structuredClone(task.alwaysAllow ?? bot.alwaysAllow ?? []),
+      ...(task.modelSelection === undefined && this.switchNeedsAsk(bot.id, task.threadId, bot.modelSelection, next) ? structuredClone(ASK_NOW) : {}),
+    }));
+  }
+
+  /** One reviewed default-model change (propose_model), with
+   * applyTeamSetup's task stamping (withDefaultModel): every thread that
+   * follows the bot moves to the new model, and a thread's own model, which a
+   * person picked there, stays. */
   applyModelDefault(id: string, modelSelection: ModelSelection): BotRecord | null {
     const previous = this.bot(id);
     if (!previous) return null;
-    const next: BotRecord = { ...previous, modelSelection: structuredClone(modelSelection) };
-    next.tasks = previous.tasks?.map((task) => ({
-      ...task,
-      modelSelection: structuredClone(task.modelSelection ?? previous.modelSelection),
-      approvalMode: approvalModeFor(this.projectBotForTask(previous.id, task.threadId)!),
-      autoApprove: task.autoApprove ?? previous.autoApprove,
-      alwaysAllow: structuredClone(task.alwaysAllow ?? previous.alwaysAllow ?? []),
-    }));
+    const next: BotRecord = { ...previous, modelSelection: structuredClone(modelSelection), tasks: this.withDefaultModel(previous, modelSelection) };
     this.saveBots(this.bots.map((candidate) => candidate.id === id ? next : candidate));
     this.bots = this.bots.map((candidate) => candidate.id === id ? next : candidate);
     this.emit({ type: "bot", botId: id });
@@ -1890,6 +1989,19 @@ export class Store {
     this.saveBots(nextBots);
     this.bots = nextBots;
     this.legacyActivities.delete(id);
+    // A deleted bot leaves every room it was in, and a room it led falls back
+    // to its next member. Bot-to-bot channels keep their pair.
+    const rooms = this.groups.filter((g) => !g.dm && g.memberIds.includes(id));
+    for (const g of rooms) {
+      g.memberIds = g.memberIds.filter((member) => member !== id);
+      if (g.busyBotId === id) { g.busyBotId = null; delete g.turnStartedAt; }
+      g.defaultResponder = normalizeGroupDefaultResponder(g.defaultResponder, g.memberIds, false);
+    }
+    if (rooms.length) {
+      // Bot removal is already durable. Finish erasing its data even if this
+      // write fails; startup repair removes these stale memberships later.
+      try { this.saveGroups(); } catch (error) { console.warn("store: room cleanup will retry on restart", error); }
+    }
     // every task's transcript goes with the bot, not just the open one
     for (const threadId of new Set([bot.threadId, ...(bot.tasks ?? []).map((t) => t.threadId)])) {
       this.deleteThreadRecord(threadId);
@@ -1910,6 +2022,7 @@ export class Store {
     // The bot folder (SOUL.md mirror) is the bot's too.
     removeBotFolder(id);
     this.emit({ type: "bot.deleted", botId: id });
+    for (const g of rooms) this.emit({ type: "group", groupId: g.id });
     return true;
   }
 
@@ -1925,9 +2038,26 @@ export class Store {
       if (!parsed.ok) throw new Error(parsed.error);
       patch = { ...patch, connectorTools: parsed.grants };
     }
+    if (Object.hasOwn(patch, "toolScope")) {
+      const parsed = parseToolScope(patch.toolScope);
+      if (!parsed.ok) throw new Error(parsed.error);
+      patch = { ...patch, toolScope: parsed.scope };
+    }
+    const wideningToolScope = Object.hasOwn(patch, "toolScope") && toolScopeWidens(bot.toolScope, patch.toolScope);
+    const nextToolScope = patch.toolScope;
+    if (wideningToolScope) {
+      patch = { ...patch };
+      delete patch.toolScope;
+    }
+    // A new model moves the threads that follow the bot; one whose level the
+    // new engine would have to confirm goes back to Ask. That is a
+    // revocation, so it holds in memory like the others below.
+    const toAsk = patch.modelSelection ? (bot.tasks ?? []).filter((task) => task.modelSelection === undefined &&
+      this.switchNeedsAsk(id, task.threadId, bot.modelSelection, patch.modelSelection!)) : [];
     // Runtime revocations must become effective in memory even when disk is
     // unavailable. Profile edits use the separate atomic path below.
     Object.assign(bot, patch);
+    for (const task of toAsk) Object.assign(task, structuredClone(ASK_NOW));
     const task = this.activeTask(id);
     if (task) {
       for (const key of ["resumeCursors", "rewound", "pinnedMessageId", "unread"] as const) {
@@ -1937,7 +2067,12 @@ export class Store {
       }
       bot.unread = bot.tasks!.some(taskCountsAsBotUnread);
     }
-    this.saveBots();
+    if (wideningToolScope) {
+      // New authority becomes live only after its durable save succeeds.
+      // Other runtime revocations above still take effect on a failed write.
+      this.saveBots(this.bots.map((candidate) => candidate === bot ? { ...bot, toolScope: nextToolScope } : candidate));
+      bot.toolScope = nextToolScope;
+    } else this.saveBots();
     this.emit({ type: "bot", botId: id });
     return bot;
   }
@@ -2167,6 +2302,129 @@ export class Store {
     if (changed.length) this.saveBots();
     for (const bot of changed) this.emit({ type: "bot", botId: bot.id });
     return changed.length;
+  }
+
+  /** The removed Computer engine's saved choices move to `replacement` in one
+   * save: each bot's model, each conversation's own model, and its backups.
+   * Native resume cursors and handed-message records of the removed engine go
+   * too; the conversations stay, and the new engine reads them from the
+   * transcript. Each conversation keeps working where it did: on Auto the
+   * removed engine always ran on the bot's own cloud computer, so where
+   * `keepCloud` says that computer is still there and the new engine can use
+   * it, a moved bot's Works on becomes Cloud, and a moved conversation of an
+   * Auto bot is pinned there the way an Auto turn records where it landed.
+   * Where the new engine can't use a computer, an Auto-recorded cloud pin on
+   * a moved conversation gives way, as on a Works on change
+   * (clearAutoSurfacePins); a place the person chose stays chosen.
+   * A level the new engine would have to confirm goes back to Ask, as on
+   * every engine switch (modelSwitchNeedsAsk); a conversation that followed
+   * the bot's level keeps the level it had. Every other setting is kept.
+   * Nothing changes in memory until the save succeeds, so a failed save can
+   * be tried again. Returns one entry per moved conversation, plus one for
+   * the bot's open conversation when only the bot's own engine moved.
+   * Idempotent: nothing left names the engine. */
+  retireInstances(ids: ReadonlySet<string>, replacement: ModelSelection, options: {
+    /** The replacement's driver kind, for the approval check. */
+    driverKind?: string;
+    /** The replacement can use a computer (canWorkOnCloud). Without one, a
+     * bot on Auto stays on Auto: Works on Cloud would refuse every turn. */
+    canWorkOnCloud: boolean;
+    /** This bot, on Auto, reached its own cloud computer through the removed
+     * engine and still can: a Boat account is set, its cloud backend is Boat,
+     * and no team computer serves its section. */
+    keepCloud: (bot: BotRecord) => boolean;
+  }): ComputerEngineMove[] {
+    const retired = (selection?: { instanceId: string }) => Boolean(selection && ids.has(selection.instanceId));
+    const without = <T>(record: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(Object.entries(record).filter(([key]) => !ids.has(key)));
+    const touches = (record?: Record<string, unknown>) => Boolean(record && Object.keys(record).some(key => ids.has(key)));
+    const needsAsk = (target: Parameters<typeof approvalModeFor>[0]) =>
+      modelSwitchNeedsAsk(approvalModeFor(target), REMOVED_COMPUTER_DRIVER, options.driverKind);
+    const askNow = { approvalMode: "ask" as const, autoApprove: false, alwaysAllow: [] as string[] };
+    const changes: Array<{ bot: BotRecord; patch: Partial<BotRecord>; tasks: Partial<TaskRecord>[] }> = [];
+    const moves: ComputerEngineMove[] = [];
+    for (const bot of this.bots) {
+      const patch: Partial<BotRecord> = {};
+      const tasks = (bot.tasks ?? []).map((): Partial<TaskRecord> => ({}));
+      const botMoved = retired(bot.modelSelection);
+      const keepsCloud = options.canWorkOnCloud && options.keepCloud(bot);
+      let botAsk = false;
+      if (botMoved) {
+        if (bot.computer === undefined && keepsCloud) patch.computer = "cloud";
+        if (needsAsk(bot)) { Object.assign(patch, structuredClone(askNow)); botAsk = true; }
+        patch.modelSelection = structuredClone(replacement);
+      }
+      if (bot.fallback?.some(retired)) {
+        const kept = bot.fallback.filter(candidate => !retired(candidate));
+        patch.fallback = kept.length ? kept : undefined;
+      }
+      if (touches(bot.resumeCursors)) patch.resumeCursors = without(bot.resumeCursors);
+      const computer = patch.computer ?? bot.computer;
+      /** Where a conversation worked before the move (its own place, else
+       * the bot's Works on, and on Auto the bot's own cloud computer where
+       * keepCloud says so), and what the move did to that. */
+      const cloudAfterMove = (pin: TaskRecord["surface"], pinSource: TaskRecord["surfaceSource"]): Pick<ComputerEngineMove, "cloud" | "noComputer"> => {
+        const place = pin ?? bot.computer;
+        const wasCloud = place === "cloud" || (place === undefined && options.keepCloud(bot));
+        if (!wasCloud || options.canWorkOnCloud) return { cloud: wasCloud, noComputer: false };
+        // An Auto-recorded pin gives way (below): only the person's place
+        // or the bot's Works on can still send it to the cloud computer.
+        const personPin = pin !== undefined && pinSource !== "auto";
+        const still = personPin ? pin : bot.computer;
+        return { cloud: false, noComputer: still !== "cloud" ? "auto" : personPin ? "pin" : "works-on" };
+      };
+      (bot.tasks ?? []).forEach((task, index) => {
+        const taskPatch = tasks[index]!;
+        // Read before anything changes: a conversation that follows the bot's
+        // level has the bot's level here.
+        const before = this.projectBotForTask(bot.id, task.threadId)!;
+        // The bot's own level goes back to Ask, so a conversation that
+        // followed it keeps the level it had (as switchTaskModel does).
+        if (botAsk) {
+          Object.assign(taskPatch, {
+            approvalMode: before.approvalMode, autoApprove: before.autoApprove, alwaysAllow: structuredClone(before.alwaysAllow ?? []),
+          });
+        }
+        // The engine this conversation ran on: its own, else the bot's.
+        const moved = task.modelSelection ? retired(task.modelSelection) : botMoved;
+        if (moved) {
+          if (!botMoved && computer === undefined && task.surface === undefined && keepsCloud) {
+            taskPatch.surface = "cloud";
+            taskPatch.surfaceSource = "auto";
+          }
+          // The machine's memory of where Auto landed: with no computer on
+          // the new engine, the next turn would be refused there once.
+          if (!options.canWorkOnCloud && task.surface === "cloud" && task.surfaceSource === "auto") {
+            taskPatch.surface = undefined;
+            taskPatch.surfaceSource = undefined;
+          }
+          const ask = needsAsk(before);
+          if (ask) Object.assign(taskPatch, structuredClone(askNow));
+          if (task.modelSelection) taskPatch.modelSelection = structuredClone(replacement);
+          const scope = botMoved && task.threadId === bot.threadId ? "bot" : "conversation";
+          moves.push({ botId: bot.id, threadId: task.threadId, scope, ...cloudAfterMove(task.surface, task.surfaceSource),
+            askNow: ask || (scope === "bot" && botAsk) });
+        } else if (botMoved && task.threadId === bot.threadId) {
+          // The bot's own engine and level moved, but its open conversation
+          // has an engine of its own: it is still told, about the bot.
+          moves.push({ botId: bot.id, threadId: task.threadId, scope: "bot-only", ...cloudAfterMove(undefined, undefined), askNow: botAsk });
+        }
+        if (touches(task.resumeCursors)) taskPatch.resumeCursors = without(task.resumeCursors);
+        if (task.handedMessages && touches(task.handedMessages)) taskPatch.handedMessages = without(task.handedMessages);
+      });
+      if (Object.keys(patch).length || tasks.some(taskPatch => Object.keys(taskPatch).length)) changes.push({ bot, patch, tasks });
+    }
+    if (!changes.length) return moves;
+    const next = new Map(changes.map(({ bot, patch, tasks }) => [bot, {
+      ...bot, ...patch, tasks: bot.tasks?.map((task, index) => ({ ...task, ...tasks[index] })),
+    }]));
+    this.saveBots(this.bots.map(bot => next.get(bot) ?? bot));
+    for (const { bot, patch, tasks } of changes) {
+      bot.tasks?.forEach((task, index) => Object.assign(task, tasks[index]));
+      Object.assign(bot, patch);
+      this.emit({ type: "bot", botId: bot.id });
+    }
+    return moves;
   }
 
   setResumeCursor(botId: string, instanceId: string, cursor: unknown, threadId?: string) {
@@ -2401,6 +2659,15 @@ export class Store {
     return this.bot(botId)?.tasks?.find((t) => t.threadId === threadId);
   }
 
+  /** The thread `fromBotId` opened on this bot from its conversation
+   * `fromThreadId` with coordinate_bots: one per conversation and teammate,
+   * so whatever that conversation sends later continues it. A thread the
+   * person archived is left alone. */
+  workThread(botId: string, fromBotId: string, fromThreadId: string): TaskRecord | undefined {
+    return this.tasks(botId).find((t) => t.openedBy?.kind === "work" && t.openedBy.botId === fromBotId &&
+      t.openedBy.threadId === fromThreadId && t.archivedAt === undefined);
+  }
+
   /** A turn gets an independent snapshot without changing the selected task
    * or mutating the bot's defaults while another turn is running. */
   projectBotForTask(botId: string, threadId: string): BotRecord | null {
@@ -2471,35 +2738,58 @@ export class Store {
     return cleared;
   }
 
-  /** Model/provider changes are one configuration transaction: never publish
-   * a new provider before its confirmed approval downgrade, or change the
-   * default while leaving the selected thread behind after a write failure. */
+  /** A person picks a model in one thread, and with updateBotDefault makes it
+   * the bot's model too. A thread on its bot's model follows the bot: it
+   * keeps no model of its own. Model/provider changes are one configuration
+   * transaction: never publish a new provider before its confirmed approval
+   * downgrade, or change the default while leaving the selected thread
+   * behind after a write failure. */
   switchTaskModel(botId: string, threadId: string, selection: ModelSelection,
     updateBotDefault: boolean, resetApprovalToAsk: boolean, taskPatch: TaskPatch = {}): TaskRecord | null {
     const bot = this.bot(botId);
     const task = this.taskByThread(botId, threadId);
     if (!bot || !task) return null;
-    const patch = { modelSelection: structuredClone(selection),
-      ...(resetApprovalToAsk ? { approvalMode: "ask" as const, autoApprove: false, alwaysAllow: [] } : {}) };
-    const nextTask = persistedPin({ ...task, ...taskPatch, ...patch,
+    const approval = resetApprovalToAsk ? structuredClone(ASK_NOW) : {};
+    const own = sameModelSelection(selection, updateBotDefault ? selection : bot.modelSelection) ? undefined : structuredClone(selection);
+    const nextTask = persistedPin({ ...task, ...taskPatch, modelSelection: own, ...approval,
       ...(typeof taskPatch.title === "string" ? { title: taskPatch.title.trim().slice(0, 80) || UNTITLED_THREAD } : {}) });
-    // Older threads may still inherit settings. Freeze their effective
-    // values before updating the default so "other threads unchanged" also
-    // holds for workspaces created before per-thread approval settings.
-    const nextTasks = bot.tasks!.map((candidate) => candidate === task ? nextTask : !updateBotDefault ? candidate : {
-      ...candidate,
-      modelSelection: structuredClone(candidate.modelSelection ?? bot.modelSelection),
-      approvalMode: approvalModeFor(this.projectBotForTask(botId, candidate.threadId)!),
-      autoApprove: candidate.autoApprove ?? bot.autoApprove,
-      alwaysAllow: structuredClone(candidate.alwaysAllow ?? bot.alwaysAllow ?? []),
-    });
-    const next = { ...bot, ...(updateBotDefault ? patch : {}),
-      tasks: nextTasks };
-    this.saveBots(this.bots.map((candidate) => candidate === bot ? next : candidate));
+    // A new bot model moves the threads that follow it (withDefaultModel);
+    // every other thread keeps its model and the level it runs at now.
+    const others = updateBotDefault ? this.withDefaultModel(bot, selection)! : bot.tasks!;
+    const nextTasks = bot.tasks!.map((candidate, index) => candidate === task ? nextTask : others[index]!);
+    const botPatch = updateBotDefault ? { modelSelection: structuredClone(selection), ...approval } : {};
+    this.saveBots(this.bots.map((candidate) => candidate === bot ? { ...bot, ...botPatch, tasks: nextTasks } : candidate));
     bot.tasks!.forEach((candidate, index) => Object.assign(candidate, nextTasks[index]));
-    if (updateBotDefault) Object.assign(bot, patch);
+    Object.assign(bot, botPatch);
     this.emit({ type: "bot", botId });
     return task;
+  }
+
+  /** These threads follow their bot's model again: each one's own model is
+   * cleared ("Switch them too", "Use the bot's model", or a model that can't
+   * run here). A level the bot's engine would have to confirm goes back to
+   * Ask, as on every engine switch, and `reset` adds what a changed model
+   * needs (a hosted workspace's fresh session). One write. Returns the
+   * threads that changed; a listed thread that already follows stays as it is. */
+  followBotModel(botId: string, threadIds: readonly string[],
+    reset: (from: ModelSelection, to: ModelSelection) => Partial<TaskRecord> = () => ({})): string[] {
+    const bot = this.bot(botId);
+    if (!bot?.tasks) return [];
+    const listed = new Set(threadIds);
+    const patches = bot.tasks.map((task): Partial<TaskRecord> | null => !listed.has(task.threadId) || task.modelSelection === undefined ? null : {
+      ...reset(task.modelSelection, bot.modelSelection),
+      modelSelection: undefined,
+      ...(this.switchNeedsAsk(botId, task.threadId, task.modelSelection, bot.modelSelection) ? structuredClone(ASK_NOW) : {}),
+    });
+    const moved = bot.tasks.filter((_, index) => patches[index]).map((task) => task.threadId);
+    if (!moved.length) return [];
+    const nextTasks = bot.tasks.map((task, index) => patches[index] ? { ...task, ...patches[index] } : task);
+    this.saveBots(this.bots.map((candidate) => candidate === bot ? { ...bot, tasks: nextTasks } : candidate));
+    bot.tasks.forEach((task, index) => { if (patches[index]) Object.assign(task, patches[index]); });
+    const active = bot.tasks.find((task) => task.threadId === bot.threadId);
+    if (active) this.mirrorActiveTask(bot, active);
+    this.emit({ type: "bot", botId });
+    return moved;
   }
 
   /** One durable write: never leave only part of a bot's threads updated. */
@@ -2516,6 +2806,23 @@ export class Store {
     return bot;
   }
 
+  /** Copy this bot's saved approval level and standing approvals onto one
+   * thread. A new thread already gets them; this is how an existing
+   * conversation catches up. Other threads, the transcript, and the bot
+   * default stay put. A grant that has not committed yet is ignored, so a
+   * refresh cannot copy the temporary Ask mask. */
+  refreshTaskPermissions(botId: string, threadId: string): TaskRecord | null {
+    const bot = this.bot(botId);
+    const task = this.taskByThread(botId, threadId);
+    if (!bot || !task) return null;
+    const mode = approvalModeFor({ ...bot, approvalGrant: undefined });
+    const alwaysAllow = structuredClone(bot.alwaysAllow ?? []);
+    const autoApprove = mode === "auto";
+    const sameAllow = JSON.stringify(task.alwaysAllow ?? []) === JSON.stringify(alwaysAllow);
+    if (task.approvalMode === mode && task.autoApprove === autoApprove && sameAllow) return task;
+    return this.patchTask(botId, threadId, { approvalMode: mode, autoApprove, alwaysAllow });
+  }
+
   private mirrorActiveTask(bot: BotRecord, task: TaskRecord) {
     bot.threadId = task.threadId;
     bot.resumeCursors = structuredClone(task.resumeCursors);
@@ -2524,9 +2831,9 @@ export class Store {
   }
 
   /** A fresh context on the same bot: new thread, new session, same
-   * persona/tools/computer. Becomes the active task. It runs on the bot's
-   * default model unless the caller hands it one (a thread opened from
-   * another of this bot's threads keeps that thread's model). */
+   * persona/tools/computer. Becomes the active task. It follows the bot's
+   * model unless the caller hands it another one: a thread opened from
+   * another of this bot's threads keeps the model a person picked there. */
   createTask(botId: string, title?: string, activate = true, projectId?: string, openedBy?: TaskOpenedBy, approvalMode?: "ask" | "full",
     modelSelection?: ModelSelection): TaskRecord | null {
     const bot = this.bot(botId);
@@ -2541,7 +2848,7 @@ export class Store {
       ...(projectId ? { projectId } : {}),
       ...(openedBy ? { openedBy: structuredClone(openedBy) } : {}),
       resumeCursors: {},
-      modelSelection: structuredClone(modelSelection ?? bot.modelSelection),
+      ...(modelSelection && !sameModelSelection(modelSelection, bot.modelSelection) ? { modelSelection: structuredClone(modelSelection) } : {}),
       approvalMode: approvalMode ?? approvalModeFor(bot),
       autoApprove: approvalMode ? false : Boolean(bot.autoApprove),
       alwaysAllow: approvalMode ? [] : [...(bot.alwaysAllow ?? [])],
@@ -2607,7 +2914,10 @@ export class Store {
   titleTaskFromFirstMessage(botId: string, text: string, threadId?: string): TaskRecord | null {
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId);
     if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
-    task.title = titleFromMessage(text);
+    // "Pode": the row keeps its sentinel title, and the next message gets the naming attempt
+    if (tooShortToTitle(text)) return null;
+    // "Pode\nabrir a issue da Marluce": a first line too short to name it carries the next one
+    task.title = titleFromMessage(tooShortToTitle(text.trim().split("\n")[0]!) ? text.trim().replace(/\s*\n\s*/g, " ") : text);
     task.titleFromFirstMessage = true;
     this.saveBots();
     this.emit({ type: "bot", botId });
@@ -2645,10 +2955,15 @@ export class Store {
     return bot;
   }
 
+  /** A first run: no bot yet, so seedIfEmpty makes one. */
+  needsSeed() {
+    return this.bots.length === 0;
+  }
+
   /** First-run seed: one bot so the app never opens empty — it gets a
    * random friendly name like every other bot. */
   seedIfEmpty() {
-    if (this.bots.length) return;
+    if (!this.needsSeed()) return;
     this.createBot();
   }
 }

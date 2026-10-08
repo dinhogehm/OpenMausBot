@@ -243,6 +243,11 @@ export class SharedState {
     return state;
   }
 
+  /** The person's standing orders to `botId`, newest first. */
+  orders(botId: string): readonly OwnerOrder[] {
+    return this.state(botId).orders;
+  }
+
   /** A turn of `botId` in `thread` finished: its record, and any orders the person gave there. */
   record(botId: string, thread: ThreadState, orders: OwnerOrder[] = [], now = Date.now()): void {
     const state = this.state(botId);

@@ -6,7 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { DATA_DIR } from "./config.ts";
+import { NARRATION_NOTE } from "./turn-narration.ts";
 import { closeMessageDb,
+  botTextsWithRefsSince,
   deleteThread,
   indexMemoryFile,
   indexedMemoryFiles,
@@ -54,6 +56,16 @@ describe("message-db", () => {
     expect(userTextMessagesWith(["a", "b"], ["comigo", "canal", "conversa"], 10).map((row) => [row.threadId, row.message.id])).toEqual([["a", "a2"], ["b", "b1"], ["a", "a1"]]);
     expect(userTextMessagesWith(["a", "b"], ["comigo", "canal", "conversa"], 1).map((row) => row.message.id)).toEqual(["a2"]);
     expect(userTextMessagesWith([], ["comigo"], 10)).toEqual([]);
+  });
+
+  // INSP-R12F r2 R2-4: "The QA finished #9282…" turned into a work note still names #9282
+  it("reads back the bots' texts with a #N since a time, work notes included, other activity not", () => {
+    insertMessage("t", msg("b1", "Osvaldo, a #9058 segue parada.", { role: "bot", at: 100 }));
+    insertMessage("t", msg("b2", "The QA finished #9282 and the row is updated.", { role: "bot", kind: "activity", at: 110, tool: { name: NARRATION_NOTE, ok: true, output: "The QA finished #9282 and the row is updated." } } as Partial<Message>));
+    insertMessage("t", msg("b3", "#9999 num chip qualquer", { role: "bot", kind: "activity", at: 120, tool: { name: "Esteira parada: #9999" } } as Partial<Message>));
+    insertMessage("t", msg("u1", "e a #8675?", { at: 130 }));
+    insertMessage("t", msg("b0", "a #8204 de ontem", { role: "bot", at: 10 }));
+    expect(botTextsWithRefsSince(50).sort()).toEqual(["Osvaldo, a #9058 segue parada.", "The QA finished #9282 and the row is updated."]);
   });
 
   it("reads back the bots' tool calls by tool name, oldest first", () => {

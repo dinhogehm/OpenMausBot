@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, resumeLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, appFailureRead, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, resumeLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -370,6 +370,41 @@ describe("a repository's corridor", () => {
     expect(recentAppFailure([app("sent", { lastSend: { at: now - 8 * 60_000, confirmed: false } })], "/p", now)).toBe("a mensagem digitada na sessão \"9326 sent\" não chegou (21:02)");
     expect(recentAppFailure([app("open", { pending: { kind: "create", text: "x", since: now - 600_000, attempts: 3, triedAt: now - 300_000, lastReason: "the screen is locked" } })], "/p", now)).toBe("abrir \"9326 open\" no app falhou 3× (the screen is locked)");
     expect(recentAppFailure([app("sent", { lastSend: { at: now - 8 * 60_000, confirmed: false } })], "/other", now)).toBeNull();
+  });
+
+  // R13-dispatch R13-1: #9032 (Marluce) on 06/10, as the ledger has its two
+  // app sessions — failed, then archived by the Chief 26 s and 19 s later,
+  // with no lastError — and the Chief's cli asks at 19:28 and 19:57 BRT,
+  // both refused with "não houve falha no app nas últimas 2 h".
+  it("counts a failed app session archived afterwards: the real #9032 frees the cli (R13-1)", () => {
+    const REPO = "/Users/osvaldo/Projetos/nuria-platform";
+    const real = (id: string, failedAt: number, archivedAt: number, createdAt: number, worktree: string) => ({
+      id, ownerBotId: "871e87c8-74a4-427a-8a4e-494439e748a8", ownerThreadId: "52417e4a-656f-415b-822b-4e53e59d1337", title: "9032 Equipe em massa tickets N1", repo: REPO, permissionMode: "auto", surface: "app", worktree,
+      status: "archived", createdAt, lastActivityAt: archivedAt, turns: 0, costUsd: 0, queued: [], failedAt, archivedAt,
+      desktop: { marker: "OMB", turnsSeen: 0, issue: "9032", folderGuarded: true, own: { path: `${REPO}/.claude/worktrees/${worktree}`, branch: `omb/${worktree}`, state: "abandoned", brief: "…", classicText: "…", reason: "the app's link did not open a new session for 9032-equipe-em-massa-tickets-n1 (no empty task field); nothing was clicked or typed" } },
+    }) as unknown as CcSession;
+    const first = real("0e2ba7eb-dd8d-4a71-9b83-67d65551cf8f", 1791325667722, 1791325693554, 1791323735984, "9032-equipe-em-massa-tickets-n1-0e2ba7");
+    const second = real("7d8a26ca-ad00-4b4b-9e6f-7ad337084ab6", 1791327408569, 1791327427130, 1791325716711, "9032-equipe-em-massa-tickets-n1-7d8a26");
+    const brief = "Issue: https://github.com/dinhogehm/nuria-platform/issues/9032 (pedido da Marluce; Osvaldo aprovou no item o35 em 06/10). Abra a PR com o script.";
+    const ask = { corridor: "x", title: "9032 Equipe em massa tickets N1", brief, reason: "o app falhou 2× (link sem campo vazio)", app: "available" as const };
+    // 19:28 BRT: the first one failed at 19:27:47 and was archived at 19:28:13
+    const at1928 = Date.parse("2026-10-06T22:28:40Z");
+    const seen1 = recentAppFailure([first], REPO, at1928);
+    expect(seen1).toBe("a sessão \"9032 Equipe em massa tickets N1\" falhou no app (19:27, arquivada depois)");
+    expect(cliSurfaceRefusal({ ...ask, appFailure: seen1 })).toEqual({ onRecord: `falha recente no app: ${seen1}` });
+    // 19:57 BRT: both on record, the newest said
+    const at1957 = Date.parse("2026-10-06T22:57:30Z");
+    const seen2 = recentAppFailure([first, second], REPO, at1957);
+    expect(seen2).toBe("a sessão \"9032 Equipe em massa tickets N1\" falhou no app (19:56, arquivada depois)");
+    expect(cliSurfaceRefusal({ ...ask, appFailure: seen2 })).toMatchObject({ onRecord: expect.stringContaining("falhou no app (19:56") });
+    // 2 h later the window is over: refused again, and the refusal says what it read
+    const later = at1957 + 2 * 3_600_000 + 60_000;
+    expect(recentAppFailure([first, second], REPO, later)).toBeNull();
+    const read = appFailureRead([first, second], REPO, later);
+    expect(read).toBe("li 2 sessões do app em nuria-platform no registro de sessões; a falha mais recente é de \"9032 Equipe em massa tickets N1\" (7d8a26ca), em 06/10, 19:56, há 122 min — fora da janela de 2 h");
+    const refused = cliSurfaceRefusal({ ...ask, appFailure: null, appFailureRead: read });
+    expect("refusal" in refused && refused.refusal).toContain(`não houve falha no app nas últimas 2 h (${read})`);
+    expect(appFailureRead([], REPO, later)).toBe("li 0 sessões do app em nuria-platform no registro de sessões; nenhuma tem falha registrada");
   });
 
   it("warns when a batch puts a hotfix with a release-script change", () => {

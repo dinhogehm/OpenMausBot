@@ -315,6 +315,22 @@ describe("createDesktopSession", () => {
     expect(app.actions).toEqual(["activate", "menu new session"]);
   });
 
+  it("tells no new-session screen at all apart from a new session in another folder: only the latter asks for a session by hand (R13-dispatch R13-2c)", async () => {
+    // 06/10 from 15:10Z: after New Session the screen showed a conversation — the corridor's lines of a brief — and no field, no chips
+    const convo = ["Never skip, bypass or fake the gate; never push to main, never force.", "Order of a batch: hotfix/PO/P1 first, ahead of any Cl or infrastructure PR, and released on its", "own. PRs that change release scripts (scripts/*release*, watch-production-release, release-", "carrier) ship in a separate carrier "].map((text, i) => ({ text, y: 600 + i * 30 }));
+    const none = fakeApp({ screens: [OPEN_SESSION, convo] });
+    const step = await createDesktopSession(none.driver, { repoName: "nuria-platform", text: "brief" });
+    expect(step).toMatchObject({ ok: false, retry: true, miss: true });
+    expect(!step.ok && step.reason).toContain("New Session did not show a new session's screen (no empty task field and no folder chips");
+    expect(!step.ok && step.reason).not.toContain("by hand");
+    expect(none.actions.some((action) => action.startsWith("paste") || action.startsWith("key"))).toBe(false);
+    // 06/10 14:36Z: a new session, in the folder of the session before (b3a17a95)
+    const previous = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "nuria-platform": "9378-supervisor-papel-..." })] });
+    const other = await createDesktopSession(previous.driver, { repoName: "nuria-platform", text: "brief" });
+    expect(!other.ok && other.reason).toContain("it shows another folder in its chips");
+    expect(!other.ok && other.reason).toContain("open one session there by hand once");
+  });
+
   it("never pastes when New Session did not open (the open session's screen stays)", async () => {
     const app = fakeApp({ screens: [[...OPEN_SESSION, { text: "nuria-platform main", y: 815 }, { text: "worktree", x: 700, y: 815 }]] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "brief" })).toMatchObject({ ok: false, miss: true, reason: expect.stringContaining("did not open") });
@@ -973,7 +989,7 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     // both ways in (the tool call and the queue) go through startCcSession with this text
     const index = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
     expect(index).toContain("reusedFolderRefusal(block.last, basename(input.repo), fromQueue)");
-    expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true)");
+    expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true, item.delegation)");
     expect(index).not.toMatch(/6 de 7 creates|fechá-la sem enviar/);
   });
 

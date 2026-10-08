@@ -19,6 +19,11 @@ describe("what the owner reads on the lot's chips", () => {
     ["followed, ended", sessionChips.followedEnded(TITLE, 2), /Sessão 9326 terminou o turno 2/],
     ["followed, cut", sessionChips.followedCut(TITLE, 2), /Sessão 9326 parou.*o Chief retoma/],
     ["survivor at the limit", sessionChips.survivorLimit(TITLE, 2, 90), /Sessão 9326 cortada no limite/],
+    ["survivor at the limit, its gate running", sessionChips.survivorGateWait(TITLE, 90, "ci:local", "3 h"), /Sessão 9326 passou de 90 min, mas o gate/],
+    ["survivor cut past the gate's ceiling", sessionChips.survivorGateCut(TITLE, "ci:local", "3 h", "90 min"), /Sessão 9326 cortada com 3 h de turno, depois de esperar/],
+    ["survivor cut already past the gate's ceiling", sessionChips.survivorGateCut(TITLE, "ci:local", "3 h", null), /Sessão 9326 cortada com 3 h de turno, já além do teto/],
+    ["survivor cut, a process outlived it", sessionChips.survivorLimitJob(TITLE, 2, 90, 1), /Sessão 9326 cortada no limite de 90 min; 1 processo/],
+    ["survivor cut twice", sessionChips.survivorLimitTwice(TITLE, 90), /Sessão 9326 cortada no limite de 90 min duas vezes/],
     ["survivor stopped", sessionChips.survivorStopped(TITLE), /Sessão 9326 parada/],
     ["moved here", sessionChips.movedHere([TITLE, "9052 tempo de reabertura"], "canal do dono"), /2 sessões passam a relatar aqui/],
     ["moved here, one", sessionChips.movedHere([TITLE], "canal do dono"), /1 sessão passa a relatar aqui/],
@@ -64,6 +69,26 @@ describe("what the owner reads on the lot's chips", () => {
 // R10-dispatch R10-2: the unblock item asks the gesture that fits what the
 // records show now, is rewritten in place when it does not (the legacy o8
 // had only a title), and "Feito, conferir" says why when it did not work.
+describe("the old way's items where the server makes the worktrees (R12-1)", () => {
+  it("never ask to turn the worktree option on: the server's path needs it OFF, and the breaker's item is what ends it", () => {
+    const item = appUnblockPending("nuria-platform", "root", true);
+    const text = [item.title, item.why, ...item.steps.map((step) => step.text), ...item.options.map((option) => option.reply)].join("\n");
+    // an order to turn it on, anywhere ("Não ligue a opção" is the opposite and allowed)
+    expect(text).not.toMatch(/LIGUE|LIGAR|com a worktree ligada|(?<!Não )ligue a opção/);
+    expect(text).toContain("Não ligue a opção");
+    expect(item.title).toContain("Deixe a opção worktree DESLIGADA");
+    expect(item.steps.map((step) => step.text).join(" ")).toContain('resolva o item "O app Claude abriu … sessões de nuria-platform …"');
+    const still = appStillBlockedText({ kind: "root", last: { folder: "/r/nuria-platform", title: "9311 x" } }, "nuria-platform", true);
+    expect(still).toContain("Não ligue a opção");
+    expect(still).not.toMatch(/estava ligada/);
+    // the item of the old gesture is rewritten to this one in place
+    expect(staleUnblockItem(appUnblockPending("nuria-platform", "root"), "nuria-platform", "root", [], true)).toEqual(item);
+    expect(staleUnblockItem(item, "nuria-platform", "root", [], true)).toBeNull();
+    // without the server's worktrees, the old remedy is unchanged
+    expect(appUnblockPending("nuria-platform", "root").steps.map((step) => step.text).join(" ")).toContain("LIGUE a opção worktree");
+  });
+});
+
 describe("the owner's unblock-the-app item", () => {
   it("asks root + worktree OFF for a reused folder, worktree ON when the server's session landed in the root — same answers", () => {
     const reused = appUnblockPending("nuria-platform");
@@ -196,7 +221,7 @@ describe("the app flapping between the two blocks", () => {
     expect(item.why.split("\n")).toEqual([
       "O servidor parou de pedir gestos de destravar: cada um trouxe o outro bloqueio (2 trocas).",
       `02/10, 10:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
-      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), pede a worktree ligada",
+      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), aberta com a opção worktree desligada",
       `02/10, 12:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
       expect.stringContaining("Diagnóstico: o app não está abrindo sessões em pasta própria de forma confiável"),
     ]);

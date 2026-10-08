@@ -303,6 +303,11 @@ describe("the board's rules", () => {
     expect(card(board, "issue:9355")).toMatchObject({ state: "idle", owner: null });
   });
 
+  it("a routine's item under \"Talvez já resolvido\" is not the person's either (INSP-N22 r3 R4)", () => {
+    const board = buildPipelineBoard(boardInputs({ ownerPending: boardInputs().ownerPending.map((item) => ({ ...item, demotedAt: NOW - 10 * 60_000 })) }));
+    expect(card(board, "issue:9355")).toMatchObject({ state: "idle", owner: null });
+  });
+
   it("without the board's own read, the collector's open PRs stand in, their gate unknown", () => {
     const board = buildPipelineBoard(boardInputs({ live: null }));
     expect(card(board, "pr:9368").gate).toEqual({ status: "unknown", receipt: null, at: null });

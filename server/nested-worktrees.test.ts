@@ -1,12 +1,13 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, releasedScopeLine, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
+  archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
+  releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersLogLine, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
+import { liveRecordFolders } from "./claude-desktop.ts";
 
 const parent = "/r/nuria-platform/.claude/worktrees/9286-lote";
 const porcelain = [
@@ -270,7 +271,7 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     const told = staleFoldersReport(sized)!;
     expect(told.chip).toBe("Disco: 6 pasta(s) parada(s) há mais de 72 h fora da tag, ~15,1 GB — informação para o dono, nada foi removido");
     expect(told.report).toContain("Só informação: o servidor não removeu nada");
-    expect(told.report).toContain("(e mais 1 pequena(s), abaixo de 200 MB, não listada(s))");
+    expect(told.report).toContain("(e mais 1 pequena, abaixo de 200 MB, não listada)");
     // the Trash gives the space back only when emptied (#7d)
     expect(told.report).toContain("o espaço só volta ao esvaziar a Lixeira");
     const listed = told.report.split("\n").filter((each) => each.startsWith("- "));
@@ -635,6 +636,147 @@ describe("the low-disk alert (R10-resilience D)", () => {
   });
 });
 
+// R12-resilience D3: three old sessions of the Claude app (Feb.) kept cwd "/", and
+// isInside(workspace, "/") holds for every path: every task-workspace was "in use",
+// so D2 had no effect live. A folder above the task-workspaces root ("/", the home,
+// ~/.openmausbot) never holds one, as in planReleasedWorktrees ("or above it").
+describe("folders in use above the task-workspaces (R12-resilience D3)", () => {
+  const now = Date.UTC(2026, 9, 5, 15, 0);
+  const idle = Date.UTC(2026, 8, 29, 12, 0);
+  const home = "/Users/o";
+  const root = `${home}/.openmausbot/task-workspaces`;
+  const folders = ["82feff85/54118a8a", "82feff85/fa9d2302", "e9ba01c7/70fa6c86"].map((each) => ({ path: `${root}/${each}`, lastActivity: idle }));
+
+  it("'/', the home and ~/.openmausbot hold no task-workspace; the bot's folder, the conversation's or one inside it still do", () => {
+    for (const above of ["/", home, `${home}/`, `${home}/.openmausbot`, root]) {
+      expect(staleTaskWorkspaces(folders, { inUse: [above], now, root, home }).map((each) => each.path), above).toEqual(folders.map((each) => each.path));
+    }
+    expect(staleTaskWorkspaces(folders, { inUse: [`${root}/82feff85`], now, root, home }).map((each) => each.path)).toEqual([`${root}/e9ba01c7/70fa6c86`]);
+    expect(staleTaskWorkspaces(folders, { inUse: [`${root}/e9ba01c7/70fa6c86/repo/.claude/worktrees/x`], now, root, home }).map((each) => each.path)).toEqual([`${root}/82feff85/54118a8a`, `${root}/82feff85/fa9d2302`]);
+    // a project folder elsewhere holds nothing here
+    expect(staleTaskWorkspaces(folders, { inUse: [`${home}/Projetos/nuria-platform`], now, root, home })).toHaveLength(3);
+  });
+
+  it("end to end: app sessions with cwd '/' and the home, the real three workspaces reach the report (~6,5 GB); a session inside one keeps it out", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "omb-d3-")));
+    try {
+      const tmpHome = join(base, "home");
+      const tmpRoot = join(tmpHome, ".openmausbot", "task-workspaces");
+      const real = ["82feff85/54118a8a", "82feff85/fa9d2302", "e9ba01c7/70fa6c86", "e9ba01c7/sessao-viva"];
+      for (const each of real) {
+        mkdirSync(join(tmpRoot, each), { recursive: true });
+        utimesSync(join(tmpRoot, each), idle / 1000, idle / 1000);
+      }
+      // the Claude app's records (claude-code-sessions/<org>/<account>/local_*.json), not archived
+      const sessions = join(base, "claude-code-sessions", "org", "account");
+      mkdirSync(sessions, { recursive: true });
+      const record = (id: string, cwd: string) => writeFileSync(join(sessions, `local_${id}.json`), JSON.stringify({ sessionId: `local_${id}`, cliSessionId: id, cwd, isArchived: false, title: id }));
+      record("afe017e2", "/");
+      record("06bd2da9", "/");
+      record("6521cda0", tmpHome);
+      record("viva", join(tmpRoot, "e9ba01c7", "sessao-viva"));
+      const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
+      // what foldersInUse gathers: the app's live folders, then each open conversation
+      const inUse = [...liveRecordFolders(join(base, "claude-code-sessions"))];
+      const notes = new Map<string, string>();
+      const conversations = [
+        { workspace: join(tmpRoot, "82feff85", "54118a8a"), task: { closedBy: "lead", title: "@Lead PRODEV · parallel work", createdAt: idle, updatedAt: idle } },
+        { workspace: join(tmpRoot, "82feff85", "fa9d2302"), task: { title: "@Delivery PRODEV", createdAt: idle, updatedAt: idle } },
+        { workspace: join(tmpRoot, "e9ba01c7", "70fa6c86"), task: { title: "@Lead PRODEV", createdAt: idle, updatedAt: idle } },
+      ];
+      for (const { workspace, task } of conversations) {
+        const own = conversationFolders({ ...task, cwd: workspace }, workspace, { forDisk: true, hasGoal: false, now, day });
+        inUse.push(...own.inUse);
+        if (own.quiet) notes.set(workspace, own.quiet);
+      }
+      expect(inUse).toEqual(expect.arrayContaining(["/", tmpHome]));
+      const scanned = scanTaskWorkspaces(tmpRoot, { list: (dir) => readdirSync(dir), activity: (path) => statSync(path).mtimeMs, notes });
+      const listed = staleTaskWorkspaces(scanned, { inUse, now, root: tmpRoot, home: tmpHome, canon: realpathSync });
+      expect(listed.map((each) => [each.path.slice(tmpRoot.length + 1), each.note])).toEqual([
+        ["82feff85/54118a8a", "conversa \"@Lead PRODEV · parallel work\" fechada"],
+        ["82feff85/fa9d2302", "conversa \"@Delivery PRODEV\" aberta, parada desde 29/09"],
+        ["e9ba01c7/70fa6c86", "conversa \"@Lead PRODEV\" aberta, parada desde 29/09"],
+      ]);
+      // as the report tells them, with the sizes du gave live (2,2 + 2,2 + 2,1 GB)
+      const told = staleFoldersReport(listed.map((each, i) => ({ ...each, sizeKb: [2.2, 2.2, 2.1][i]! * 1024 * 1024 })))!;
+      expect(told.chip).toContain("3 pasta(s) parada(s) há mais de 72 h fora da tag, ~6,5 GB");
+      // not told where the root and the home are, the session in the home still holds them all
+      expect(staleTaskWorkspaces(scanned, { inUse, now, canon: realpathSync })).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+// INSP-R12a R12b-3: now that the report lists task-workspaces live, a manual claude or shell
+// working inside one must hold it, and an edit in a subfolder must count as activity
+describe("live processes and activity below the top of a task-workspace (INSP-R12a R12b-3)", () => {
+  const now = Date.UTC(2026, 9, 5, 15, 0);
+  const idle = Date.UTC(2026, 8, 29, 12, 0);
+  const home = "/Users/o";
+  const root = `${home}/.openmausbot/task-workspaces`;
+  const folders = ["82feff85/54118a8a", "82feff85/fa9d2302"].map((each) => ({ path: `${root}/${each}`, lastActivity: idle }));
+
+  it("a process working inside a task-workspace holds it; one in '/' or the home holds none", () => {
+    const listed = (processCwds: string[]) => staleTaskWorkspaces(folders, { inUse: [], processCwds, now, root, home }).map((each) => each.path);
+    expect(listed([`${root}/82feff85/54118a8a/repo/src`])).toEqual([`${root}/82feff85/fa9d2302`]);
+    // every daemon runs in "/", a login shell in the home
+    expect(listed(["/", home, "/usr/libexec"])).toEqual(folders.map((each) => each.path));
+  });
+
+  // INSP-R12a-r2 R2-3: one level was not enough (an edit in repo/src/a.ts changes no folder
+  // above it), and a cut at 200 entries could leave the newest out and call the folder idle
+  const stat = (path: string) => { try { const each = statSync(path); return { mtimeMs: each.mtimeMs, dir: each.isDirectory() }; } catch { return null; } };
+  const fsDeps = { list: (dir: string) => readdirSync(dir), stat };
+
+  it("the activity of a folder is its newest entry down to 3 levels below: a new file in repo/src counts", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "omb-r12b3-")));
+    try {
+      const ws = join(base, "54118a8a");
+      mkdirSync(join(ws, "repo", "src"), { recursive: true });
+      mkdirSync(join(ws, "repo", "node_modules", "x"), { recursive: true });
+      writeFileSync(join(ws, "notes.md"), "x");
+      writeFileSync(join(ws, "repo", "src", "a.ts"), "old");
+      writeFileSync(join(ws, "repo", "node_modules", "x", "index.js"), "x");
+      const recent = Date.UTC(2026, 9, 5, 9, 0);
+      const newer = Date.UTC(2026, 9, 5, 10, 0);
+      const old = (path: string) => utimesSync(path, idle / 1000, idle / 1000);
+      // a file written today at the third level; every folder above it stays old
+      writeFileSync(join(ws, "repo", "src", "b.ts"), "new");
+      utimesSync(join(ws, "repo", "src", "b.ts"), recent / 1000, recent / 1000);
+      for (const each of ["repo/src/a.ts", "repo/src", "repo/node_modules", "repo/node_modules/x", "repo", "notes.md", "."]) old(join(ws, each));
+      // what is skipped (node_modules, .git, builds) never counts, however new
+      utimesSync(join(ws, "repo", "node_modules", "x", "index.js"), newer / 1000, newer / 1000);
+      expect(stat(ws)!.mtimeMs).toBe(idle);
+      expect(stat(join(ws, "repo"))!.mtimeMs).toBe(idle);
+      expect(folderActivity(ws, fsDeps)).toBe(recent);
+      // so it is not told as idle since 29/09
+      expect(staleTaskWorkspaces([{ path: ws, lastActivity: folderActivity(ws, fsDeps) }], { inUse: [], now, root: base, home })).toEqual([]);
+      // all old: its newest time, the folder is told
+      old(join(ws, "repo", "src", "b.ts"));
+      expect(folderActivity(ws, fsDeps)).toBe(idle);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("past its budget of stat calls the activity is unknown, and a folder of unknown activity is never told as idle", () => {
+    let stats = 0;
+    const many = Array.from({ length: 5_000 }, (_, i) => `f${i}`);
+    const deps = { list: (dir: string) => (dir === "/w" ? many : []), stat: (path: string) => { stats += 1; return { mtimeMs: path === "/w/f4999" ? 5 : 1, dir: false }; } };
+    // the newest may be past the cut (readdir is in no order of date): no guess
+    expect(folderActivity("/w", deps, 2_000)).toBeNull();
+    expect(stats).toBeLessThanOrEqual(2_001);
+    expect(staleTaskWorkspaces([{ path: "/w", lastActivity: folderActivity("/w", deps, 2_000) }], { inUse: [], now, root: "/", home })).toEqual([]);
+    // within the budget, the newest wherever it is
+    stats = 0;
+    expect(folderActivity("/w", deps, 6_000)).toBe(5);
+    // unreadable below: the top's own time; the top unreadable: unknown
+    expect(folderActivity("/w", { list: () => { throw new Error("EACCES"); }, stat: () => ({ mtimeMs: 3, dir: true }) })).toBe(3);
+    expect(folderActivity("/w", { list: () => [], stat: () => null })).toBeNull();
+  });
+});
+
 // R11-resilience D2: a bot conversation's own folder IS its task-workspace
 // (task.cwd = the workspace), and it was pushed as "in use" before the
 // closed/quiet check — so the real 82feff85/54118a8a (closed), 82feff85/fa9d2302
@@ -681,5 +823,32 @@ describe("a conversation's folders for the disk report (R11-resilience D2)", () 
     ]);
     // nothing is removed: each is a command a person runs
     expect(listed.every((each) => each.command.startsWith("mv ") && each.command.endsWith(" ~/.Trash/"))).toBe(true);
+  });
+});
+
+// R13-followup #5: on 06/10 23:10 the chip said "1 pasta(s) … ~271 MB" and the log listed ~190 task-workspaces, nearly all "(? KB)":
+// du gives 0 KB for an empty one, which read as unmeasured. The log tells what the chip tells.
+describe("the stale folders' log line (R13-followup #5)", () => {
+  it("counts the small and the unmeasured, and lists only what the chip counts", () => {
+    const tw = (id: string) => `/Users/osvaldo/.openmausbot/task-workspaces/82feff85-aab2-4cb7-9f70-8969ec976979/${id}`;
+    const stale = [
+      { path: tw("b427dc32"), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: 277_540 },
+      ...Array.from({ length: 188 }, (_, i) => ({ path: tw(`empty-${i}`), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: i % 3 ? 0 : 8 })),
+      { path: tw("timeout"), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: null },
+    ];
+    const told = staleFoldersReport(stale)!;
+    expect(told.chip).toBe("Disco: 1 pasta(s) parada(s) há mais de 72 h fora da tag, ~271 MB — informação para o dono, nada foi removido");
+    // 63 of 8 KB, 125 empty (0 KB: measured, never "não consegui medir"), 1 unmeasured
+    expect(told.report).toContain("(e mais 63 pequenas, abaixo de 200 MB, e 125 vazias, e 1 que não consegui medir, não listadas)");
+    expect(staleFoldersReport([stale[0]!, stale.at(-1)!])!.report).toContain("(e mais 1 que não consegui medir, não listada)");
+    expect(staleFoldersReport([stale[0]!, stale[2]!])!.report).toContain("(e mais 1 vazia, não listada)");
+    // R13-resilience R13-3: the low-disk alert never counts an empty folder as unsized, and says the empty ones apart
+    const alert = diskAlertText({ freeGiB: 7, path: "/Users/osvaldo/Projetos", band: 8 }, { at: Date.parse("2026-10-07T02:10:15Z"), folders: stale.slice(1) });
+    expect(alert.report).toContain("Na última medição do servidor havia 1 pasta(s) parada(s) há mais de 72 h fora da tag cujo tamanho não consegui medir");
+    expect(alert.report).toContain("E mais 125 vazias (0 KB), que não liberam espaço.");
+    expect(diskAlertText({ freeGiB: 7, path: "/p", band: 8 }, { at: 0, folders: stale }).report).toContain("E mais 125 vazias (0 KB), que não liberam espaço.");
+    const line = staleFoldersLogLine(stale);
+    expect(line).toBe(`1 folder(s) of 200 MB or more, ~271 MB: ${tw("b427dc32")} (271 MB); 63 smaller, not listed; 125 empty (0 KB); 1 not measured: ${tw("timeout")}`);
+    expect(line).not.toContain("? KB");
   });
 });

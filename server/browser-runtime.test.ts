@@ -67,6 +67,23 @@ describe("browser takeover gate", () => {
     await expect(value.withAgentAction("s", async () => "safe screenshot")).resolves.toBe("safe screenshot");
   });
 
+  it("says whether a take waited for the bot's action, and when an interruption needs a restart", async () => {
+    const value = runtime();
+    await expect(value.take("s", "owner")).resolves.toBe(false);
+    value.release("s", "owner");
+    const action = deferred();
+    const pending = value.withAgentAction("s", () => action.promise);
+    const observed = expect(pending).rejects.toThrow(/paused/);
+    const taking = value.take("s", "owner");
+    action.resolve(); await observed;
+    await expect(taking).resolves.toBe(true);
+    expect(value.interrupted("s")).toBe(false);
+    await expect(value.withHumanAction("s", "owner", async () => { throw new Error("navigation timed out"); })).rejects.toThrow(/timed out/);
+    expect(value.interrupted("s")).toBe(true);
+    await value.close("s");
+    expect(value.interrupted("s")).toBe(false);
+  });
+
   it("release cancels an in-flight take and does not grant control afterwards", async () => {
     const value = runtime();
     const action = deferred();
@@ -358,6 +375,29 @@ describe("server-owned browser MCP runtime", () => {
     const revoked = () => { throw new Error("capability revoked"); };
     await expect(value.agentRpc("s", spec(), "tools/call", { name: "restart_browser" }, revoked)).rejects.toThrow(/revoked/);
     expect(closeBrowser).not.toHaveBeenCalled();
+  });
+
+  it("sizes the browser page once per transport, before the first call that may launch it", async () => {
+    const order: string[] = [];
+    const applyViewport = vi.fn(async () => { order.push("viewport"); return true; });
+    const value = runtime({ applyViewport });
+    await value.agentRpc("s", spec(), "tools/list", {});
+    expect(applyViewport).not.toHaveBeenCalled();
+    const first = await value.agentRpc("s", spec(), "tools/call", { name: "echo", arguments: { text: "first" } }) as { content: Array<{ text: string }> };
+    order.push(first.content[0]!.text);
+    await value.agentRpc("s", spec(), "tools/call", { name: "echo", arguments: { text: "second" } });
+    expect(applyViewport).toHaveBeenCalledOnce();
+    expect(applyViewport).toHaveBeenCalledWith(spec());
+    expect(order[0]).toBe("viewport");
+    expect(order[1]).toContain("first");
+    await value.close("s");
+    await value.agentRpc("s", spec(), "tools/call", { name: "echo" });
+    expect(applyViewport).toHaveBeenCalledTimes(2);
+  });
+
+  it("still runs the bot's call when sizing the page fails", async () => {
+    const value = runtime({ applyViewport: async () => { throw new Error("engine without viewport"); } });
+    await expect(value.agentRpc("s", spec(), "tools/call", { name: "echo", arguments: { text: "works" } })).resolves.toMatchObject({ content: [{ type: "text" }] });
   });
 
   it("keeps completed MCP refusals distinct from uncertain transport failure", async () => {

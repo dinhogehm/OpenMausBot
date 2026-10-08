@@ -10,6 +10,7 @@ import { cn } from "@/lib/cn";
 import { t, tFromServer } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import { SkillRequestPreview } from "@/components/SkillRequestPreview";
+import { composioActionPhrase, outboundSummary } from "@/lib/approval-summary";
 
 interface ToolLabels {
   [tool: string]: LocaleKey;
@@ -49,7 +50,8 @@ export function approvalCardOutcome(card: OptionCardData): string | undefined {
 }
 
 /** The tool's own name is noise to a human: mcp__ogb__computer_batch is
- * "computer batch", Bash is "run a command". */
+ * "computer batch", Bash is "run a command", LINEAR_CREATE_LINEAR_COMMENT
+ * is "create linear comment". */
 export function toolLabel(tool?: string): string {
   if (!tool) return t("approval.tool.takeAction");
   const bare = tool.replace(/^mcp__[^_]+__/, "").replace(/_/g, " ");
@@ -82,7 +84,8 @@ export function toolLabel(tool?: string): string {
     tool: "approval.tool.useTool",
   };
   const key = nice[tool];
-  return key ? t(key) : bare;
+  if (key) return t(key);
+  return composioActionPhrase(tool.replace(/^mcp__[^_]+__/, "")) ?? bare;
 }
 
 export function ApprovalCard({
@@ -90,13 +93,15 @@ export function ApprovalCard({
   message,
 }: {
   /** who is asking, for the "Name wants to …" line */
-  bot?: Bot;
+  bot?: Pick<Bot, "name">;
   message: Message;
 }) {
   const card = message.card;
   if (!card) return null;
   const settled = card.answered;
   const expired = card.expired === true;
+  // decided by voice on a Live call rather than tapped
+  const byVoice = card.answeredBy?.via === "call" ? <span className="text-ink-tertiary">· {t("approval.status.byVoice")}</span> : null;
   const isRoutineRequest = Boolean(card.routineRequest);
   const isSkillRequest = Boolean(card.skillRequest);
   const isProfileRequest = Boolean(card.profileRequest);
@@ -105,6 +110,9 @@ export function ApprovalCard({
   const skillAction = card.skillRequest?.action;
   const heldNote = tFromServer(card.heldCode, card.held);
   const outcome = approvalCardOutcome(card);
+  // A held outbound action reads as what it sends and where, the way the
+  // phones show it, not as the slug the bot happened to call.
+  const outbound = outboundSummary(card);
   const displayTool = isRoutineRequest
     ? routineAction === "create" ? "schedule_routine" : "manage_routine"
     : isSkillRequest
@@ -135,7 +143,7 @@ export function ApprovalCard({
     >
       <div className="flex items-baseline justify-between gap-3">
         <div className="text-[15px] font-semibold text-ink">
-          {isTeamSetup ? card.title : profileHeader ?? (
+          {isTeamSetup ? card.title : outbound ? outbound.headline : profileHeader ?? (
             <>
               {bot
                 ? t("approval.card.namedWantsTo", { name: bot.name, action: toolLabel(displayTool) })
@@ -143,8 +151,9 @@ export function ApprovalCard({
             </>
           )}
         </div>
-        {displayTool && !isTeamSetup && <span className="shrink-0 font-mono text-[11px] text-ink-secondary">{displayTool}</span>}
+        {displayTool && !isTeamSetup && !outbound && <span className="shrink-0 font-mono text-[11px] text-ink-secondary">{displayTool}</span>}
       </div>
+      {outbound?.summary && <div className="mt-0.5 text-[13px] text-ink-secondary">{outbound.summary}</div>}
 
       {/* what, exactly */}
       <pre
@@ -177,6 +186,7 @@ export function ApprovalCard({
         {outcome ? (
           <>
             {settled === "allow" && !expired ? <Check size={14} className="text-success" /> : <X size={14} />} {outcome}
+            {byVoice}
           </>
         ) : (
           <>

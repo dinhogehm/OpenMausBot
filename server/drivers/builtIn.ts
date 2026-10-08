@@ -2,7 +2,6 @@
 // array, nothing more. Adding a driver = write drivers/<x>.ts, append.
 import type { AnyProviderDriver } from "../contracts.ts";
 import { AntigravityDriver } from "./antigravity.ts";
-import { BoatAgentDriver } from "./boatagent.ts";
 import { ClaudeDriver } from "./claude.ts";
 import { CodexDriver } from "./codex.ts";
 import { GrokDriver } from "./grok.ts";
@@ -18,6 +17,7 @@ import { HermesAgentDriver } from "./acp/hermes.ts";
 import { OpenAICompatDriver } from "./openai-compat.ts";
 import { PiDriver } from "./pi.ts";
 import { MistralDriver } from "./mistral.ts";
+import { CerebrasDriver } from "./cerebras.ts";
 import { MinimaxDriver } from "./minimax.ts";
 
 export const BUILT_IN_DRIVERS: readonly AnyProviderDriver[] = [
@@ -36,7 +36,7 @@ export const BUILT_IN_DRIVERS: readonly AnyProviderDriver[] = [
   ClaudeDriver,
   CodexDriver,
   AntigravityDriver,
-  BoatAgentDriver,
   MinimaxDriver,
   MistralDriver,
+  CerebrasDriver,
 ];

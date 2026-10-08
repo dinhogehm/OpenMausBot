@@ -22,11 +22,20 @@
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import { parseAskQuestions, questionAnswersByQuestion } from "../shared/ask-question.ts";
+import { allowsTool, parseToolScope } from "../shared/tool-scope.ts";
+
+const selection = parseToolScope(process.env.OMB_PERMISSION_TOOL_SCOPE === undefined
+  ? undefined : (() => { try { return JSON.parse(process.env.OMB_PERMISSION_TOOL_SCOPE); } catch { return null; } })());
+if (!selection.ok) throw new Error(selection.error);
+const allowQuestion = allowsTool(selection.scope, { kind: "mcp", server: "ogb", name: "ask_user" });
 
 const socketPath = process.argv[2] ?? "";
 
 const waiting = new Map<string, (msg: any) => void>();
 const conn = connect(socketPath);
+// Both streams below carry JSON lines that can be larger than one read.
+// Decoding as a stream keeps a character split across two reads whole.
+conn.setEncoding("utf8");
 
 interface AllowPermissionResult {
   behavior: "allow";
@@ -185,11 +194,13 @@ async function handle(msg: any) {
       },
     });
   }
-  if (msg.method === "tools/list") return send({ jsonrpc: "2.0", id: msg.id, result: { tools: TOOLS } });
+  // approve is the CLI's private permission callback, not an execution grant.
+  if (msg.method === "tools/list") return send({ jsonrpc: "2.0", id: msg.id, result: { tools: TOOLS.filter((tool) => tool.name === "approve" || allowQuestion) } });
   if (msg.method === "tools/call") {
     const name = msg.params?.name;
     const args = msg.params?.arguments ?? {};
     const reply = (text: string) => send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text }] } });
+    if (name === "ask_user" && !allowQuestion) return reply("OpenMausBot: this question tool is excluded by the bot's tool selection.");
     // AskUserQuestion is a question wearing a permission's clothes. It never
     // continues into the permission path below — see nativeQuestions.
     if (name === "approve" && args.tool_name === ASK_USER_QUESTION) {
@@ -229,6 +240,7 @@ async function handle(msg: any) {
 }
 
 let inBuf = "";
+process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   inBuf += chunk;
   let nl;

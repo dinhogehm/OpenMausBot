@@ -34,7 +34,8 @@ export function resolveProxy(relative: string): string {
  * the smoke test can assert each one actually exists in a packaged layout —
  * the check that would have caught the 0.1.24 breakage. */
 export const SPAWNED_PROXIES = {
-  browser: resolveProxy("browser-proxy"),
+  // The built-in browser and the cloud computer: argv[2] picks which.
+  harnessMcp: resolveProxy("harness-mcp-proxy"),
   localComputer: resolveProxy("local-computer-proxy"),
   permission: resolveProxy("permission-proxy"),
   containerMcp: resolveProxy("container-mcp"),
@@ -43,6 +44,7 @@ export const SPAWNED_PROXIES = {
   dweb: resolveProxy("drivers/dweb-proxy"),
   connectors: resolveProxy("connector-proxy"),
   mcpGate: resolveProxy("mcp-gate"),
+  mcpRemote: resolveProxy("mcp-remote-proxy"),
   phone: resolveProxy("drivers/phone-proxy"),
   hook: resolveProxy("hooks/omb-hook"),
   // Loaded by the external `pi` process via `-e`, not by this server — but

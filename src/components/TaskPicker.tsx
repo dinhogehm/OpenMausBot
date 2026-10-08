@@ -10,6 +10,7 @@ import { useStore, type Bot, type BotProject, type Group, type Task } from "@/st
 import { cn } from "@/lib/cn";
 import { useMenuMotion } from "./MenuMotion";
 import { t } from "@/lib/i18n";
+import { shownTaskTitle, titleMatches } from "@/lib/thread-title";
 import { COMPACT_BUBBLE } from "@/lib/compact-chip";
 import { formatTaskTokens, headlineTokens, usageDetail } from "@/lib/usage";
 import { nextRename } from "@/lib/rename";
@@ -40,15 +41,16 @@ export function taskPickerPointerIntent(
 /** Filter the task switcher. Prefix matches float first so a few letters
  * still find the right row in a long list; within a tier the caller's
  * order (newest first) is preserved. */
-export function filterTasks<T extends { title: string }>(tasks: readonly T[], query: string): T[] {
+export function filterTasks<T extends { title: string; openedBy?: { name: string } | null }>(tasks: readonly T[], query: string): T[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return [...tasks];
   const prefix: T[] = [];
   const substring: T[] = [];
   for (const task of tasks) {
-    const title = task.title.toLowerCase();
-    if (title.startsWith(needle)) prefix.push(task);
-    else if (title.includes(needle)) substring.push(task);
+    // the title as stored and as shown both count (R12-visual N21)
+    const titles = [task.title.toLowerCase(), shownTaskTitle(task).toLowerCase()];
+    if (titles.some((title) => title.startsWith(needle))) prefix.push(task);
+    else if (titles.some((title) => title.includes(needle))) substring.push(task);
   }
   return [...prefix, ...substring];
 }
@@ -230,7 +232,7 @@ function ConversationTaskPicker({
   // a query narrows it by thread title or bot name rather than hiding it.
   const attentionNeedle = query.trim().toLowerCase();
   const attentionRows = (attention ?? []).filter((entry) =>
-    !attentionNeedle || entry.task.title.toLowerCase().includes(attentionNeedle) || attentionOwnerName(entry).toLowerCase().includes(attentionNeedle));
+    !attentionNeedle || titleMatches(entry.task, attentionNeedle) || attentionOwnerName(entry).toLowerCase().includes(attentionNeedle));
   const looking = query.trim();
   // One result list for keyboard, count, and empty state: an attention row
   // that matches the query is a real result even when no tree thread does.
@@ -357,7 +359,7 @@ function ConversationTaskPicker({
                       className="min-w-0 flex-1 text-left"
                       title={t("task.renameHint")}
                     >
-                      <div className="truncate text-[13px] text-ink">{task.title}</div>
+                      <div className="truncate text-[13px] text-ink">{shownTaskTitle(task)}</div>
                       <div className="text-[11px] text-ink-secondary">
                         {task.activity === "waiting-on-you" ? `${t("task.waiting")} · ` : task.waitingForTeammates ? `${t("task.waitingOnTeammate")} · ` : task.busy ? `${t("chat.activity.working")} · ` : task.unread ? `${t("task.unread")} · ` : ""}
                         <TaskUpdatedTime task={task} now={now} />
@@ -381,7 +383,7 @@ function ConversationTaskPicker({
                     <button
                       type="button"
                       onClick={() => startRename(task)}
-                      aria-label={t("task.renameNamed", { title: task.title })}
+                      aria-label={t("task.renameNamed", { title: shownTaskTitle(task) })}
                       title={t("task.renameTitle")}
                       className="rounded p-1 text-ink-secondary opacity-0 hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 touch:opacity-70"
                     >
@@ -390,7 +392,7 @@ function ConversationTaskPicker({
                   )}
                   {bot && onMove && (bot.projects?.length ?? 0) > 0 && <label title={t("folder.move")} className="relative rounded p-1 text-ink-secondary opacity-0 hover:bg-raised hover:text-ink focus-within:opacity-100 group-hover:opacity-100 touch:opacity-70">
                     <FolderInput size={13} />
-                    <select aria-label={t("folder.moveNamed", { title: task.title })} value={bot.projects?.some((project) => project.id === task.projectId) ? task.projectId : ""}
+                    <select aria-label={t("folder.moveNamed", { title: shownTaskTitle(task) })} value={bot.projects?.some((project) => project.id === task.projectId) ? task.projectId : ""}
                       onFocus={clearDismiss} onChange={(event) => { clearDismiss(); onMove(task.threadId, event.target.value || null); }}
                       className="absolute inset-0 w-full cursor-pointer opacity-0">
                       <option value="">{t("folder.none")}</option>
@@ -450,10 +452,10 @@ export function BotActivityPicker({ bot }: { bot: Bot }) {
       >
         <option value="" disabled>{t("task.otherActivity", { count: activity.length })}</option>
         {activity.map((task) => <option key={task.threadId} value={task.threadId}>
-          {task.title} · {task.activity === "waiting-on-you" ? t("task.waiting") : task.waitingForTeammates ? t("task.waitingOnTeammate") : task.busy || task.activity === "working" ? t("chat.activity.working") : task.queued ? t("task.queued") : t("task.unread")}
+          {shownTaskTitle(task)} · {task.activity === "waiting-on-you" ? t("task.waiting") : task.waitingForTeammates ? t("task.waitingOnTeammate") : task.busy || task.activity === "working" ? t("chat.activity.working") : task.queued ? t("task.queued") : t("task.unread")}
         </option>)}
       </select>
-      <span className="truncate text-[12px] text-ink-secondary">{bot.tasks?.find((task) => task.threadId === bot.threadId)?.title}</span>
+      <span className="truncate text-[12px] text-ink-secondary">{(() => { const current = bot.tasks?.find((task) => task.threadId === bot.threadId); return current ? shownTaskTitle(current) : null; })()}</span>
     </div>
   );
 }

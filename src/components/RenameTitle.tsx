@@ -15,6 +15,7 @@ export function RenameTitle({
   onActivate,
   showEditButton = false,
   className,
+  editButtonClassName,
   inputClassName,
   showValueInTooltip = false,
   wrapperClassName,
@@ -27,6 +28,8 @@ export function RenameTitle({
   /** Preserve deliberate inline rename beside an onActivate title. */
   showEditButton?: boolean;
   className?: string;
+  /** Resizes the pencil where 40px is too big (inside a pill). */
+  editButtonClassName?: string;
   inputClassName?: string;
   /** Put the whole value in the tooltip, for rows that truncate it. */
   showValueInTooltip?: boolean;
@@ -108,7 +111,7 @@ export function RenameTitle({
           onClick={startRename}
           aria-label={t("rename.named", { name: value })}
           title={t("rename.agent")}
-          className="flex size-10 shrink-0 items-center justify-center rounded text-ink-secondary opacity-70 hover:bg-raised hover:text-ink hover:opacity-100"
+          className={cn("flex size-10 shrink-0 items-center justify-center rounded text-ink-secondary opacity-70 hover:bg-raised hover:text-ink hover:opacity-100", editButtonClassName)}
         >
           <Pencil size={12} />
         </button>

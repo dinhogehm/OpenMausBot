@@ -28,24 +28,34 @@ function gateNeeds(runtime: string) {
 }
 
 describe("CI concurrency", () => {
-  it("supersedes old PR checks but lets every main and merge-queue run finish", () => {
+  it("supersedes old PR checks but never cancels a running main or merge-queue run", () => {
     expect(workflow.on.push.branches).toEqual(["main"]);
     expect(workflow.on).toHaveProperty("merge_group");
     expect(workflow.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
   });
 
-  it("gives each main commit, PR and merge-queue entry its own group", () => {
+  it("keeps main to one running and one waiting run, apart from PR and merge-queue groups", () => {
+    // One group for every main push: GitHub keeps the running run and only
+    // the newest waiting one, so a burst of merges cannot pile up full runs.
     expect(workflow.concurrency.group).toBe(
-      "ci-${{ github.event_name == 'merge_group' && github.event.merge_group.head_ref || github.event_name == 'push' && github.sha || github.ref }}",
+      "ci-${{ github.event_name == 'merge_group' && github.event.merge_group.head_ref || github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}",
     );
   });
 
   it("stops a closed PR's run by joining ci.yml's PR group", () => {
     const stop = parse(readFileSync(new URL("../.github/workflows/ci-stop-closed.yml", import.meta.url), "utf8"));
     expect(stop.on).toEqual({ pull_request: { types: ["closed"] } });
-    expect(stop.concurrency).toEqual({ group: "ci-${{ github.ref }}", "cancel-in-progress": true });
-    // For pull_request events ci.yml's group expression reduces to github.ref.
-    expect(workflow.concurrency.group.endsWith("|| github.ref }}")).toBe(true);
+    expect(stop.concurrency).toEqual({ group: "ci-pr-${{ github.event.pull_request.number }}", "cancel-in-progress": true });
+    // For pull_request events ci.yml's group expression reduces to pr-<number>.
+    expect(workflow.concurrency.group).toContain("github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number)");
+  });
+
+  it("never lets a merged PR's stop run join main's group", () => {
+    // A merged PR's closed event reports the base branch as github.ref, so any
+    // ref-named group here cancelled main's CI on every merge (Oct 3 2026).
+    const stop = parse(readFileSync(new URL("../.github/workflows/ci-stop-closed.yml", import.meta.url), "utf8"));
+    expect(stop.concurrency.group).not.toContain("github.ref");
+    expect(stop.concurrency.group).toContain("github.event.pull_request.number");
     expect(stop.permissions).toEqual({});
   });
 
@@ -61,30 +71,30 @@ describe("CI concurrency", () => {
     expect(workflow.jobs.vitest.strategy.matrix).toEqual({
       os: "${{ fromJSON(needs.static.outputs.vitest_os) }}", shard: [1, 2, 3, 4],
     });
+    expect(workflow.jobs.vitest["timeout-minutes"]).toBe("${{ matrix.os == 'ubuntu-latest' && 20 || 35 }}");
   });
 
-  it("keeps each PR to one macOS job unless native code changed", () => {
+  it("keeps each PR to one macOS job", () => {
     const macosJobs = Object.entries(workflow.jobs as Record<string, { "runs-on": string; strategy?: { matrix?: { os?: unknown } } }>)
       .filter(([, job]) => job["runs-on"] === "macos-latest" || JSON.stringify(job.strategy?.matrix?.os ?? "").includes("macos"))
       .map(([name]) => name);
-    expect(macosJobs.sort()).toEqual(["electron-smokes", "ios"]);
+    expect(macosJobs.sort()).toEqual(["electron-smokes"]);
     const smokes = workflow.jobs["electron-smokes"].steps.map((step: { run?: string }) => step.run);
     expect(smokes).toContain("pnpm test:packaged-server");
-    expect(workflow.jobs.ios.steps.some((step: { run?: string }) => step.run?.includes("verify-ios-thread-navigation"))).toBe(false);
-    const ui = parse(readFileSync(new URL("../.github/workflows/ios-thread-ui.yml", import.meta.url), "utf8"));
-    expect(ui.jobs["thread-ui"].steps.some((step: { run?: string }) => step.run === "bash scripts/verify-ios-thread-navigation-ci.sh")).toBe(true);
-    expect(Object.keys(ui.on).sort()).toEqual(["push", "schedule", "workflow_dispatch"]);
   });
 
   it("makes a release wait for its commit's CI gate before any draft", () => {
     const release = parse(readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8"));
     expect(release.jobs.assemble.needs).toContain("ci");
     expect(release.jobs.ci.needs).toBe("prepare");
-    const wait = release.jobs.ci.steps[0];
+    expect(release.jobs.ci.permissions).toEqual({ actions: "write", contents: "write" });
+    const wait = release.jobs.ci.steps.find((step: { run?: string }) => step.run === "node scripts/release-ci.mjs");
     expect(wait.if).toBe("${{ !inputs.ship_without_ci }}");
-    expect(wait.run).toContain("actions/workflows/ci.yml/runs?head_sha=$SHA");
-    expect(wait.run).toContain(`select(.name == "${workflow.jobs.gate.name}")`);
-    expect(wait.run).toContain('[ "$gate" = success ] && exit 0');
+    expect(wait.env).toMatchObject({ SHA: "${{ needs.prepare.outputs.sha }}", VERSION: "${{ needs.prepare.outputs.version }}" });
+    // The script reads ci.yml's gate by its job name.
+    expect(readFileSync(new URL("./release-ci.mjs", import.meta.url), "utf8")).toContain(`job.name === "${workflow.jobs.gate.name}"`);
+    // The release lane is a branch, so its runs get their own concurrency group.
+    expect(workflow.on).toHaveProperty("workflow_dispatch");
   });
 
   it.each(requiredRuntimeJobs)("fails closed for every required %s outcome", (job) => {
@@ -115,7 +125,7 @@ describe("CI concurrency", () => {
     expect(workflow.jobs.static.steps[0].with["fetch-depth"]).toBe(0);
     expect(workflow.jobs.static.steps.find((step: { id?: string }) => step.id === "scope").run).toBe("node scripts/ci-scope.mjs");
     expect(workflow.jobs.static.outputs).toEqual({
-      runtime: "${{ steps.scope.outputs.runtime }}", mobile: "${{ steps.scope.outputs.mobile }}",
+      runtime: "${{ steps.scope.outputs.runtime }}",
       vitest_os: "${{ steps.scope.outputs.vitest_os }}",
     });
     expect(workflow.jobs.static.steps.some((step: { run?: string }) =>
@@ -129,10 +139,17 @@ describe("CI concurrency", () => {
         expect(job.needs).toEqual(["control-plane"]);
         expect(job.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
         expect(workflow.jobs.gate.needs).not.toContain(name);
+        // Without the Cloudflare token the deploy is skipped with a warning, not failed:
+        // every step after the token check waits on it.
+        const [check, ...rest] = job.steps as { id?: string; if?: string; env?: Record<string, string>; run?: string }[];
+        expect(check.id).toBe("token");
+        expect(check.env).toEqual({ CLOUDFLARE_API_TOKEN: "${{ secrets.CLOUDFLARE_API_TOKEN }}" });
+        expect(check.run).toContain("::warning");
+        for (const step of rest) expect(step.if).toBe("steps.token.outputs.present == 'true'");
         continue;
       }
       expect(job.needs).toBe("static");
-      expect(job.if).toBe(`needs.static.outputs.${["ios", "android"].includes(name) ? "mobile" : "runtime"} == 'true'`);
+      expect(job.if).toBe("needs.static.outputs.runtime == 'true'");
     }
   });
 

@@ -27,10 +27,12 @@
 // promised wake nor forgets a running goal.
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
+import type { RowCheck, Superseded } from "./owner-pending-guard.ts";
 import { leadingVocative } from "./owner-channel.ts";
 import { languageReminder } from "./reply-language.ts";
 import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
+import type { OwnerDelegation, OwnerDelegationBack } from "./owner-delegate.ts";
 import { chatStartHash, chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
 export const SEEN_CHAT_MS = 24 * 3_600_000;
@@ -237,6 +239,28 @@ export interface OwnerPending {
   awaitingSince?: number;
   /** Last time the bot rewrote it (owner_pending update). */
   updatedAt?: number;
+  /** A routine's item (server/routine-owner-ask.ts): the last time the routine said it. */
+  lastSaidAt?: number;
+  /** A routine's item: runs of its routine in a row that did not name it since it was last said (or kept). */
+  quietRuns?: number;
+  /** A routine's item said once and let go (48 h and 2 runs without it): out of the count, under "Talvez já resolvido". */
+  demotedAt?: number;
+  /** The owner said "Ainda vale": back on top, the 48 h and 2 runs count again from here. */
+  keptAt?: number;
+  /** A routine's item: the routine that said it (its runs are counted by it, not by a name that may change). */
+  routineId?: string;
+  /** The owner delegated it to a Claude Code session (lote del): out of the count while it runs. */
+  delegation?: OwnerDelegation;
+  /** It came back from a delegation (partial, stopped by the hook, never opened): on top, with why. */
+  delegationBack?: OwnerDelegationBack;
+  /** Another bot's item (or another of its own) said this one's commands must not run (R13-intake #1): decisions and commands off. */
+  supersededBy?: Superseded;
+  /** What the server last read of the fixed sheet rows its commands write (R13-intake #1), one per row. */
+  rowChecks?: RowCheck[];
+  /** A disk item's folders kept out, each "name (why)" (INSP-R13fol #8). */
+  diskKept?: string[];
+  /** A bot's mixed item: the folders whose removal was taken to the server's disk item — an answer naming them authorizes nothing (R5-1). */
+  diskMoved?: string[];
 }
 
 /** One answer of the person to an item (J18). */
@@ -375,6 +399,8 @@ function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: Resolv
     id: item.id, botId: item.botId, threadId: item.threadId, title: item.title, createdAt: item.createdAt, resolvedAt, resolvedBy,
     ...(note ? { resolvedNote: note } : {}),
     ...(item.key ? { key: item.key } : {}),
+    // a routine's item keeps the words it quoted: the routine repeating the SAME pendency is told from a new one (INSP-N22 A2)
+    ...(item.key?.startsWith("routine-ask:") && item.why ? { why: item.why } : {}),
     ...(item.history?.length ? { history: item.history.slice(-OWNER_PENDING_HISTORY_MAX) } : {}),
   };
 }
@@ -451,6 +477,10 @@ export interface AskPromotion {
   reportThreadId: string;
   /** The item the bot opened for it, linked by owner_pending add replacesAsk. */
   itemId?: string;
+  /** That item's conversation and birth: with its id, the one item (ids were
+   * reused before the counter — the Monitor had two "o2"; R12-followup #3). */
+  itemThreadId?: string;
+  itemCreatedAt?: number;
   /** When the server saw the person answer it in the conversation itself (settled once). */
   answeredAt?: number;
 }
@@ -530,6 +560,16 @@ export function ownerPendingRecommendNote(item: Pick<OwnerPending, "id">): strin
 export function ownerPendingRecommendText(item: Pick<OwnerPending, "title">, botName: string): string {
   return `${botName}, qual destas decisões você recomenda para «${item.title}», e por quê?`;
 }
+
+/** 7 for "o7"; 0 for anything else. */
+function ownerPendingNumber(id: string): number {
+  const match = /^o(\d+)$/.exec(id);
+  return match ? Number(match[1]) : 0;
+}
+
+/** The item said again with the same commands and decisions (or none sent): what was said of them still holds. */
+const sameCommands = (existing: OwnerPending, input: { steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }) =>
+  (!input.steps?.length || JSON.stringify(input.steps) === JSON.stringify(existing.steps)) && (!input.options?.length || JSON.stringify(input.options) === JSON.stringify(existing.options));
 
 /** A saved item's structured part, read back defensively (an older ledger
  * has none; a hand-edited one may carry anything). */
@@ -651,6 +691,20 @@ interface Ledger {
   standingLost?: StandingLost[];
   /** Questions a bot left in a conversation, asked once to become items (lot J2). */
   askPromotions?: AskPromotion[];
+  /** Per bot, the number of its last "oN": ids only go up, never reused (R12-followup #3). */
+  ownerPendingSeq?: Record<string, number>;
+  /** "Push e remover" answered: the commits the server looks for on the remote after the turn that carries the answer (INSP-R13fol R2-4). */
+  diskPushChecks?: DiskPushCheck[];
+}
+
+/** One "Push e remover" answer the server checks on the remote, kept across a restart. */
+export interface DiskPushCheck {
+  botId: string;
+  /** The conversation the answer was sent to, and when, and how it begins: the turn that carried it ends there. */
+  threadId: string;
+  at: number;
+  marker: string;
+  folders: Array<{ name: string; branch?: string; head: string }>;
 }
 
 /** A conversation whose last standing watch was cancelled: a watcher bot
@@ -761,6 +815,8 @@ export class BotAutonomy {
   private ownerPending: OwnerPending[] = [];
   private resolvedOwnerPending: ResolvedOwnerPending[] = [];
   private askPromotions: AskPromotion[] = [];
+  private pushChecks: DiskPushCheck[] = [];
+  private ownerPendingSeq = new Map<string, number>();
   /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Each watch's complete output lines of its last run (kept across restarts for that very output). */
@@ -826,6 +882,12 @@ export class BotAutonomy {
       }
       this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy, typeof item.resolvedNote === "string" ? item.resolvedNote : undefined)));
       const folded = this.foldEquivalentPending();
+      // the counter starts past every "oN" the bot ever had, open, folded or settled (ledgers before it reused them)
+      for (const [botId, seq] of Object.entries(raw.ownerPendingSeq ?? {})) if (Number.isFinite(seq)) this.ownerPendingSeq.set(botId, seq);
+      for (const item of [...this.ownerPending, ...this.resolvedOwnerPending]) {
+        const top = Math.max(0, ...[item.id, ...(item.aliases ?? [])].map(ownerPendingNumber));
+        if (top > (this.ownerPendingSeq.get(item.botId) ?? 0)) this.ownerPendingSeq.set(item.botId, top);
+      }
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
       }
@@ -833,6 +895,9 @@ export class BotAutonomy {
         if (asked && typeof asked.botId === "string" && typeof asked.threadId === "string" && typeof asked.text === "string" && Number.isFinite(asked.askAt) && Number.isFinite(asked.askedAt)) {
           this.askPromotions.push({ ...asked, reportThreadId: typeof asked.reportThreadId === "string" ? asked.reportThreadId : asked.threadId });
         }
+      }
+      for (const check of raw.diskPushChecks ?? []) {
+        if (check && typeof check.botId === "string" && typeof check.threadId === "string" && typeof check.marker === "string" && Number.isFinite(check.at) && Array.isArray(check.folders)) this.pushChecks.push(check);
       }
       // Turns a restart cut off: what woke them is due again, marked as such.
       const at = this.now();
@@ -869,7 +934,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}) };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}), ...(this.pushChecks.length ? { diskPushChecks: this.pushChecks } : {}), ...(this.ownerPendingSeq.size ? { ownerPendingSeq: Object.fromEntries(this.ownerPendingSeq) } : {}) };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -893,12 +958,15 @@ export class BotAutonomy {
     input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean; label?: string; ignore?: string },
   ): BotWake {
     const at = this.now();
+    // the same standing watch set again with the same note keeps the note's age
+    const before = input.standing ? this.standingFor(threadId, input.label ?? STANDING_DEFAULT_LABEL) : null;
+    const sameNote = before?.watch && before.botId === botId && before.reason === input.reason ? before : null;
     const wake: BotWake = {
       botId,
       threadId,
       dueAt: at + input.maxMinutes * this.minuteMs,
       reason: input.reason,
-      createdAt: at,
+      createdAt: sameNote?.createdAt ?? at,
       watch: {
         command: input.command,
         argv: input.argv,
@@ -912,7 +980,8 @@ export class BotAutonomy {
         runs: 1,
         failures: 0,
         changedAt: at,
-        reasonAt: at,
+        // a legacy note of unknown age stays unknown ("more than N"), its createdAt kept (INSP-R12F F9)
+        ...(sameNote ? (sameNote.watch?.reasonAt !== undefined ? { reasonAt: sameNote.watch.reasonAt } : {}) : { reasonAt: at }),
         ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs, ...(input.label && input.label !== STANDING_DEFAULT_LABEL ? { label: input.label } : {}) } : {}),
       },
     };
@@ -1200,7 +1269,8 @@ export class BotAutonomy {
     else delete watch.lastTrigger;
     delete watch.trigger;
     watch.failures = 0;
-    wake.createdAt = at;
+    // createdAt and reasonAt stay: the note is as old as when it was written,
+    // not as the last re-arm (R11-followup #2 — 'prod' read 1 h old after 4 days)
     wake.dueAt = at + (watch.maxMs ?? WATCH_DEFAULT_MAX_MINUTES * this.minuteMs);
     this.save();
     return wake;
@@ -1320,7 +1390,7 @@ export class BotAutonomy {
    * for anything else the existing item comes back untouched, flagged
    * `duplicate`, so the bot is told "já existe o5" instead of the person
    * getting a second item for the same action. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): OwnerPending & { duplicate?: true } {
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string; diskKept?: string[] }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
@@ -1330,11 +1400,8 @@ export class BotAutonomy {
     const same = (open: OwnerPending) => here(open) || open === elsewhere;
     const existing = this.ownerPending.find(same);
     // an id still answered as an alias is taken: "resolve o8" must never close two items (INSP-H r1 #3)
-    const used = new Set(this.ownerPending.flatMap((open) => [open.id, ...(open.aliases ?? [])]));
-    let n = this.ownerPending.length + 1;
-    while (used.has(`o${n}`)) n += 1;
     const pending: OwnerPending = {
-      id: existing?.id ?? `o${n}`, botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
+      id: existing?.id ?? this.nextOwnerPendingId(botId), botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
       ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : existing?.due ? { due: existing.due } : {}),
       ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : existing?.link ? { link: existing.link } : {}),
       ...(input.command?.trim() ? { command: input.command.trim().slice(0, 500) } : existing?.command ? { command: existing.command } : {}),
@@ -1348,13 +1415,39 @@ export class BotAutonomy {
       ...(existing?.history?.length ? { history: existing.history } : {}),
       ...(existing?.awaitingSince ? { awaitingSince: existing.awaitingSince } : {}),
       ...(existing?.stepsAutoAskedAt ? { stepsAutoAskedAt: existing.stepsAutoAskedAt } : {}),
+      // a delegation running (or just back) stays with the item when the bot or the server says it again (lote del)
+      ...(existing?.delegation ? { delegation: existing.delegation } : {}),
+      ...(existing?.delegationBack ? { delegationBack: existing.delegationBack } : {}),
+      // said again with the same commands: still superseded (R13-intake #1); new commands are the bot's new answer
+      ...(existing?.supersededBy && sameCommands(existing, input) ? { supersededBy: existing.supersededBy } : {}),
+      ...(existing?.rowChecks && sameCommands(existing, input) ? { rowChecks: existing.rowChecks } : {}),
+      ...(input.lastSaidAt !== undefined ? { lastSaidAt: input.lastSaidAt } : existing?.lastSaidAt !== undefined ? { lastSaidAt: existing.lastSaidAt } : {}),
+      ...(input.routineId ? { routineId: input.routineId } : existing?.routineId ? { routineId: existing.routineId } : {}),
+      // a disk item's folders kept out, as a list (INSP-R13fol #8)
+      ...(input.diskKept?.length ? { diskKept: input.diskKept } : {}),
     };
     // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
-    const mine = this.ownerPending.filter((open) => open.threadId === threadId);
-    if (mine.length > OWNER_PENDING_MAX_PER_THREAD) this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
+    // the cap holds a bot's own items; the server's (a routine's ask, the disk, the app) are never
+    // dropped by it: that would close what waits on the owner without a word (INSP-N22 A7)
+    const mine = this.ownerPending.filter((open) => open.threadId === threadId && !open.key);
+    if (mine.length > OWNER_PENDING_MAX_PER_THREAD) {
+      console.warn(`[owner-pending] ${mine[0]!.id} ("${mine[0]!.title.slice(0, 80)}") left the list: more than ${OWNER_PENDING_MAX_PER_THREAD} items of the bot in ${threadId}`);
+      this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
+    }
     this.save();
     return pending;
+  }
+
+  /** The bot's next "oN": past its last one (persisted), so a settled "o3"
+   * is never a new item's id (R12-followup #3: the Chief had 13 "o3"); and
+   * never an id still open or answered as an alias (INSP-H r1 #3). */
+  private nextOwnerPendingId(botId: string): string {
+    const used = new Set(this.ownerPending.flatMap((open) => [open.id, ...(open.aliases ?? [])]));
+    let n = (this.ownerPendingSeq.get(botId) ?? 0) + 1;
+    while (used.has(`o${n}`)) n += 1;
+    this.ownerPendingSeq.set(botId, n);
+    return `o${n}`;
   }
 
   /** Items saved before the dedupe (or by two conversations at once) that ask
@@ -1508,6 +1601,11 @@ export class BotAutonomy {
       else delete next.options;
     }
     delete next.stepsRequestedAt;
+    // its own bot rewrote the commands or the decisions: no longer the superseded ones, nor the row it read (R13-intake #1)
+    if (!sameCommands(item, { ...(patch.steps !== undefined ? { steps: patch.steps } : {}), ...(patch.options !== undefined ? { options: patch.options } : {}) })) {
+      delete next.supersededBy;
+      delete next.rowChecks;
+    }
     // the bot answered the person by rewriting the item: no longer waiting on it (J18)
     delete next.awaitingSince;
     if (patch.options !== undefined) delete next.recommendRequestedAt;
@@ -1518,6 +1616,19 @@ export class BotAutonomy {
 
   /** The person asked the bot to rewrite an item with steps: shown on the
    * item ("pedido há 2 min") until the bot updates it. */
+  /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
+   * ("Talvez já resolvido"). An undefined value clears the field. */
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "key" | "supersededBy" | "rowChecks" | "diskMoved">>): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {
+      if (value === undefined) delete item[field];
+      else (item as unknown as Record<string, unknown>)[field] = value;
+    }
+    this.save();
+    return item;
+  }
+
   markOwnerPendingStepsRequested(botId: string, id: string): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
@@ -1551,8 +1662,25 @@ export class BotAutonomy {
   }
 
   /** The bot answered the request with owner_pending add replacesAsk: this item takes the question's place. */
-  linkAskPromotion(promotion: AskPromotion, itemId: string): void {
-    promotion.itemId = itemId;
+  linkAskPromotion(promotion: AskPromotion, item: Pick<OwnerPending, "id" | "threadId" | "createdAt">): void {
+    promotion.itemId = item.id;
+    promotion.itemThreadId = item.threadId;
+    promotion.itemCreatedAt = item.createdAt;
+    this.save();
+  }
+
+  /** "Push e remover" answered: the commits to look for on the remote, kept across a restart (INSP-R13fol R2-4). */
+  addDiskPushCheck(check: DiskPushCheck): void {
+    this.pushChecks.push(check);
+    this.save();
+  }
+
+  diskPushChecksOf(botId: string): DiskPushCheck[] {
+    return this.pushChecks.filter((each) => each.botId === botId);
+  }
+
+  dropDiskPushCheck(check: DiskPushCheck): void {
+    this.pushChecks = this.pushChecks.filter((each) => each !== check);
     this.save();
   }
 
@@ -1576,15 +1704,34 @@ export class BotAutonomy {
    * settled; null while none is — nothing else ever replaces it (INSP-J2b #1). */
   askPromotionItem(promotion: AskPromotion): OwnerPending | null {
     if (!promotion.itemId) return null;
-    return this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!)))
-      ?? this.resolvedOwnerPending.find((item) => item.botId === promotion.botId && item.id === promotion.itemId)
+    return this.askPromotionOpenItem(promotion)
+      ?? this.askPromotionResolvedItem(promotion)
       // settled and aged out of the audit trail: this very question was answered all the same
       ?? { id: promotion.itemId, botId: promotion.botId, threadId: promotion.reportThreadId, title: promotion.text, createdAt: promotion.askedAt };
   }
 
   /** The open item linked to the question, if any (the one to settle when the person answers in the conversation). */
   askPromotionOpenItem(promotion: AskPromotion): OwnerPending | null {
-    return promotion.itemId ? this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!))) ?? null : null;
+    const id = promotion.itemId;
+    if (!id) return null;
+    return this.ownerPending.find((item) => item.botId === promotion.botId && (
+      // by its conversation and birth too, when the link knows them: an item that merely took the id is not it
+      (item.id === id && (promotion.itemCreatedAt === undefined || (item.createdAt === promotion.itemCreatedAt && item.threadId === promotion.itemThreadId)))
+      // folded into an older equivalent item: that one answers for it
+      || Boolean(item.aliases?.includes(id)))) ?? null;
+  }
+
+  /** The settled item linked to the question, if it is still in the audit
+   * trail: by bot, id, conversation and birth. A link saved before those
+   * were kept takes, among the bot's settled items with that id, the one born
+   * nearest the server's request — the item was opened in answer to it. */
+  askPromotionResolvedItem(promotion: AskPromotion): ResolvedOwnerPending | null {
+    const id = promotion.itemId;
+    if (!id) return null;
+    const same = this.resolvedOwnerPending.filter((item) => item.botId === promotion.botId && item.id === id);
+    if (promotion.itemCreatedAt !== undefined) return same.find((item) => item.createdAt === promotion.itemCreatedAt && item.threadId === promotion.itemThreadId) ?? null;
+    const distance = (item: ResolvedOwnerPending) => Math.abs(item.createdAt - promotion.askedAt);
+    return same.reduce<ResolvedOwnerPending | null>((best, item) => (!best || distance(item) < distance(best) ? item : best), null);
   }
 
   /** The server's own items (keyed) still without why or steps — saved by an older build. */
@@ -2004,6 +2151,14 @@ function clipLines(lines: string[], max: number): string[] {
   return kept;
 }
 
+/** When a wake's note was written. A standing watch keeps it across
+ * re-arms (reasonAt); one set before reasonAt existed falls back on its
+ * createdAt — which re-arms no longer move, and which older builds moved at
+ * every firing, so it is the latest the note can be from ("more than N"). */
+export function noteWrittenAt(wake: Pick<BotWake, "createdAt" | "watch">): number {
+  return wake.watch?.standing ? wake.watch.reasonAt ?? wake.createdAt : wake.createdAt;
+}
+
 /** `refsLine`: what the note names that the server found already done
  * (watch-reason-refs.ts), said right under the note (R10-followup #5). */
 export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder(), refsLine: string | null = null): string {
@@ -2011,8 +2166,8 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, rem
     `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
     ...watchLines(wake),
     // a standing watch's note was written when it was set: it can be stale by now
-    wake.watch?.standing && wake.watch.reasonAt !== undefined && now - wake.watch.reasonAt >= 3_600_000
-      ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
+    wake.watch?.standing && now - noteWrittenAt(wake) >= 3_600_000
+      ? `Your note for this moment, written ${wake.watch.reasonAt === undefined ? "more than " : ""}${minutesLabel(now - noteWrittenAt(wake))} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
       : `Your note for this moment: ${wake.reason}`,
     ...(refsLine ? [refsLine] : []),
     ...(goal && goal.status === "active"
@@ -2146,17 +2301,35 @@ export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: str
 
 /** "Preciso de você", "Continuam com você", "Decisão para você"…: the bot
  * asks the person for something in plain words, not only with a "?". */
-const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
+// "depende de você", "precisa da sua decisão", "aguardando você", "deixei essa decisão com você" (R12-visual N22);
+// "do seu"/"da sua" only before what the owner gives (a decision, an ok, a GO): "depende do seu token" asks nothing (INSP-N22 A5)
+const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|(?:precisa(?:m)?|depende(?:m)?) d[ao] (?:sua|seu) (?:decis[ãa]o|autoriza[çc][ãa]o|aprova[çc][ãa]o|confirma[çc][ãa]o|resposta|aval|ok|go|libera[çc][ãa]o|escolha|aceite|aten[çc][ãa]o|retorno|valida[çc][ãa]o|revis[ãa]o|parecer|sinal|palavra)\b|depende(?:m)? de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|deix(?:o|ei|ar|amos) (?:essa |esta |a )?decis[ãa]o com voc[êe]|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|aguardando voc[êe]|aguardando (?:a |o )?(?:sua|seu) (?:decis[ãa]o|autoriza[çc][ãa]o|aprova[çc][ãa]o|confirma[çc][ãa]o|resposta|aval|ok|go|libera[çc][ãa]o|escolha|aceite|aten[çc][ãa]o|retorno|valida[çc][ãa]o|revis[ãa]o|parecer|sinal|palavra)\b|esperando (?:por )?voc[êe]|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
 /** A sentence that says the person is NOT needed (R11-visual N15: "Esse
  * trabalho já é meu … e não depende de decisão sua." counted for 10 h). */
 // word edges by letter, not \b: \b is ASCII-only, and "é", "você" end in a non-ASCII letter
-const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
+const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|nenhum[ao]?s?\s+(?:\p{L}+\s+){0,2}(?:fica|ficam|continua|continuam|depende|dependem|precisa|precisam|est[áa]|est[ãa]o|espera|esperam|aguarda|aguardam)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|dono)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
 /** A sentence that asks for the person: an explicit ask, never one that denies it. */
 /** A sentence's clauses, cut where a contrast or a list starts a new one ("é meu, mas preciso…",
  * "não preciso de você para X, só preciso que…"): a denial in one never cancels an ask in another (INSP-R11fix F-1). */
 const CLAUSE_CUT = /\s*(?:,?\s*(?<![\p{L}])(?:mas|por[ée]m|s[óo] que|contudo|entretanto|todavia)(?![\p{L}])|;|,\s*s[óo](?![\p{L}]))\s*/iu;
 const asksOwner = (sentence: string): boolean => sentence.split(CLAUSE_CUT).some((clause) => OWNER_ASK.test(clause) && !NOT_ASK.test(clause));
+/** asksOwner, also for a routine's text (server/routine-owner-ask.ts), with an extra ask `also` (the owner by name) judged by clause the same way. */
+export const asksOwnerSentence = (sentence: string, also?: RegExp): boolean =>
+  sentence.split(CLAUSE_CUT).some((clause) => (OWNER_ASK.test(clause) || Boolean(also?.test(clause))) && !NOT_ASK.test(clause));
 const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?…])\s+|\n+/);
+/** Where, in `sentence`, the ask starts (its first clause that asks without denying), or -1: what comes
+ * before it says whether it is said under a condition ("Se a checagem estourar, trago o que depende de você"). */
+export function ownerAskIndex(sentence: string, also?: RegExp): number {
+  let from = 0;
+  for (const clause of sentence.split(CLAUSE_CUT)) {
+    const at = sentence.indexOf(clause, from);
+    from = at + clause.length;
+    if (NOT_ASK.test(clause)) continue;
+    const found = [OWNER_ASK.exec(clause), also?.exec(clause) ?? null].filter((match): match is RegExpExecArray => match !== null).map((match) => match.index);
+    if (found.length) return at + Math.min(...found);
+  }
+  return -1;
+}
 
 /** Since when the bot has been waiting on the person: the first of its
  * replies, after the person's last message, that asks them something (a

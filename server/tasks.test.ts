@@ -98,6 +98,44 @@ describe("tasks", () => {
     expect(titleFromMessage("x".repeat(80))).toHaveLength(48);
   });
 
+  // R12-visual N24: the Chief's conversation of 03/10 was named "Pode" for good
+  it("a one-word first message names nothing: the next message does", async () => {
+    const { store, UNTITLED_THREAD } = await freshStore();
+    const bot = store.createBot();
+    const task = store.createTask(bot.id)!;
+    for (const said of ["Pode", "Sim.", "ok?", "  Vai  "]) {
+      expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)).toBeNull();
+      expect(store.activeTask(bot.id)!.title).toBe(UNTITLED_THREAD);
+    }
+    expect(store.titleTaskFromFirstMessage(bot.id, "Pode abrir a issue da Marluce", task.threadId)?.title).toBe("Pode abrir a issue da Marluce");
+    // two words of substance already name it ("Fechar #9389")
+    const other = store.createTask(bot.id)!;
+    expect(store.titleTaskFromFirstMessage(bot.id, "Fechar #9389", other.threadId)?.title).toBe("Fechar #9389");
+  });
+
+  // INSP-R13VIS A7: a script without spaces is one run of letters, and a short first line may lead a real ask
+  it("a Chinese or Japanese first message names the conversation; a short first line carries the next one", async () => {
+    const { store } = await freshStore();
+    const bot = store.createBot();
+    for (const said of ["修复登录页面的错误", "ログイン画面を直して", "修复登录"]) {
+      const task = store.createTask(bot.id)!;
+      expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)?.title).toBe(said);
+    }
+    const task = store.createTask(bot.id)!;
+    expect(store.titleTaskFromFirstMessage(bot.id, "Pode\nabrir a issue da Marluce", task.threadId)?.title).toBe("Pode abrir a issue da Marluce");
+    // still nothing to name in a one-word Korean or pt-BR message
+    const short = store.createTask(bot.id)!;
+    for (const said of ["네", "Pode"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId)).toBeNull();
+    // INSP-R13VIS B4: a "yes", "OK" or "thanks" in Chinese or Japanese is the "Pode" of those languages
+    for (const said of ["はい", "了解", "好的", "はい！", "ありがとうございます", "わかりました。", "没问题"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
+    // INSP-R13VIS C4: every form of a thanks or "got it", and a three-character ask
+    for (const said of ["ありがとうございました", "收到了谢谢", "收到，谢谢！", "谢谢你啊", "好的，谢谢！", "どうもありがとう", "了解しました！"]) expect(store.titleTaskFromFirstMessage(bot.id, said, short.threadId), said).toBeNull();
+    for (const said of ["写测试", "部署吧", "直して", "好，改", "做吧"]) {
+      const task = store.createTask(bot.id)!;
+      expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)?.title, said).toBe(said);
+    }
+  });
+
   it("returns the task it named, so a caller knows which title it may replace", async () => {
     const { store } = await freshStore();
     const bot = store.createBot();
@@ -192,9 +230,12 @@ describe("tasks", () => {
     const replacement = store.activeTask(bot.id)!;
     expect(replacement.threadId).not.toBe(first);
     expect(replacement).toMatchObject({
-      title: UNTITLED_THREAD, resumeCursors: {}, modelSelection: bot.modelSelection,
+      title: UNTITLED_THREAD, resumeCursors: {},
       busy: false, unread: false, activity: "idle",
     });
+    // Fresh context follows the bot's model; the old thread's own is gone.
+    expect(replacement.modelSelection).toBeUndefined();
+    expect(store.projectBotForTask(bot.id, replacement.threadId)?.modelSelection).toEqual(bot.modelSelection);
     expect(replacement.pinnedMessageId).toBeUndefined();
     expect(replacement.rewound).toBeUndefined();
     expect(bot.resumeCursors).toEqual({});

@@ -43,6 +43,7 @@ import {
   wakeFiredChip,
   watchLabel,
   wakePrompt,
+  noteWrittenAt,
   questionStepsAutoReport,
   questionReportRef,
   QUESTION_REPORT_PREFIX,
@@ -962,6 +963,84 @@ describe("a standing watch's old note", () => {
   });
 });
 
+// R11/R12-followup #2: the Chief's 'prod' kept a note of 01/10 with no
+// reasonAt, and each re-arm moved createdAt — the note read as fresh
+describe("a standing watch's note keeps its age across re-arms", () => {
+  const prodArgv = ["git", "ls-remote", "origin", "refs/tags/nuria-production-deployed"];
+  const prodReason = "Tag de produção andou: fechar carrier #9327, avisar sessões 9295 (#9314), 8891 (#9318) e pedir ao QA a validação";
+
+  it("the real 'prod' without reasonAt: two firings 10 min apart both say the note is old", () => {
+    // as on 05/10: re-armed for the last time at 12:13 BRT by the old build, no reasonAt
+    const armed = Date.parse("2026-10-05T15:13:06.046Z");
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      goals: [], inFlight: [],
+      wakes: [{ botId: "chief", threadId: "dbb9f1cf", reason: prodReason, createdAt: armed, dueAt: armed + 240 * 60_000, watch: { command: prodArgv.join(" "), argv: prodArgv, everyMs: 300_000, baseline: "e3e9e7ddc\trefs/tags/nuria-production-deployed", baselineFingerprint: "f1", lastFingerprint: "f1", stdoutFingerprint: true, lastRunAt: armed, runs: 900, failures: 0, standing: true, label: "prod", maxMs: 240 * 60_000, fired: 12 } }],
+    }));
+    const autonomy = make();
+    const wake = autonomy.standingFor("dbb9f1cf", "prod")!;
+    expect(noteWrittenAt(wake)).toBe(armed);
+    // the carrier #9377 goes out at 14:20 BRT: the tag moves
+    now = armed + 127 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "51c3bf741\trefs/tags/nuria-production-deployed", fingerprint: "f2", matched: false })).toBe("changed");
+    expect(wakePrompt(wake, null, now)).toContain(`Your note for this moment, written more than 2 h 7 min ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${prodReason}`);
+    autonomy.rearmStanding(wake);
+    expect(wake.createdAt).toBe(armed);
+    expect(wake.watch!.reasonAt).toBeUndefined();
+    // a hotfix 10 min later: before, createdAt was 10 min old and no age was said
+    now += 10 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "7a0c2d915\trefs/tags/nuria-production-deployed", fingerprint: "f3", matched: false })).toBe("changed");
+    expect(wakePrompt(wake, null, now)).toContain("written more than 2 h 17 min ago — check it still holds");
+    autonomy.rearmStanding(wake);
+    // and after a restart too
+    expect(noteWrittenAt(make().standingFor("dbb9f1cf", "prod")!)).toBe(armed);
+    // the bot writes a current note: its age starts there, and re-arms keep it
+    autonomy.updateStandingReason("dbb9f1cf", "prod", "Tag andou: conferir qual carrier entrou e avisar o QA");
+    const written = now;
+    expect(wake.watch!.reasonAt).toBe(written);
+    now += 30 * 60_000;
+    expect(wakePrompt(wake, null, now)).toContain("Your note for this moment: Tag andou");
+    now += 4 * 60 * 60_000;
+    autonomy.rearmStanding(wake);
+    expect(wake.watch!.reasonAt).toBe(written);
+    expect(wakePrompt(wake, null, now)).toContain("written 4 h 30 min ago — check it still holds");
+  });
+
+  it("a watch set now and re-armed keeps its first createdAt; set again with the same note keeps the note's age, with another it starts over", () => {
+    const autonomy = make();
+    const set = now;
+    const input = { argv: prodArgv, command: prodArgv.join(" "), everyMinutes: 5, maxMinutes: 240, reason: "Conferir o carrier e pedir ao QA", baseline: "a", standing: true, label: "prod" };
+    const wake = autonomy.setWatch("chief", "t1", input);
+    now += 5 * 3_600_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "b", fingerprint: "fb", matched: false });
+    autonomy.rearmStanding(wake);
+    expect(wake.createdAt).toBe(set);
+    now += 10 * 60_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "c", fingerprint: "fc", matched: false });
+    expect(wakePrompt(wake, null, now)).toContain("written 5 h 10 min ago — check it still holds");
+    const again = autonomy.setWatch("chief", "t1", { ...input, baseline: "c" });
+    expect(again.watch!.reasonAt).toBe(set);
+    expect(again.createdAt).toBe(set);
+    const other = autonomy.setWatch("chief", "t1", { ...input, reason: "Outra nota", baseline: "c" });
+    expect(other.watch!.reasonAt).toBe(now);
+    expect(wakePrompt(other, null, now)).toContain("Your note for this moment: Outra nota");
+  });
+
+  // INSP-R12F F9: set again with the same note, a legacy watch's unknown age stayed "more than", not exact
+  it("a legacy watch set again with the same note keeps its age unknown", () => {
+    const armed = now;
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      goals: [], inFlight: [],
+      wakes: [{ botId: "chief", threadId: "t1", reason: prodReason, createdAt: armed, dueAt: armed + 240 * 60_000, watch: { command: prodArgv.join(" "), argv: prodArgv, everyMs: 300_000, baseline: "a", lastRunAt: armed, runs: 9, failures: 0, standing: true, label: "prod", maxMs: 240 * 60_000 } }],
+    }));
+    const autonomy = make();
+    now += 2 * 3_600_000;
+    const again = autonomy.setWatch("chief", "t1", { argv: prodArgv, command: prodArgv.join(" "), everyMinutes: 5, maxMinutes: 240, reason: prodReason, baseline: "b", standing: true, label: "prod" });
+    expect(again.watch!.reasonAt).toBeUndefined();
+    expect(again.createdAt).toBe(armed);
+    expect(wakePrompt(again, null, now)).toContain("written more than 2 h ago — check it still holds");
+  });
+});
+
 describe("a bot waiting on the person, in plain words", () => {
   it("counts an explicit ask anywhere in a reply since the person's last message, until they write again", () => {
     const at = now;
@@ -1494,7 +1573,7 @@ describe("a bare question asked to become an item (lot J2)", () => {
     expect(make().askPromotionItem(make().askPromotionFor("b", "main", ask.askAt)!)).toBeNull();
     // the bot's item, linked: it replaces the question, open or settled, across a restart
     const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B para o cliente", why: "A cliente espera.", steps });
-    autonomy.linkAskPromotion(asked, item.id);
+    autonomy.linkAskPromotion(asked, item);
     expect(autonomy.askPromotionItem(asked)?.id).toBe(item.id);
     expect(autonomy.askPromotionOpenItem(asked)?.id).toBe(item.id);
     autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
@@ -1591,5 +1670,98 @@ describe("a reply that says the person is not needed asks nothing (R11-visual N1
     expect(echoAsk("Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua.")).toBe(true);
     // a denial on both sides of the cut stays a denial
     expect(ownerAskAt(thread("O merge é meu, mas não depende de decisão sua."), at + 60_000)).toBeNull();
+  });
+});
+
+// R12-followup #3: "o3" was given 13 times to the Chief, and the Monitor has two
+// settled "o2" — the link of a question to its item read the first one
+describe("owner_pending ids are never reused", () => {
+  const steps = [{ text: "Leia a issue" }];
+
+  it("go up per bot, past every settled id, across a restart", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [], goals: [], inFlight: [],
+      resolvedOwnerPending: [
+        ...[1, 2, 3].map((day) => ({ id: "o3", botId: "chief", threadId: "52417e4a", title: `Decisão ${day}`, createdAt: day * 1_000, resolvedAt: day * 1_000 + 1, resolvedBy: "bot" })),
+        { id: "o2", botId: "chief", threadId: "52417e4a", title: "Outra", createdAt: 5_000, resolvedAt: 5_001, resolvedBy: "bot" },
+        { id: "o9", botId: "monitor", threadId: "dc38193b", title: "Do Monitor", createdAt: 5_000, resolvedAt: 5_001, resolvedBy: "bot" },
+      ],
+    }));
+    const autonomy = make();
+    const first = autonomy.addOwnerPending("chief", "52417e4a", { title: "Decidir a #9374", why: "x", steps });
+    expect(first.id).toBe("o4");
+    autonomy.resolveOwnerPending({ botId: "chief", id: first.id });
+    // the open list is empty again: the old rule (open count + 1) said "o1"
+    expect(autonomy.addOwnerPending("chief", "52417e4a", { title: "Abrir a issue do Supervisor", why: "x", steps }).id).toBe("o5");
+    expect(autonomy.addOwnerPending("monitor", "dc38193b", { title: "Escrever na planilha", why: "x", steps }).id).toBe("o10");
+    const reloaded = make();
+    reloaded.resolveOwnerPending({ botId: "chief", id: "all", threadId: "52417e4a" });
+    expect(reloaded.addOwnerPending("chief", "52417e4a", { title: "Remover as pastas de disco", why: "x", steps }).id).toBe("o6");
+    expect(JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")).ownerPendingSeq).toEqual({ chief: 6, monitor: 10 });
+  });
+
+  // the Monitor's ledger of 05/10: o2 of 01/10 and o2 of 04/10, the request linked to "o2"
+  const monitor = "891b6b94";
+  const channel = "dc38193b";
+  const ledger = (notes: { first?: string; second?: string }) => ({
+    wakes: [], goals: [], inFlight: [],
+    resolvedOwnerPending: [
+      { id: "o2", botId: monitor, threadId: channel, title: "Escrever na linha 105 da planilha Atendimento (#9058, Filipe…)", createdAt: Date.parse("2026-10-01T20:00:00.110Z"), resolvedAt: Date.parse("2026-10-03T12:46:34.065Z"), resolvedBy: "bot", ...(notes.first ? { resolvedNote: notes.first } : {}) },
+      { id: "o2", botId: monitor, threadId: channel, title: "Decidir o caminho de produto da #9356 (widget pede código na…)", createdAt: Date.parse("2026-10-04T23:34:17.653Z"), resolvedAt: Date.parse("2026-10-04T23:44:02.753Z"), resolvedBy: "bot", ...(notes.second ? { resolvedNote: notes.second } : {}) },
+    ],
+    askPromotions: [{ botId: monitor, threadId: channel, reportThreadId: channel, askAt: Date.parse("2026-10-03T22:32:34.187Z"), askedAt: Date.parse("2026-10-04T23:33:56.989Z"), itemId: "o2", answeredAt: Date.parse("2026-10-04T23:41:47.034Z"), text: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282." }],
+  });
+
+  it("a request linked before the birth was kept finds its own o2 — the one opened for it, not the one of 01/10", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger({ first: ANSWERED_IN_CONVERSATION })));
+    const autonomy = make();
+    const [promotion] = autonomy.allAskPromotions();
+    expect(autonomy.askPromotionItem(promotion!)?.title).toContain("#9356");
+    // the reopening rule reads that item: the 01/10 one was settled "respondida na conversa", this one by the bot
+    expect(autonomy.askPromotionResolvedItem(promotion!)?.resolvedNote).toBeUndefined();
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger({ second: ANSWERED_IN_CONVERSATION })));
+    expect(make().askPromotionResolvedItem(make().allAskPromotions()[0]!)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
+    // and the next item of the Monitor is past both
+    expect(make().addOwnerPending(monitor, channel, { title: "Novo pedido", why: "x", steps }).id).toBe("o3");
+  });
+
+  it("a link keeps the item's conversation and birth: an item that took the same id elsewhere is not it", () => {
+    const autonomy = make();
+    const asked = autonomy.noteAskPromotion({ botId: "b", threadId: "main", askAt: now - 60_000, text: "Sigo com A ou B?", reportThreadId: "channel" });
+    const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B", why: "x", steps });
+    autonomy.linkAskPromotion(asked, item);
+    expect(asked).toMatchObject({ itemId: item.id, itemThreadId: "channel", itemCreatedAt: now });
+    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
+    // an older ledger's open item with the same id, born later, in another conversation
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      ...JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")),
+      ownerPending: [{ id: item.id, botId: "b", threadId: "other", title: "Outra coisa", createdAt: now + 3_600_000 }],
+    }));
+    const reloaded = make();
+    const again = reloaded.allAskPromotions()[0]!;
+    expect(reloaded.askPromotionOpenItem(again)).toBeNull();
+    expect(reloaded.askPromotionItem(again)?.title).toBe("Escolher entre A e B");
+    expect(reloaded.askPromotionResolvedItem(again)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
+  });
+});
+
+describe("a superseded item (R13-intake #1)", () => {
+  it("stays superseded, across a restart and when said again with the same commands, until its bot rewrites them", () => {
+    const autonomy = make();
+    const steps = [{ text: "B190", command: "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'" }];
+    const item = autonomy.addOwnerPending("chief", "t1", { title: "Aprovar a criação da linha 190", why: "Linha nova.", steps });
+    const by = { botId: "monitor", botName: "Monitor", id: "o1", at: now, text: "Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses." };
+    autonomy.patchOwnerPending("chief", item.id, { supersededBy: by });
+    const reloaded = make();
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // the same item said again, same commands: still superseded
+    reloaded.addOwnerPending("chief", "t1", { title: "Aprovar a criação da linha 190", why: "Linha nova.", steps });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // the why rewritten only: still superseded
+    reloaded.updateOwnerPending("chief", item.id, { why: "Ainda vale." });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // its commands rewritten: the bot's new answer
+    reloaded.updateOwnerPending("chief", item.id, { steps: [{ text: "Linha nova pelo append", command: "gog sheets append ID 'Atendimento!B:I' --values-json '[[\"Matheus\"]]'" }] });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toBeUndefined();
   });
 });

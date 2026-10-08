@@ -160,7 +160,7 @@ posixOnly("GET /api/reports/productivity", () => {
     expect(report.releases.find((row: any) => row.sha.startsWith("f50")).contentUnknown).toBe(true);
     expect(report.backlog).toMatchObject({ openIssues: 1, openP0: 1, prsAwaitingGate: 1 });
     expect(report.coverage.tag).toMatchObject({ sha: A76, matchesHistory: true });
-    expect(report.summary["pt-BR"]).toHaveLength(5);
+    expect(report.summary["pt-BR"]).toHaveLength(6);
     expect(report.summary["pt-BR"][0]).toMatch(/^Produção: 2 entregas/);
     expect(report.summary.en[0]).toMatch(/^Production: 2 deliveries/);
   });

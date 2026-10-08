@@ -1,8 +1,8 @@
-import { Check, ChevronRight, CircleAlert, Clock, Copy, ExternalLink, ListChecks, ListTodo, ShieldQuestion } from "lucide-react";
+import { Archive, Check, ChevronRight, CircleAlert, Clock, Copy, ExternalLink, ListChecks, ListTodo, ShieldQuestion } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { answerStuck, awaitingBot, botSilent, dueAt, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
+import { answerStuck, awaitingBot, botSilent, dueAt, maybeResolved, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 
 /** Rows shown in the sidebar before "Ver todos": the rest is one click away, on the resolution screen. */
@@ -30,8 +30,23 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
   const items = waitingOnYou(all, clock);
   // …and what waits on the bots stays one click away: a quiet line, no alert count (INSP-J2 r2 N2)
   const awaiting = sortNeedsYou(all.filter((item) => awaitingBot(item, clock)), "due", clock);
-  if ((!items.length && !awaiting.length) || density === "icons") return null;
+  // …and a routine's item said once and let go: folded, one quiet line, no alert count (INSP-N22 r2 F2)
+  const maybe = sortNeedsYou(all.filter((item) => maybeResolved(item) && !awaitingBot(item, clock)), "age", clock);
+  if ((!items.length && !awaiting.length && !maybe.length) || density === "icons") return null;
   const compact = density === "compact";
+  const maybeRow = maybe.length ? (
+    <button
+      type="button"
+      data-needs-you-maybe-resolved=""
+      aria-label={t("needsYou.maybeResolvedRowAria", { count: maybe.length })}
+      onClick={() => onOpen(maybe[0]!)}
+      className={cn("mx-2 flex w-[calc(100%-1rem)] items-center gap-1.5 rounded-md px-2.5 py-1 text-left text-[11.5px] text-ink-secondary outline-none hover:bg-raised/60 hover:text-ink focus-visible:ring-1 focus-visible:ring-accent/60", compact ? "mb-1.5" : "mb-2")}
+    >
+      <Archive size={compact ? 11 : 12} aria-hidden="true" className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{t("needsYou.maybeResolvedRow", { count: maybe.length })}</span>
+      <ChevronRight size={12} aria-hidden="true" className="shrink-0" />
+    </button>
+  ) : null;
   const awaitingRow = awaiting.length ? (
     <button
       type="button"
@@ -45,7 +60,7 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
       <ChevronRight size={12} aria-hidden="true" className="shrink-0" />
     </button>
   ) : null;
-  if (!items.length) return awaitingRow;
+  if (!items.length) return maybeRow ? <>{awaitingRow}{maybeRow}</> : awaitingRow;
   // the same order as the resolution screen opens in: what falls due first (INSP-I r1 #8)
   const shown = sortNeedsYou(items, "due", clock).slice(0, NEEDS_YOU_SIDEBAR_ROWS);
   return (
@@ -68,7 +83,8 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
           const overdue = at !== null && at < clock;
           const label = [t("needsYou.item", { title: item.title, name: item.botName, age }), item.due ? t("needsYou.due", { due: item.due }) : ""].filter(Boolean).join(" · ");
           const Icon = item.approval ? ShieldQuestion : item.options?.length ? ListChecks : item.pendingId ? ListTodo : CircleAlert;
-          const copy = Boolean(item.pendingId && item.command && !item.steps?.length);
+          // a superseded item's command is off (R13-intake #1)
+          const copy = Boolean(item.pendingId && item.command && !item.steps?.length && !item.superseded);
           const link = Boolean(item.pendingId && item.link);
           const resolve = Boolean(item.pendingId && onResolve);
           const actions = Number(copy) + Number(link) + Number(resolve);
@@ -148,6 +164,7 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
       </button>
     </section>
     {awaitingRow}
+    {maybeRow}
     </>
   );
 }

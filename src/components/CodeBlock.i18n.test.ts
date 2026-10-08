@@ -16,7 +16,7 @@ describe("a code block and a turn's digest, in pt-BR", () => {
 
   it("the code block header is all pt-BR: count, wrap, save, copy", () => {
     setLocale("pt-br");
-    const one = renderToStaticMarkup(createElement(CodeBlock, { code: "echo d5bb1f70b > ~/.nuria/declined-production-release.sha", lang: "sh", streaming: false }));
+    const one = renderToStaticMarkup(createElement(CodeBlock, { code: "echo d5bb1f70b > ~/.nuria/declined-production-release.sha", lang: "sh" }));
     expect(one).toMatch(/>1 linha<\/span>/);
     expect(one).toContain('aria-label="Quebrar linhas longas"');
     expect(one).toContain(">Quebrar</span>");
@@ -25,7 +25,7 @@ describe("a code block and a turn's digest, in pt-BR", () => {
     expect(one).toContain('aria-label="Copiar o código para a área de transferência"');
     expect(one).toContain(">Copiar</span>");
     for (const english of [">1 line<", ">Wrap<", ">Save<", ">Copy<", "Wrap long lines", "Download snippet", "Copy code"]) expect(one).not.toContain(english);
-    const many = renderToStaticMarkup(createElement(CodeBlock, { code: "a\nb\nc", lang: "ts", streaming: false }));
+    const many = renderToStaticMarkup(createElement(CodeBlock, { code: "a\nb\nc", lang: "ts" }));
     expect(many).toMatch(/>3 linhas<\/span>/);
   });
 
@@ -33,21 +33,21 @@ describe("a code block and a turn's digest, in pt-BR", () => {
   // the bubble's edge; "Text" stayed English
   it("a single long line starts wrapped; a short one or several lines do not; plain text is 'Texto'", () => {
     setLocale("pt-br");
-    const long = renderToStaticMarkup(createElement(CodeBlock, { code: "echo d5bb1f70bea397bdd937d02148c685e406985ba0 > ~/exemplo/declined-production-release.sha", lang: "text", streaming: false }));
+    const long = renderToStaticMarkup(createElement(CodeBlock, { code: "echo d5bb1f70bea397bdd937d02148c685e406985ba0 > ~/exemplo/declined-production-release.sha", lang: "text" }));
     expect(long).toContain('aria-pressed="true"');
     expect(long).toContain(">Sem quebra</span>");
     expect(long).toContain("whitespace-pre-wrap");
     expect(long).toMatch(/title="Texto"[^>]*>Texto</);
-    const short = renderToStaticMarkup(createElement(CodeBlock, { code: "npm run ci:local", lang: "sh", streaming: false }));
+    const short = renderToStaticMarkup(createElement(CodeBlock, { code: "npm run ci:local", lang: "sh" }));
     expect(short).toContain('aria-pressed="false"');
-    const several = renderToStaticMarkup(createElement(CodeBlock, { code: `${"x".repeat(100)}\ny`, lang: "ts", streaming: false }));
+    const several = renderToStaticMarkup(createElement(CodeBlock, { code: `${"x".repeat(100)}\ny`, lang: "ts" }));
     expect(several).toContain('aria-pressed="false"');
-    expect(renderToStaticMarkup(createElement(CodeBlock, { code: "a", lang: "", streaming: false }))).toContain(">Código<");
+    expect(renderToStaticMarkup(createElement(CodeBlock, { code: "a", lang: "" }))).toContain(">Código<");
   });
 
   it("English stays English", () => {
     setLocale("en");
-    const html = renderToStaticMarkup(createElement(CodeBlock, { code: "a\nb", lang: "ts", streaming: false }));
+    const html = renderToStaticMarkup(createElement(CodeBlock, { code: "a\nb", lang: "ts" }));
     expect(html).toMatch(/>2 lines<\/span>/);
     expect(html).toContain('aria-label="Wrap long lines"');
   });

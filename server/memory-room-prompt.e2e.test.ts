@@ -26,6 +26,11 @@ it("gives a room turn the memory_update guidance, not the file-tools one", async
       return undefined;
     }
   };
+  // The memory section is volatile: a launch carries it in its first message.
+  const launchContext = () => {
+    const launched = dump();
+    return `${launched?.systemPrompt ?? ""}\n${JSON.stringify(launched?.prompt ?? "")}`;
+  };
   try {
     // SAFETY: control-omb returns the created bot record under `bot`
     const { bot: lead } = await runControlOmb(["new-bot", "--name", "Lead"], { env }) as { bot: { id: string } };
@@ -34,8 +39,8 @@ it("gives a room turn the memory_update guidance, not the file-tools one", async
     // A 1:1 turn first: it is the reference the room turn must match.
     await runControlOmb(["send", "--bot", lead.id, "--text", "Remember that the fixture garden is watered on Mondays."], { env });
     await runControlOmb(["wait", "--bot", lead.id, "--timeout", "30"], { env });
-    const direct = dump()?.systemPrompt ?? "";
-    expect(direct).toContain("Use memory_update for every change to MEMORY.md");
+    const direct = launchContext();
+    expect(direct).toContain("Change MEMORY.md only with memory_update");
     expect(direct).not.toContain("update it with your file tools");
 
     // SAFETY: the groups route returns the created room under `group`
@@ -49,9 +54,8 @@ it("gives a room turn the memory_update guidance, not the file-tools one", async
       return text.includes("Reply to the conversation above as") || JSON.stringify(dump()?.prompt ?? "").includes("Reply to the conversation above as");
     }, { timeout: 30_000 }).toBe(true);
     await runControlOmb(["wait", "--bot", lead.id, "--timeout", "30"], { env });
-    const room = dump()?.systemPrompt ?? "";
-    expect(room).toContain("Use memory_update for every change to MEMORY.md");
-    expect(room).toContain("never direct file tools or whole-file overwrites");
+    const room = launchContext();
+    expect(room).toContain("Change MEMORY.md only with memory_update");
     expect(room).not.toContain("update it with your file tools");
   } finally {
     await fixture.close();

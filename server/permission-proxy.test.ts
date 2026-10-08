@@ -11,6 +11,7 @@
 // the tool, and a headless run has no dialog, so the click is discarded
 // ("The user did not answer the questions.").
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { createServer, type Server, type Socket } from "node:net";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,6 +72,20 @@ describe("permission proxy", () => {
   /** The tool result the CLI would read, parsed. */
   const resultJson = (res: any) => JSON.parse(res.result.content[0].text);
 
+  const startProxy = (socketPath: string, env?: NodeJS.ProcessEnv) => {
+    proxy = spawn(process.execPath, ["--experimental-strip-types", PROXY, socketPath], { stdio: ["pipe", "pipe", "pipe"], env });
+    let out = "";
+    proxy.stdout!.setEncoding("utf8");
+    proxy.stdout!.on("data", (chunk) => {
+      out += chunk; let nl;
+      while ((nl = out.indexOf("\n")) !== -1) {
+        const line = out.slice(0, nl); out = out.slice(nl + 1);
+        if (!line.trim()) continue;
+        try { const msg = JSON.parse(line); if (msg.id != null) results.set(msg.id, msg); } catch { /* non-protocol frame */ }
+      }
+    });
+  };
+
   beforeEach(async () => {
     scratch = mkdtempSync(join(tmpdir(), "omb-perm-proxy-"));
     asks = [];
@@ -81,6 +96,7 @@ describe("permission proxy", () => {
       conns.push(conn);
       let buf = "";
       conn.on("error", () => {});
+      conn.setEncoding("utf8");
       conn.on("data", (chunk) => {
         buf += chunk;
         let nl;
@@ -98,25 +114,7 @@ describe("permission proxy", () => {
     });
     await new Promise<void>((resolve) => broker.listen(socketPath, resolve));
 
-    proxy = spawn(process.execPath, ["--experimental-strip-types", PROXY, socketPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let out = "";
-    proxy.stdout!.on("data", (chunk) => {
-      out += chunk;
-      let nl;
-      while ((nl = out.indexOf("\n")) !== -1) {
-        const line = out.slice(0, nl);
-        out = out.slice(nl + 1);
-        if (!line.trim()) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id != null) results.set(msg.id, msg);
-        } catch {
-          /* not our frame */
-        }
-      }
-    });
+    startProxy(socketPath);
     rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     await waitFor(1);
   }, 20_000);
@@ -126,6 +124,18 @@ describe("permission proxy", () => {
     proxy?.kill();
     await new Promise<void>((resolve) => broker.close(() => resolve()));
     removeTempDir(scratch);
+  });
+
+  it("withholds an excluded question without losing the CLI permission callback", async () => {
+    const exited = once(proxy, "exit"); proxy.kill(); await exited; results.clear();
+    startProxy(brokerSocketPath(scratch, "test"), { ...process.env, OMB_PERMISSION_TOOL_SCOPE: JSON.stringify({ allow: ["native:*"] }) });
+    rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    expect((await waitFor(2)).result.tools.map((tool: { name: string }) => tool.name)).toEqual(["approve"]);
+    rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ask_user", arguments: { question: "Must not ask" } } });
+    expect((await waitFor(3)).result.content[0].text).toContain("excluded"); expect(asks).toEqual([]);
+    answerWith = () => ({ behavior: "allow" });
+    rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "approve", arguments: { tool_name: "Read", input: {} } } });
+    expect(resultJson(await waitFor(4)).behavior).toBe("allow"); expect(asks).toHaveLength(1);
   });
 
   it("exposes approve and ask_user", async () => {
@@ -327,6 +337,26 @@ describe("permission proxy", () => {
       updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash" }] }],
     });
   });
+
+  it("hands a large non-ASCII tool input back to the CLI byte for byte", async () => {
+    // About 1.5 MB of three-byte characters: the line reaches the proxy over
+    // many pipe reads, and most read boundaries fall inside a character.
+    // Decoding each read on its own turned those into U+FFFD, and the allow
+    // carried the damaged text back as updatedInput, so the CLI wrote it.
+    const content = "中文ok€".repeat(150_000);
+    answerWith = () => ({ behavior: "allow" });
+    rpc({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "approve", arguments: { tool_name: "Write", input: { file_path: "notes.md", content } } },
+    });
+    const res = await waitFor(2, 20_000);
+    expect(asks[0].input.content === content).toBe(true);
+    const updated = resultJson(res).updatedInput.content as string;
+    expect(updated.includes("\uFFFD")).toBe(false);
+    expect(updated === content).toBe(true);
+  }, 30_000);
 
   it("still asks ask_user as a question and returns the words verbatim", async () => {
     answerWith = () => ({ behavior: "answer", message: "ship it", source: "user" });

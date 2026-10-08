@@ -116,9 +116,9 @@ describe("steps waiting for the Mac, and sessions to resume", () => {
     expect(worded).not.toContain('data-signal-word="waiting"');
     expect(worded).toMatch(/<span aria-hidden="true" class="text-\[10px\] leading-none tabular-nums">2<\/span>/);
     for (const label of [sessions!.resume!.text, sessions!.waiting!.text]) expect(worded).toContain(`aria-label="${label.replace(/"/g, "&quot;")}"`);
-    // nothing to resume (or all on hold): the waiting steps in a word
+    // nothing to resume (or all on hold): the waiting steps in a word that says they wait — "2 no app" did not (R12-visual N23)
     const waitingOnly = ccSessionsSummary([{ sessionId: "a", title: "x", status: "running", surface: "app", screenWait: { kind: "create", since: now, waitingFor: "locked" } }, { sessionId: "b", title: "y", status: "running", surface: "app", screenWait: { kind: "send", since: now, waitingFor: "locked" } }], now);
-    expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: waitingOnly, worded: true }))).toContain(">2 no app</span>");
+    expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: waitingOnly, worded: true }))).toContain(">2 a fazer no app</span>");
     // not worded (compact, icons, thread rows): icons and counts only
     expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions }))).not.toContain("data-signal-word");
   });

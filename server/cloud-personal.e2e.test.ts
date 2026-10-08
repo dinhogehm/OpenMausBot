@@ -23,7 +23,7 @@ import { freePortBlock } from "./testing/ports.ts";
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const HOST = "omb-t-0123456789ab.fly.dev";
-const PERSONAL = "Cloud Pro is personal: only your own devices can connect.";
+const PERSONAL = "My Cloud is personal: only your own devices can connect.";
 const secret = randomBytes(32).toString("base64url");
 let home = "", dataDir = "", base = "", port = 0, log = "";
 let child: ChildProcess | undefined;
@@ -613,3 +613,47 @@ it("a routine of the owner's not yet cleared for the Mac can't clear itself: its
   for (const active of (await api("GET", "/api/routines", { token: owner })).body.runs ?? []) await api("POST", `/api/routine-runs/${active.id}/cancel`, { token: owner });
   await idle(before.full, owner);
 }, 120_000);
+
+// The same server code runs a Cloud home, the desktop app and a VPS
+// (server/direct-coordination.e2e.test.ts covers those two): a follow-up from
+// one conversation continues the teammate's thread, behind the work in it.
+it("a follow-up from the same conversation continues the teammate's thread instead of opening a second one", async () => {
+  const owner = await adminPairing();
+  await settleAll(owner);
+  const chat = (await api("POST", `/api/bots/${before.lead.id}/tasks`, { token: owner, body: { title: "Ship it" } })).body.task.threadId;
+  // A teammate in the lead's own project folder: the owner's chat and the
+  // teammate's work thread run there at the same time, as a bot's threads do
+  // in one folder everywhere (desktop, headless server, Cloud home).
+  const writer = (await api("POST", "/api/bots", { token: owner, body: { name: "Writer", modelSelection: { instanceId: "held", model: "claude-sonnet-5" } } })).body.bot;
+  expect((await api("PATCH", `/api/bots/${writer.id}`, { token: owner, body: { cwd: project() } })).status).toBe(200);
+  const bots = async () => (await api("GET", "/api/bots", { token: owner })).body.bots as any[];
+  const writerTasks = async () => (await bots()).find((bot) => bot.id === writer.id).tasks as any[];
+  const opened = (await writerTasks()).length;
+  const send = async (text: string, message: string) => {
+    // The lead's chat runs in its project folder…
+    expect((await turn(async () => expect((await api("POST", `/api/bots/${before.lead.id}/messages`, { token: owner, body: { text, threadId: chat } })).status).toBe(202))).cwd).toBe(realpathSync(project()));
+    const result = await (await agentTools())("coordinate_bots", { bot_ids: [writer.id], message });
+    expect(JSON.stringify(result)).not.toContain("isError\":true");
+    return JSON.parse(result.content[0].text).receipts[0];
+  };
+  const first = await send("Get the writer drafting.", "Draft the launch post.");
+  expect(first).toMatchObject({ outcome: "queued", threadId: expect.any(String) });
+  await until(async () => (await writerTasks()).find((task) => task.threadId === first.threadId)?.busy === true, "the writer to start");
+  // …and the writer's engine starts in that same folder while the lead's turn
+  // still runs there: neither was stopped or refused the folder. Every held
+  // engine writes the one dump, so once the writer's process is up it is the
+  // writer's — waited for here, so the follow-up's turn() below cannot read
+  // a late writer dump as the lead's and hand agentTools the wrong token.
+  const engine = () => { try { return JSON.parse(readFileSync(held(), "utf8")); } catch { return undefined; } };
+  await until(() => JSON.stringify(engine()?.prompt ?? "").includes("Draft the launch post"), "the writer's engine to start");
+  expect(realpathSync(engine().cwd)).toBe(realpathSync(project()));
+  expect((await writerTasks()).find((task) => task.threadId === first.threadId)?.cwd).toBe(project());
+  expect((await bots()).find((bot) => bot.id === before.lead.id)?.tasks.find((task: any) => task.threadId === chat)).toMatchObject({ busy: true, cwd: project() });
+  expect((await api("POST", `/api/bots/${before.lead.id}/interrupt`, { token: owner, body: { threadId: chat } })).status).toBe(200);
+  await until(async () => ((await api("GET", "/api/bots", { token: owner })).body.bots as any[]).find((bot) => bot.id === before.lead.id)?.busy === false, "the lead to stop");
+  const followUp = await send("Change of plan: keep it short.", "Keep the launch post under 100 words.");
+  expect(followUp).toMatchObject({ outcome: "queued", threadId: first.threadId });
+  expect(followUp.detail).toContain('sent to "@');
+  expect(await writerTasks()).toHaveLength(opened + 1);
+  await settleAll(owner);
+}, 60_000);

@@ -29,7 +29,7 @@ export async function sendToConversation(item: NeedsYouItem, text: string, dispa
   }
 }
 
-export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number }> {
+export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number; info?: string; notice?: string }> {
   if (!item.pendingId) throw new Error("not an owner_pending item");
   const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/reply`, {
     method: "POST",
@@ -39,7 +39,13 @@ export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendin
   if (receipt?.queued && typeof receipt.threadId === "string" && typeof receipt.queueId === "string" && typeof receipt.text === "string") {
     dispatch({ type: "pendingQueued", threadId: receipt.threadId, queueId: receipt.queueId, text: receipt.text, reason: receipt.reason === "capacity" || receipt.reason === "group-turn" ? receipt.reason : undefined });
   }
-  return { resolved: Number(receipt?.resolved ?? 0) };
+  // the same answer sent again (the app gave up and the person pressed again): the server
+  // took it once, and says so — news for the neutral notice, not a new send (INSP-R12F r6 D2)
+  if (receipt?.duplicate === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
+  // "Ainda vale" on an item under "Talvez já resolvido": back on top, nothing sent to the bot (INSP-N22 r2 F2)
+  if (receipt?.kept === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
+  // sent, with what the server says of it ("não leu isto como autorização de remoção", INSP-R13fol R2-1)
+  return { resolved: Number(receipt?.resolved ?? 0), ...(typeof receipt?.notice === "string" && receipt.notice ? { notice: receipt.notice } : {}) };
 }
 
 /** "Lembrar <bot>" (INSP-J2 r2 N3): the server reminds the bot, as itself. */
@@ -61,6 +67,22 @@ export async function remindOwnerPending(item: NeedsYouItem): Promise<{ deduped:
 export async function askQuestionSteps(item: NeedsYouItem): Promise<{ deduped: boolean }> {
   const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/tasks/${encodeURIComponent(item.threadId)}/ask-steps`, { method: "POST" });
   return { deduped: receipt?.deduped === true };
+}
+
+/** "Delegar a um agente" (lote del): the server opens a Claude Code session
+ * for the item; the row turns "delegado" through the bot frame it
+ * broadcasts. A second click is told so, never a second session. */
+export async function delegateOwnerPending(item: NeedsYouItem): Promise<{ info?: string; sessionId?: string; queued?: boolean }> {
+  if (!item.pendingId) throw new Error("not an owner_pending item");
+  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/delegate`, { method: "POST", body: "{}" });
+  if (receipt?.duplicate === true && typeof receipt.message === "string") return { info: receipt.message };
+  return { ...(typeof receipt?.sessionId === "string" ? { sessionId: receipt.sessionId } : {}), ...(typeof receipt?.queueId === "string" ? { queued: true } : {}) };
+}
+
+/** "Os comandos ainda valem": the superseded mark is lifted (INSP-R13fol #13). */
+export async function unsupersedeOwnerPending(item: NeedsYouItem): Promise<void> {
+  if (!item.pendingId) return;
+  await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/unsupersede`, { method: "POST" });
 }
 
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {

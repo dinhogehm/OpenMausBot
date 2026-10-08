@@ -20,6 +20,12 @@ const capitalized = (text: string) => text.charAt(0).toLocaleUpperCase() + text.
 export const shownTaskTitle = (task: { title: string; openedBy?: { name: string } | null }): string =>
   displayThreadTitle(task.title, task.openedBy?.name ? [task.openedBy.name] : []);
 
+/** A search finds a conversation by the title as stored or as shown ("@Chief
+ * of Staff · work" and "Pedido de Chief of Staff" alike; R12-visual N21).
+ * `needle` is already lower-cased. */
+export const titleMatches = (task: { title: string; openedBy?: { name: string } | null }, needle: string): boolean =>
+  task.title.toLowerCase().includes(needle) || shownTaskTitle(task).toLowerCase().includes(needle);
+
 /** `knownNames`: names a leading "@" may carry (the bot that opened it, the team). */
 export function displayThreadTitle(title: string, knownNames: readonly string[] = []): string {
   if (title === "New thread") return t("task.newShort");

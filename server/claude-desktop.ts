@@ -14,7 +14,7 @@
 // retried later, backing off; nothing is lost.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalFolder } from "./own-worktrees.ts";
@@ -63,8 +63,11 @@ export interface DesktopDriver {
  * step acted on the screen before stopping, so a retry should back off. */
 export type DesktopStep = { ok: true; suggestion?: string; note?: string } | DesktopStop;
 /** `draft`: text nobody sent sits in the field (never typed over);
- * `leftProbe`: the probe "." stayed at its end (the person came back first). */
-export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean };
+ * `leftProbe`: the probe "." stayed at its end (the person came back first);
+ * `previousFolder`: the new session's chips are on another folder (or an
+ * ambiguous cut); `cliNow`: no point in trying the app again for this create
+ * (a prompt or a scratch after our one click) — both send it to the cli. */
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown"; trustNeeded?: string; trusted?: boolean; previousFolder?: boolean; cliNow?: boolean };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -76,8 +79,12 @@ const HUMAN_SLACK_MS = 500;
  * line ("Responder…", never "Responder ao cliente…"), and only where the
  * field is (see findComposer) — a line of the conversation is not it. */
 const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder|Reply)(?:\s*(?:…|\.{3}))?$/i;
-/** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
-const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
+/** The field of a new, empty session. The app (2.26454.0, ion-dist i18n)
+ * draws one of two: "Descreva uma tarefa ou faça uma pergunta" (RLloCeiLx7,
+ * the only one OCR read so far, up to 06/10 14:52Z) or, behind a flag of its
+ * own, "Descreva algo para criar, alterar ou corrigir" (sIl97ARhWm) — both
+ * taken, in pt-BR and English, until a live screen shows which (R13-dispatch). */
+const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task|Descreva algo para criar|Describe something to build)\b/i;
 const BACKSPACE = 51;
 /** The one character typed to tell an app suggestion from a draft. */
 const SUGGESTION_PROBE = ".";
@@ -264,7 +271,7 @@ export function chipRow(lines: OcrLine[]): OcrLine[] {
  * folder, so it may well read "main" there too. The guards that count for
  * folder reuse are the server's 409 (lastAppWorktreeFolder) before the
  * screen is touched, and reusedWorktree when the session is adopted. */
-export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | null {
+export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { rootHead?: string | null; fromRoot?: boolean; branches?: readonly string[] } = {}): string | null {
   const words = chipRow(lines).flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
   const base = baseBranch.toLowerCase();
   const isBase = (lower: string) => lower === base || lower === `origin/${base}`;
@@ -274,8 +281,64 @@ export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | nul
     return /^[\w.-]+\/[\w./-]+$/.test(lower) || (/^[0-9a-f]{7,40}$/.test(lower) && /\d/.test(lower)) || lower === "head" || lower.startsWith("detached");
   });
   if (other) return `it shows ${other}, not ${baseBranch}`;
-  if (!words.some((word) => isBase(word.toLowerCase()))) return `it does not show the base branch ${baseBranch}`;
-  return null;
+  if (words.some((word) => isBase(word.toLowerCase()))) return null;
+  // R11-2: OCR misreads the branch chip ("gº main" came out "g9 -", "q9 -",
+  // "q -" on all 20 screens of 03/10). The word after the branch icon is
+  // the base only when it is the base with look-alike glyphs swapped (same
+  // length; l/i/1, o/0, "rn" for "m") and no other branch of the repository
+  // reads the same — never "rain", "mai" or "mainx" (INSP-R12a X3-4). A
+  // word with no letter ("-") is unreadable, and counts as the base only
+  // for a new session of the ROOT on the base: git's HEAD of the root is
+  // the base (`rootHead`), and when the app has a root session the New
+  // Session was opened from it (`fromRoot`; INSP-R12a-r2 R2-1). Worktree
+  // sessions do not count: their `sourceBranch` (197 of 197 records) says
+  // nothing about a root session, which never records one (0 of 204). A
+  // real other branch still refuses.
+  const icon = words.findIndex((word) => /^[gq][º°9]?$/i.test(word));
+  // (the worktree box right after, "|O", is not a branch: nothing was read)
+  const next = icon >= 0 ? words[icon + 1] ?? "" : "";
+  const boxOfWorktree = next.length <= 2 && /^worktree$/i.test(words[icon + 2] ?? "");
+  const read = next.startsWith("|") || /^worktree$/i.test(next) || boxOfWorktree ? "" : next;
+  if (/[\p{L}\p{N}]/u.test(read)) {
+    const glyphs = glyphForm(read);
+    const another = (known.branches ?? []).some((branch) => branch.toLowerCase() !== base && glyphForm(branch) === glyphs);
+    if (glyphs === glyphForm(baseBranch) && !another) return null;
+    return `it shows ${read}, not ${baseBranch}`;
+  }
+  // only with the root session seen on screen before New Session: without one, New Session opens in
+  // the app's last folder, maybe a worktree (INSP-R12a-r3 R3-1)
+  if (icon >= 0 && known.rootHead === baseBranch && known.fromRoot === true) return null;
+  const why = known.rootHead !== baseBranch
+    ? known.rootHead === "HEAD"
+      // said to the owner as what to do (R3-2)
+      ? `the repository root is on a detached HEAD — a raiz do repositório está em HEAD solto: volte-a para ${baseBranch} (git switch ${baseBranch} na raiz), e o caminho antigo volta a abrir sessões`
+      : `the repository root is ${known.rootHead ? `on ${known.rootHead} — a raiz do repositório está em ${known.rootHead}, não em ${baseBranch}: volte-a para ${baseBranch}` : "on no known branch"}`
+    : known.fromRoot === undefined
+      ? "the app has no root session to open New Session from — abra no app uma sessão na raiz (o 409 diz como)"
+      : "New Session was not opened from the app's root session";
+  return icon >= 0
+    ? `it does not show the base branch ${baseBranch}: its branch chip could not be read (it shows "${[words[icon], read].filter(Boolean).join(" ")}") and ${why}`
+    : `it does not show the base branch ${baseBranch}`;
+}
+
+/** A word with OCR's look-alike glyphs folded: "rn" → "m", l/1/I/| → "i", 0 → "o". */
+export function glyphForm(word: string): string {
+  return word.toLowerCase().replace(/rn/g, "m").replace(/[l1|]/g, "i").replace(/0/g, "o");
+}
+
+/** Levenshtein distance, for short OCR'd words. */
+export function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let previous = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const here = row[j]!;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = here;
+    }
+  }
+  return row[b.length]!;
 }
 
 /** The new session's own screen still up: its placeholder, or its row of
@@ -291,7 +354,9 @@ function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null; rootHead?: string | null; branches?: readonly string[] }): Promise<DesktopStep> {
+  // the app's root session, when it has one, must be what New Session opened from (an unreadable branch chip is judged by it)
+  let fromRoot: boolean | undefined = input.anchor ? false : undefined;
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.activateClaude());
     await driver.sleep(700);
@@ -305,7 +370,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     const reused = (lines: OcrLine[]) => {
       const bottom = lines.filter((line) => line.y > size.h * 0.55);
       const chip = reusedWorktreeChip(chipRow(bottom), input.liveWorktrees);
-      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
+      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch, { rootHead: input.rootHead, fromRoot, branches: input.branches });
       return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. ${ROOT_SESSION_HOWTO(input.repoName, input.baseBranch ?? "main")}`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
     if (open) {
@@ -330,8 +395,10 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       if (stop) return stop;
       before = mainArea(await driver.ocr());
       const title = input.anchor.title;
-      const shown = !title || before.some((line) => sidebarMatch(line.text, title)) || headerNames(before.filter((line) => line.y < 140), title);
-      note = shown ? `New Session from the root session ${input.anchor.localId}` : `the root session ${input.anchor.localId}${title ? ` ("${title.slice(0, 60)}")` : ""} did not show; New Session from whatever was on screen`;
+      // a root session with no title cannot be checked on screen: never counted as seen (INSP-R12a-r3 R3-3)
+      const shown = Boolean(title) && (before.some((line) => sidebarMatch(line.text, title!)) || headerNames(before.filter((line) => line.y < 140), title!));
+      fromRoot = shown;
+      note = shown ? `New Session from the root session ${input.anchor.localId}` : `the root session ${input.anchor.localId}${title ? ` ("${title.slice(0, 60)}") did not show` : " has no title to check on screen"}; New Session from whatever was on screen`;
     }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
@@ -346,8 +413,15 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       return { ok: false, reason: "New Session did not open (the screen did not change)", retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
     }
     const bottom = lines.filter((line) => line.y > size.h * 0.55);
+    // the app asks to trust the folder — read only in the new session's band, once it opened (a
+    // conversation above can say those words, INSP-R12a X3-3): never clicked in the old way, the person decides
+    if (trustPrompt(bottom)) {
+      return { ok: false, reason: `the app asks to trust the workspace of the new session (${input.repoName}); nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.repoName, seen: seenText(bottom.slice(-8)) };
+    }
     if (!showsFolder(bottom, input.repoName)) {
-      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // no new session at all (no empty field, no chips) is not "another folder": a session opened by hand would not change it (R13-dispatch R13-2c)
+      if (!newSessionScreen(bottom, input.repoName)) return { ok: false, reason: `New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      return { ok: false, reason: `the new session did not open in ${input.repoName} (it shows another folder in its chips: the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     }
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
@@ -376,10 +450,97 @@ export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
 export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null {
   const line = row.find((each) => /\bworktree\b/i.test(each.text));
   if (!line) return null;
-  const before = line.text.slice(0, line.text.search(/\bworktree\b/i)).replace(/[|[\]()]/g, " ").trim().split(/\s+/).pop() ?? "";
-  if (/^(?:v|✓|✔|√|☑|☒|\[x\]|x)$/i.test(before)) return "on";
-  if (/^(?:o|0|□|☐|○|◯)$/i.test(before)) return "off";
+  const tokens = line.text.slice(0, line.text.search(/\bworktree\b/i)).trim().split(/\s+/).filter(Boolean);
+  const box = tokens.at(-1) ?? "";
+  // what is inside the box, its edges taken off ("|v|" → "v", "[✓]" → "✓", "|O" → "O")
+  const inside = box.replace(/^[|[(]+/, "").replace(/[|\])]+$/, "");
+  // any mark in it is ON — checked first, so edges never hide a tick (INSP-R12a X3-1)
+  if (/^(?:v|V|✓|✔|√|☑|☒|x|X)$/.test(inside)) return "on";
+  // an empty box, proved: its open square ("O", the Cyrillic "П" of 03/10),
+  // the left edge glued as "1"/"l" ("1O", 05/10 #9378)
+  if (/^[1lI]?(?:[oO0]|□|☐|○|◯|[пП]|[Ππ])$/.test(inside)) return "off";
+  // or its two edges with nothing between ("||", "[]", or "| |" read as two tokens)
+  // — exactly two: "| | |" may be a thin tick read as "|" between them (INSP-R12a-r2 R2-4)
+  if (!inside && (/^(?:\|\||\[\]|\(\))$/.test(box) || (box === "|" && tokens.at(-2) === "|" && tokens.at(-3) !== "|" && !tokens.at(-3)?.endsWith("|")))) return "off";
+  // anything else — one lone edge ("| worktree", the glyph lost), a word — is a doubt: never pasted on
   return "unknown";
+}
+
+/** The app's "trust this workspace" prompt, as the control to click: a
+ * bare "Confiar"/"Trust" button when OCR shows one, else the prompt's own
+ * line ("Confiar no workspace", the only reading so far, 05/10 #9378). */
+// Whole lines only, never a sentence that starts so ("Confiar no workspace
+// do cliente é arriscado", "Confiar?") — INSP-R12a X3-3.
+const TRUST_BUTTON = /^(?:Confiar|Trust)$/i;
+/** A scratch folder the app makes on its own ("scratch-2026-10-06-c55113"). */
+const SCRATCH_FOLDER = /\bscratch-\d{4}-\d{2}-\d{2}\b|scratch-workspaces/i;
+const TRUST_LINE = /^(?:[•·]\s*)?(?:Confiar (?:no|neste|nesse) (?:workspace|espaço de trabalho)|Trust (?:this |the )?(?:workspace|folder))(?:\s+[\w.…-]+)?$/i;
+/** Callers pass only the new session's own band (the composer's, y > 55%), never a conversation above it. */
+export function trustPrompt(lines: OcrLine[]): OcrLine | null {
+  return lines.find((line) => TRUST_BUTTON.test(line.text.trim())) ?? lines.find((line) => TRUST_LINE.test(line.text.trim())) ?? null;
+}
+
+/** The folder a prompt names in its own words, when it does ("Confiar em
+ * /Users/…/9384-… e iniciar uma sessão de código?", the app's PDCixSwULY;
+ * "Trust /… and start a code session?"), else null. */
+export function trustPromptFolder(lines: OcrLine[]): string | null {
+  for (const line of lines) {
+    const named = /^(?:Confiar em|Trust) (\/.+?)(?: e iniciar| and start|\?|$)/i.exec(line.text.trim());
+    if (named) return named[1]!.trim();
+  }
+  return null;
+}
+
+/** A line of the Claude app's own log (~/Library/Logs/Claude/main.log) about
+ * a workspace's trust: the app checking a folder it opens ("checkTrust"),
+ * saving one ("saveTrust", "Saved workspace trust for"). Local time, to the second. */
+export interface TrustLogLine { at: number; kind: "check" | "save"; folder: string }
+
+export function parseTrustLog(text: string): TrustLogLine[] {
+  const out: TrustLogLine[] = [];
+  for (const raw of text.split("\n")) {
+    const line = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) \[\w+\] (?:LocalSessions\.(checkTrust|saveTrust): cwd=(.+)|Saved workspace trust for (.+))$/.exec(raw.trimEnd());
+    if (!line) continue;
+    const [, y, mo, d, h, mi, s, kind, cwd, saved] = line;
+    out.push({ at: new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime(), kind: kind === "checkTrust" ? "check" : "save", folder: (cwd ?? saved)!.trim() });
+  }
+  return out;
+}
+
+const realOrSelf = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+
+/** Whether a trust prompt on screen is for `expected`, by what ties it to a
+ * folder: the folder the prompt names, else the newest folder the app's log
+ * checked (or saved) since our link was opened. "ours", "other" (and which),
+ * or "none" — nothing ties it to any folder. Compared by real path, so the
+ * alias the app was given is the worktree it points to. */
+export function trustPromptFor(lines: OcrLine[], log: readonly TrustLogLine[], since: number, expected: string, kinds: ReadonlyArray<TrustLogLine["kind"]> = ["check", "save"]): { is: "ours" } | { is: "other"; folder: string } | { is: "none" } {
+  const real = realOrSelf(expected);
+  const named = trustPromptFolder(lines);
+  if (named) return realOrSelf(named) === real ? { is: "ours" } : { is: "other", folder: named };
+  // the log is to the second: only seconds wholly after the link was opened
+  // count (never a line of up to 999 ms before it), and of the newest second
+  // the last line written; two folders in that second tie it to none (INSP-R13dis 4)
+  const after = log.filter((each) => kinds.includes(each.kind) && each.at >= Math.ceil(since / 1_000) * 1_000);
+  const top = Math.max(...after.map((each) => each.at));
+  const newest = after.filter((each) => each.at === top);
+  if (!newest.length || new Set(newest.map((each) => realOrSelf(each.folder))).size > 1) return { is: "none" };
+  const folder = newest.at(-1)!.folder;
+  return realOrSelf(folder) === real ? { is: "ours" } : { is: "other", folder };
+}
+
+/** The folder the app was given is the server's own worktree: its real path
+ * is `expected`, which git lists among the repository's worktrees
+ * (`registered`, real paths) — never only the server's record against itself
+ * (INSP-R12a X3-2). */
+export function ownWorktreeFolder(folder: string, expected: string | undefined, registered: readonly string[] = []): boolean {
+  if (!expected || !expected.includes("/.claude/worktrees/")) return false;
+  try {
+    const real = realpathSync(expected);
+    return realpathSync(folder) === real && registered.some((each) => { try { return realpathSync(each) === real; } catch { return false; } });
+  } catch {
+    return false;
+  }
 }
 
 /** The app's link for a new session in a given folder: the one its own
@@ -392,9 +553,60 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
   const wanted = name.toLowerCase();
   return lines.some((line) => line.text.toLowerCase().split(/\s+/).some((raw) => {
     const word = raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
-    const cut = word.replace(/(?:…|\.{2,})$/, "");
+    // the cut mark and any stray punctuation OCR puts after it: "9378-supervisor-do-ate…." (R12-visual N20)
+    const cut = word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
     return word === wanted || (cut !== word && cut.length >= 10 && wanted.startsWith(cut));
   }));
+}
+
+/** How the chips name `name`: "exact"; "cut" — cut short by the app to a
+ * start of it that no other worktree git lists for the repository (`others`,
+ * their folder names) also starts with; "ambiguous" — that start fits
+ * another one too (05/10 18:37Z: "9378-supervisor-do-ate…." fit both
+ * …-035161, asked for, and 472b5524's worktree, the folder before), or the
+ * branch chip ("omb/…", cut too) that does not start `branch`, ours (R2-3);
+ * "none" — a chip of ANOTHER folder was read; "unread" — no folder chip at
+ * all could be read (OCR, or the chips not drawn yet): not "another folder"
+ * (INSP-R13dis 2, R2-2). */
+export function folderChip(lines: OcrLine[], name: string, others: () => readonly string[], branch?: string): "exact" | "cut" | "ambiguous" | "none" | "unread" {
+  const wanted = name.toLowerCase();
+  const strip = (raw: string) => raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
+  const uncut = (word: string) => word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
+  let cutSeen: string | null = null;
+  for (const line of lines) {
+    for (const raw of line.text.toLowerCase().split(/\s+/)) {
+      const word = strip(raw);
+      if (word === wanted) return "exact";
+      const cut = uncut(word);
+      if (cut !== word && cut.length >= 10 && wanted.startsWith(cut)) cutSeen = cut;
+    }
+  }
+  if (!cutSeen) {
+    // a folder chip of another folder: one word of its own (a bullet before it at most) above the empty field —
+    // "• nuria-platform", "• 9337-sobrecarga-d1-no-...", "9378-supervisor-papel-..."; not "• Local", a branch, the worktree option
+    const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+    const above = field ? lines.filter((line) => line.y < field.y) : lines;
+    const folder = above.some((line) => {
+      const text = line.text.trim().replace(/^[•·]\s*/, "");
+      return /^[A-Za-z0-9][\w.-]*(?:…|\.{2,})?[.,·'"]*$/.test(text) && text.length >= 3 && !/^local$/i.test(text) && !/worktree/i.test(text);
+    });
+    return folder ? "none" : "unread";
+  }
+  const prefix = cutSeen;
+  if (others().some((other) => other.toLowerCase() !== wanted && other.toLowerCase().startsWith(prefix))) return "ambiguous";
+  // the branch chip, when read, must fit ours too ("2º omb/9378-supervisor-do-aten..." for omb/9378-supervisor-do-atendimento)
+  if (branch) {
+    const ownBranch = branch.toLowerCase();
+    for (const line of lines) {
+      for (const raw of line.text.toLowerCase().split(/\s+/)) {
+        const word = strip(raw);
+        if (!word.startsWith("omb/")) continue;
+        const shown = uncut(word);
+        if (shown === word ? shown !== ownBranch : !ownBranch.startsWith(shown)) return "ambiguous";
+      }
+    }
+  }
+  return "cut";
 }
 
 /**
@@ -407,23 +619,79 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
  * outside .claude/worktrees: the app maps folders inside it back to the
  * repository root); `folderName` is what its chip shows.
  */
-export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string }): Promise<DesktopStep> {
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[]; trustLog?: () => string; trustClicks?: number; branch?: string }): Promise<DesktopStep> {
   if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
   return withScreen(driver, async (screen) => {
+    const opened = Date.now();
     await act(screen, () => driver.openUrl(newSessionInFolderUrl(input.folder)));
     await driver.sleep(3_000);
     let stop = await guard(screen, "new session in its folder");
     if (stop) return stop;
     const size = await driver.screenSize();
-    const bottom = mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
-    const field = bottom.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
-    if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-    if (!showsFolderName(bottom, input.folderName)) return { ok: false, reason: `the new session does not show the folder ${input.folderName} in its chips; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    const band = async () => mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
+    // git's list, read once and only when needed (a cut chip, a prompt to answer — INSP-R12a-r2 R2-5)
+    let listed: readonly string[] | null = null;
+    const registered = () => (listed ??= input.registered?.() ?? []);
+    const clicked = (input.trustClicks ?? 0) > 0;
+    // First the screen must be the new session of OUR folder: its empty field and the folder's chip.
+    const ours = (lines: OcrLine[]): { field: OcrLine } | DesktopStop => {
+      const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+      if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+      // The chips on another folder — the one the app used before — or cut
+      // short to a start another worktree shares: no click whatever the log
+      // says (it follows the composer: 06/10 03:31:25 checkTrust of the folder
+      // before), and no second try — no click fixes a link that reuses the
+      // folder before; the create goes on in the cli (INSP-R13dis 1, 2, 7).
+      const chip = folderChip(lines, input.folderName, () => registered().map((path) => path.split("/").filter(Boolean).pop() ?? path), input.branch);
+      // no folder chip read at all: a miss to try again, never "another folder" — not the cli, not the breaker (R2-2)
+      if (chip === "unread") return { ok: false, reason: `could not read the new session's folder chip (expected ${input.folderName}); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+      if (chip === "none" || chip === "ambiguous") {
+        return { ok: false, reason: chip === "none" ? `the new session shows another folder in its chips (the folder before), not ${input.folderName}; nothing was clicked or typed` : `the new session's folder chip is cut short to a start that another worktree of the repository shares, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, previousFolder: true, seen: seenText(lines.slice(-8)) };
+      }
+      // a scratch folder of the app's on screen too (where a "trust" sent b23900b6 on 06/10): never ours — after a click of ours, the cli (INSP-R13dis 5)
+      if (lines.some((line) => SCRATCH_FOLDER.test(line.text))) return { ok: false, reason: `the new session shows a scratch folder of the app's, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, ...(clicked ? { cliNow: true } : {}), seen: seenText(lines.slice(-8)) };
+      return { field };
+    };
+    let bottom = await band();
+    const seen = ours(bottom);
+    if ("ok" in seen) return seen;
+    const trust = trustPrompt(bottom);
+    // The app asks to trust a folder it has not seen ("Confiar no workspace",
+    // 05/10 #9378), with our folder's chip on screen. Clicked only when that
+    // folder is a worktree git lists for the repository, by its real path;
+    // anywhere else only the person decides (INSP-R12a X3-2); never when the
+    // folder the prompt names, or the app's log since the link, is another
+    // one; and once per create: after a click the prompt again is the cli.
+    if (trust) {
+      if (clicked) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName} again after the server clicked it once in this create; no second click — the create goes on in the cli`, retry: true, miss: true, touched: true, cliNow: true, seen: seenText(bottom.slice(-8)) };
+      const log = () => (input.trustLog ? parseTrustLog(input.trustLog()) : []);
+      const tie = input.expected ? trustPromptFor(bottom, log(), opened, input.expected) : { is: "none" as const };
+      if (tie.is === "other") return { ok: false, reason: `the app asks to trust the workspace ${tie.folder}, not ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // git's list is read only now, when there is a prompt to answer (INSP-R12a-r2 R2-5)
+      if (!ownWorktreeFolder(input.folder, input.expected, registered())) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(bottom.slice(-8)) };
+      stop = await guard(screen, "trust the workspace");
+      if (stop) return stop;
+      await act(screen, () => driver.click(trust.x + trust.w / 2, trust.y + trust.h / 2));
+      await driver.sleep(1_000);
+      bottom = await band();
+      if (trustPrompt(bottom)) return { ok: false, reason: `the app still asks to trust the workspace ${input.folderName} after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // what the app saved, when its log says: another folder is a miss, said
+      const saved = input.expected && input.trustLog ? trustPromptFor([], log(), opened, input.expected, ["save"]) : { is: "none" as const };
+      if (saved.is === "other") return { ok: false, reason: `the app saved the trust for ${saved.folder}, not ${input.folderName}, after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // Never pasted on the screen of the click: both times the server
+      // clicked it (06/10 11:06 and 12:01 BRT) the app saved the trust and
+      // then started the session in a scratch folder of its own, a second
+      // later, with our chip still read. The link is opened again on the
+      // next try, the folder now trusted, and checked from the start
+      // (R13-dispatch R13-3).
+      return { ok: false, reason: `trusted the workspace ${input.folderName}; nothing was typed — the app's link is opened again and the folder checked before the brief goes in`, retry: true, touched: true, trusted: true, seen: seenText(bottom.slice(-8)) };
+    }
+    const { field } = seen;
     // the folder IS the worktree: with the app's worktree option on, the app
     // would make one of its own inside or beside it (R11-dispatch R11-1)
     const option = worktreeOption(chipRow(bottom));
     if (option === "on" || option === "unknown") {
-      return { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      return { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)), worktreeOption: option };
     }
     stop = await guard(screen, "empty session field");
     if (stop) return stop;
@@ -926,6 +1194,8 @@ export interface DesktopRecord {
    * for every record on this Mac, worktree sessions included): where the
    * session landed (`cwd`) is the app's choice, not this one. */
   originCwd?: string;
+  /** The base branch the session started from, as the app recorded it. */
+  sourceBranch?: string;
   /** The app's own summary of a turn: status_category "blocked" means it waits
    * on someone. It is written after the turn, and summarizes_uuid names the
    * assistant message it is about. */
@@ -1089,10 +1359,13 @@ export function lastServerSessionInRoot(serverLocalIds: ReadonlySet<string>, dir
 
 /** What cc_session_start answers (409) while the server's last session
  * landed in the root (lastServerSessionInRoot). */
-export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false): string {
+export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false, ownPath = false): string {
   return [
     `não abri: a última sessão que o servidor abriu no app Claude${last.title ? ` ("${last.title}")` : ""} caiu na raiz (${last.folder}), sem worktree própria — o app está abrindo sessões novas com a worktree desligada, e a próxima cairia lá também, mexendo direto no checkout principal.`,
-    `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
+    // with the server's own worktrees (lote X) the option must stay OFF: never ask to turn it on (R12-1)
+    ownPath
+      ? `Neste repositório o servidor cria a pasta de cada sessão e abre o app nela, e para isso a opção worktree tem de ficar DESLIGADA: não peça ao dono para ligá-la. Esse caminho está suspenso pelo disjuntor; peça ao dono para deixar a opção worktree desligada e resolver o item "O app Claude abriu … sessões …" em "Precisa de você": o servidor volta a abrir as sessões na pasta dele.`
+      : `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
     fromQueue
       ? `Este pedido veio da fila de sessões e continua nela: o servidor tenta de novo sozinho a cada 5 min e desiste, com aviso, depois de 24 h falhando. Se não der para esperar, use surface "cli" com cli_reason.`
       : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,

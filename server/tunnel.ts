@@ -143,26 +143,64 @@ export interface TunnelAccount {
   controlPlane: string;
 }
 
+/** How a long-running `serve --tunnel` lends its tunnel to the account
+ * service, so the desktop's background recovery runs here too: while the
+ * tunnel runs, the service checks the endpoint every 15 minutes, and when
+ * the control plane removed it (idle reclaim) it provisions a new one behind
+ * the same address and the running tunnel is restarted with the new token. */
+export interface TunnelRecovery {
+  /** The tunnel this process is serving, or null before it starts and once it stops. */
+  running(): RunningTunnel | null;
+}
+
+const STOPPED_TUNNEL: ManagedTunnelState = { status: "stopped", ready: false };
+
 /** The desktop honours OMB_CONTROL_PLANE_URL only in development builds; a
  * server's operator owns its environment, so it is honoured here always and
- * the caller says so in its output. */
+ * the caller says so in its output. One-shot commands (login, status) pass no
+ * `recovery` and so start no background timers. */
 export function createTunnelAccount(options: {
   dataDir: string;
   version: string;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   machineName?: string;
+  recovery?: TunnelRecovery;
+  /** Where failed setup steps (code, status, support reference) are written. */
+  log?: (line: string) => void;
+  /** Test seam for the recovery timers and the time they compare against. */
+  clock?: {
+    setTimer: (callback: () => void, milliseconds: number) => unknown;
+    clearTimer: (handle: unknown) => void;
+    now: () => number;
+  };
 }): TunnelAccount {
   const env = options.env ?? process.env;
   const credentials = openTunnelCredentials(options.dataDir);
   const controlPlane = resolveCompanionControlPlaneURL({ isPackaged: true, environment: env });
   const client = controlPlane ? createControlPlaneClient({ baseURL: controlPlane, fetchImpl: options.fetchImpl }) : null;
+  const recovery = options.recovery;
   const service = createCompanionAccountService({
     client,
     readCredentials: () => credentials.read(),
     updateCredentials: (derive, afterPersist) => credentials.update(derive, afterPersist),
     identity: { name: options.machineName ?? hostname(), platform: platformName(), appVersion: options.version },
     newClientInstanceId: () => randomUUID(),
+    ...(options.log ? { log: options.log } : {}),
+    ...(recovery
+      ? {
+          autoRecover: true,
+          companionIsOn: () => recovery.running() !== null,
+          managedConnectionState: () => recovery.running()?.state() ?? STOPPED_TUNNEL,
+          activatePersistedEndpoint: async () => {
+            const tunnel = recovery.running();
+            const access = tunnelAccess(credentials.read());
+            if (!tunnel || !access) return tunnel?.state() ?? STOPPED_TUNNEL;
+            return tunnel.restart(access);
+          },
+          ...options.clock,
+        }
+      : {}),
   });
   return { service, credentials, controlPlane };
 }
@@ -190,7 +228,9 @@ export async function fleetAccess(options: { credential: string; env?: NodeJS.Pr
     if (error instanceof ControlPlaneError && error.status === 401) {
       throw new Error(`the installation credential in ${FLEET_CREDENTIAL_ENV} was rejected by ${controlPlane}; the fleet has to issue a new one`);
     }
-    throw new Error(`could not get this machine's public address from ${controlPlane}: ${error instanceof Error ? error.message : String(error)}`);
+    // The request id is what support looks the failure up by.
+    const reference = error instanceof ControlPlaneError && error.requestId ? ` (reference ${error.requestId})` : "";
+    throw new Error(`could not get this machine's public address from ${controlPlane}: ${error instanceof Error ? error.message : String(error)}${reference}`);
   }
 }
 
@@ -255,6 +295,9 @@ export interface RunningTunnel {
   state(): ManagedTunnelState;
   /** Resolves with the first settled attempt: ready, or the reason it is retrying. */
   started: Promise<ManagedTunnelState>;
+  /** Reconnect with a new connector token (same address). A no-op when the
+   * token is unchanged and the connector is still running. */
+  restart(access: ManagedTunnelAccess): Promise<ManagedTunnelState>;
   stop(): Promise<void>;
 }
 
@@ -292,6 +335,7 @@ export function startTunnel(options: {
     address: options.access.endpoint,
     state: () => current,
     started,
+    restart: (access) => tunnel.start({ endpoint: access.endpoint, token: access.token, originTarget: options.originTarget }),
     stop: async () => {
       await tunnel.stop();
     },

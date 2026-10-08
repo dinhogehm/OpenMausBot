@@ -1,9 +1,13 @@
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
+import type { RoutineRunCardData } from "../../shared/routine-run";
+import type { ConnectorCardData } from "../../shared/wire";
 
 export const PINNED_SECTION_ID = "builtin:pinned";
 export const CHANNELS_SECTION_ID = "builtin:channels";
 export const BOT_CHATS_SECTION_ID = "builtin:bot-chats";
 export const BOTS_SECTION_ID = "builtin:bots";
+export const ATTENTION_SECTION_ID = "builtin:attention";
+export const PINNED_THREADS_SECTION_ID = "builtin:pinned-threads";
 
 const USER_SECTION_PREFIX = "section:";
 
@@ -65,6 +69,69 @@ export function sidebarGoalRunPreview(run: GroupGoalRunCardData): string {
   return summary ? `${label}: ${summary}` : label;
 }
 
+/** The catalog keys a routine run's preview reads its state from. */
+export type SidebarRoutineRunPreviewKey =
+  | "sidebar.preview.routineRun.queued"
+  | "sidebar.preview.routineRun.running"
+  | "sidebar.preview.routineRun.waiting"
+  | "sidebar.preview.routineRun.completed"
+  | "sidebar.preview.routineRun.failed"
+  | "sidebar.preview.routineRun.cancelled"
+  | "sidebar.preview.routineRun.missed"
+  | "sidebar.preview.routineRun.needsInput"
+  | "sidebar.preview.routineRun.blocked"
+  | "sidebar.preview.routineRun.limitReached"
+  | "sidebar.preview.routineRun.paused"
+  | "sidebar.preview.routineRun.stopped";
+
+/** A routine run's receipt previews as what the run said, in the bot's own
+ * words, or as where it stands in the reader's language — never as the
+ * English line the computer writes for clients without the card
+ * ("Routine “…” completed", R13-visual N25). A run that failed says so: its
+ * error is the provider's text, not the bot's. */
+export function sidebarRoutineRunPreview(
+  run: Pick<RoutineRunCardData, "routineName" | "status" | "goalStatus" | "summary">,
+  say: (key: SidebarRoutineRunPreviewKey, params: { name: string }) => string,
+): string {
+  const failed = run.status === "failed" || run.status === "missed" || run.status === "cancelled";
+  const summary = failed ? "" : (run.summary ?? "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s*(?:[-*+•]|\d+[.)]|#{1,6})\s+/gm, "")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (summary) return summary;
+  // the goal's own outcome first, as the computer's line does: a run "completed" whose goal got blocked did not
+  // complete what it was for (INSP-R13VIS A6)
+  const goal = run.goalStatus && run.goalStatus !== "completed" ? GOAL_PREVIEW_KEY[run.goalStatus] : undefined;
+  return say(goal ?? `sidebar.preview.routineRun.${run.status}`, { name: run.routineName });
+}
+const GOAL_PREVIEW_KEY = {
+  "needs-input": "sidebar.preview.routineRun.needsInput",
+  blocked: "sidebar.preview.routineRun.blocked",
+  "limit-reached": "sidebar.preview.routineRun.limitReached",
+  paused: "sidebar.preview.routineRun.paused",
+  stopped: "sidebar.preview.routineRun.stopped",
+  failed: "sidebar.preview.routineRun.failed",
+} satisfies Record<Exclude<NonNullable<RoutineRunCardData["goalStatus"]>, "completed">, SidebarRoutineRunPreviewKey>;
+
+/** The catalog keys a connection card's preview reads its state from. */
+export type SidebarConnectorPreviewKey = "connectors.card.connected" | "connectors.card.waiting" | "connectors.card.connectSecurely";
+
+/** A connection card previews as the app and where it stands, in the
+ * reader's language, never as the English line the computer writes for
+ * phones that cannot draw the card yet. */
+export function sidebarConnectorPreview(
+  connector: Pick<ConnectorCardData, "label" | "status" | "dismissed">,
+  say: (key: SidebarConnectorPreviewKey) => string,
+): string {
+  if (connector.dismissed) return connector.label;
+  const key: SidebarConnectorPreviewKey = connector.status === "connected"
+    ? "connectors.card.connected"
+    : connector.status === "authorizing" ? "connectors.card.waiting" : "connectors.card.connectSecurely";
+  return `${connector.label} · ${say(key)}`;
+}
+
 export function sidebarLayoutInteractive(density: SidebarDensityMode, query: string): boolean {
   return density !== "icons" && query.trim().length === 0;
 }
@@ -78,14 +145,30 @@ export function sidebarSectionCollapsed(
   return sidebarLayoutInteractive(density, query) && collapsedIds.includes(id);
 }
 
+/** Thread rows for bots that the circle grid took out of the normal list.
+ * Icons and the row layout already show those rows, so this stays off there. */
+export function pinnedCircleThreadListVisible(
+  circles: boolean,
+  density: SidebarDensityMode,
+  pinnedCount: number,
+): boolean {
+  return circles && density !== "icons" && pinnedCount > 0;
+}
+
 /** Pinned bots are a virtual view. Their saved section is left untouched so
- * unpinning returns them to the context they came from. */
-export function partitionSidebarBots<T extends SidebarBot>(bots: T[]) {
+ * unpinning returns them to the context they came from.
+ * With universal pins, a pin lifts a bot out of every group, including a
+ * section's chief. Without it, chiefs stay in the group they run. */
+export function partitionSidebarBots<T extends SidebarBot>(
+  bots: T[],
+  options?: { universalPins?: boolean },
+) {
+  const universalPins = options?.universalPins === true;
   const visible = bots.filter((bot) => !bot.hidden);
-  const unsectionedChief = visible.find((bot) => bot.chiefOfStaff && !bot.section) ?? null;
-  const pinnedBots = visible.filter((bot) => !bot.chiefOfStaff && Boolean(bot.pinned));
+  const pinnedBots = visible.filter((bot) => Boolean(bot.pinned) && (universalPins || !bot.chiefOfStaff));
   const pinnedIds = new Set(pinnedBots.map((bot) => bot.id));
-  const sectionChiefs = visible.filter((bot) => bot.chiefOfStaff && Boolean(bot.section));
+  const unsectionedChief = visible.find((bot) => bot.chiefOfStaff && !bot.section && !pinnedIds.has(bot.id)) ?? null;
+  const sectionChiefs = visible.filter((bot) => bot.chiefOfStaff && Boolean(bot.section) && !pinnedIds.has(bot.id));
   const sectionedBots = visible.filter(
     (bot) => !bot.chiefOfStaff && Boolean(bot.section) && !pinnedIds.has(bot.id),
   );

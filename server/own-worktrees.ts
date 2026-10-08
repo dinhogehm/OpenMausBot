@@ -22,8 +22,9 @@
 // Nothing here removes a worktree, ever: the owner's rule is that the
 // server only reports. A failed clone takes back only the temporary copy it
 // was writing, inside the new worktree, before any session saw it.
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { slugify } from "./cc-sessions.ts";
@@ -139,6 +140,74 @@ export function failureText(error: unknown): string {
   const stderr = String((error as { stderr?: unknown })?.stderr || "").trim();
   const text = stderr || (error instanceof Error ? error.message : String(error));
   return text.split("\n").map((line) => line.replace(/^(?:fatal|error):\s*/i, "").trim()).filter(Boolean).slice(-2).join(" ").slice(0, 300) || "falhou sem dizer por quê";
+}
+
+/** After SIGTERM to a preparation's process group, how long before SIGKILL. */
+export const GROUP_KILL_AFTER_MS = 10_000;
+
+/** An Exec for a seeded start's preparation (R13-dispatch INSP-R4-1): each
+ * program in a process group of its own (`detached`), its abort or timeout a
+ * SIGTERM to the whole group — git's hooks, cp's children — then SIGKILL,
+ * and it settles only on `close`: when the program has exited and every
+ * process holding its output (a grandchild too) is gone. execFile's callback
+ * fires at the abort itself, with the program still running (3 s apart on a
+ * program that takes its time to stop). */
+export function groupExec(env: NodeJS.ProcessEnv = process.env, killAfterMs = GROUP_KILL_AFTER_MS, watch?: { output?: (text: string) => void; overflow?: (line: string) => void }): Exec {
+  return (file, args, options = {}) => new Promise<string>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(Object.assign(new Error(`${file}: aborted before it started`), { name: "AbortError" }));
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, args, { cwd: options.cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const cap = 16 * 1024 * 1024;
+    let out = "";
+    let err = "";
+    // decoded as a stream: a UTF-8 character split between two chunks stays whole (INSP-R5-1)
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    const over = new Set<string>();
+    const keep = (kind: "stdout" | "stderr", held: string, text: string) => {
+      if (held.length < cap) return held + text;
+      // past the cap: said once, not cut off silently
+      if (!over.has(kind)) {
+        over.add(kind);
+        (watch?.overflow ?? ((line: string) => console.warn(`[own-worktrees] ${line}`)))(`${file}: ${kind} passed ${cap / 1024 / 1024} MB; the rest of it is not kept`);
+      }
+      return held;
+    };
+    child.stdout?.on("data", (text: string) => { out = keep("stdout", out, text); watch?.output?.(text); });
+    child.stderr?.on("data", (text: string) => { err = keep("stderr", err, text); });
+    let stopped: string | null = null;
+    let hard: ReturnType<typeof setTimeout> | undefined;
+    const group = (sig: NodeJS.Signals) => { try { if (child.pid) process.kill(-child.pid, sig); } catch { /* gone already */ } };
+    const stop = (why: string) => {
+      if (stopped) return;
+      stopped = why;
+      group("SIGTERM");
+      hard = setTimeout(() => group("SIGKILL"), killAfterMs);
+      hard.unref?.();
+    };
+    const timer = options.timeoutMs ? setTimeout(() => stop(`passou de ${Math.round(options.timeoutMs! / 1000)} s`), options.timeoutMs) : undefined;
+    const onAbort = () => stop("interrompido");
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    let spawnError: Error | null = null;
+    child.on("error", (error) => { spawnError = error; });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (spawnError) reject(Object.assign(spawnError, { stderr: err }));
+      else if (stopped) reject(Object.assign(new Error(`${file} ${stopped}`), { name: "AbortError", stderr: err }));
+      else if (code === 0) resolve(out);
+      else reject(Object.assign(new Error(`${file} saiu com ${code ?? signal}`), { stderr: err }));
+    });
+  });
 }
 
 /** Make the session's worktree from a fresh origin/<base>. A fetch that
@@ -365,8 +434,13 @@ export async function cloneSeedCaches(seed: SeedState | undefined, worktree: str
   // one file first, proved shared: where the volume cannot clone, cp -c
   // falls back to a full copy on its own (man cp) and would fill the disk
   const probe = join(worktree, CLONE_PROBE);
-  const cannot = await io.cloneFile(join(seed.path, seed.lockName!), probe);
-  io.dropTemp(probe);
+  let cannot: string | null;
+  try {
+    cannot = await io.cloneFile(join(seed.path, seed.lockName!), probe);
+  } finally {
+    // taken back whatever happened, an abort mid-check too (INSP-R4-3)
+    io.dropTemp(probe);
+  }
   if (cannot) return fallback(`o volume não clona arquivos (não é APFS?): ${cannot}`);
   const cloned: string[] = [];
   let savedKb = 0;
@@ -627,7 +701,8 @@ export function realCloneIo(exec: Exec, node: () => Promise<string | null>): Clo
       }
     },
     rename: renameSync,
-    dropTemp: (path) => rmSync(path, { recursive: true, force: true }),
+    // (the copy's cp has exited by then — groupExec settles on close — and a straggling write is retried, INSP-R4-3)
+    dropTemp: (path) => rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
     node,
     hooks: (folder) => hooksFolder(folder, exec),
     listDir: (path) => { try { return readdirSync(path); } catch { return null; } },
@@ -676,6 +751,155 @@ export function cacheLine(outcome: Pick<CloneOutcome, "mode" | "reason"> & { dir
   }
   const why = outcome.mode === "cloned" ? "os hooks do git não foram conferidos" : outcome.reason ?? "motivo desconhecido";
   return `As dependências NÃO foram clonadas (${why}): rode \`${install}\` nesta worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.`;
+}
+
+// ── the worktrees of headless sessions (claude -p): the same seeding ──────
+// `claude -p -w <name>` makes a bare worktree: no node_modules, and the
+// first ci:local of the session failed after ~14 min of the global lease on
+// a missing vite (R13-gate G2, b2d01a). The server makes that worktree itself
+// where claude would (<repo>/.claude/worktrees/<name>, branch
+// worktree-<name>), from origin/<base>, clones the seed's caches into it,
+// and the first turn runs there.
+
+/** Where claude -w would put a session's worktree, and its branch. */
+export const cliWorktreePlan = (repo: string, name: string): OwnPlan => ({ dir: name, path: join(repo, ".claude", "worktrees", name), branch: `worktree-${name}` });
+
+/** Make a headless session's worktree and seed it: what was made, or why not
+ * (the session then goes the old way, `-w`, and its brief says to install). */
+export async function prepareCliWorktree(repo: string, name: string, io: { add: (plan: OwnPlan) => Promise<{ ok: true; head: string } | { ok: false; error: string }>; clone: (path: string) => Promise<CloneOutcome> }): Promise<{ ok: true; plan: OwnPlan; caches: CloneOutcome } | { ok: false; reason: string }> {
+  const plan = cliWorktreePlan(repo, name);
+  let made: Awaited<ReturnType<typeof io.add>>;
+  try {
+    made = await io.add(plan);
+  } catch (error) {
+    made = { ok: false, error: failureText(error) };
+  }
+  if (!made.ok) return { ok: false, reason: made.error };
+  let caches: CloneOutcome;
+  try {
+    caches = await io.clone(plan.path);
+  } catch (error) {
+    caches = { mode: "install", reason: `o clone das dependências falhou: ${failureText(error)}`, dirs: [], savedKb: 0, savedMs: 0, ms: 0, install: "npm ci" };
+  }
+  return { ok: true, plan, caches };
+}
+
+/** How long one seeded headless start may hold the ones after it. */
+export const SEEDED_START_MAX_MS = 180_000;
+
+/** After the abort, how long the slow start may take to really stop (its git
+ * or cp killed, a temporary copy taken back) before the queue goes on anyway. */
+export const SEEDED_STOP_GRACE_MS = 60_000;
+
+/** The seeded headless starts, one after another in the order they came (a
+ * P1 the queue opened first spawns first — INSP-R13dis 3), each with a
+ * deadline (R2-1). Past it the start is aborted (its `signal`: the git and cp
+ * it runs are killed) and waited for until it has really stopped — so the
+ * next start never runs a second fetch in the same repository beside it
+ * (R3-2) — and only then its `late` runs. `live()` is false from the
+ * deadline on: a slow start must spawn nothing. A throw is `late` too. */
+export function seededStartChain(deadlineMs = SEEDED_START_MAX_MS, timers: { set: (run: () => void, ms: number) => unknown; clear: (timer: unknown) => void } = { set: (run, ms) => setTimeout(run, ms), clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) }, graceMs = SEEDED_STOP_GRACE_MS) {
+  let chain: Promise<void> = Promise.resolve();
+  return (start: (live: () => boolean, signal: AbortSignal) => Promise<void>, late: (why: string, stopped: boolean) => void): Promise<void> => {
+    chain = chain.then(() => new Promise<void>((resolve) => {
+      const controller = new AbortController();
+      let over = false;
+      const tell = (why: string, stopped: boolean) => {
+        try { late(why, stopped); } catch { /* the next start goes on all the same */ }
+        resolve();
+      };
+      let running: Promise<void>;
+      try {
+        running = start(() => !over, controller.signal);
+      } catch (error) {
+        running = Promise.reject(error);
+      }
+      const settled = running.then(() => null, (error: unknown) => failureText(error));
+      const timer = timers.set(() => {
+        if (over) return;
+        over = true;
+        const why = `a preparação da worktree passou de ${Math.round(deadlineMs / 1000)} s`;
+        controller.abort(new Error(why));
+        // waited for until it has really stopped (or the grace is over: then said so)
+        let grace: unknown;
+        void Promise.race([settled.then(() => true), new Promise<boolean>((done) => { grace = timers.set(() => done(false), graceMs); })]).then((stopped) => {
+          timers.clear(grace);
+          tell(why, stopped);
+        });
+      }, deadlineMs);
+      void settled.then((error) => {
+        if (over) return;
+        over = true;
+        timers.clear(timer);
+        if (error === null) resolve();
+        else tell(error, true);
+      });
+    }));
+    return chain;
+  };
+}
+
+/** One headless session as the seeded start sees it. */
+export interface SeededSession { id: string; repo: string; worktree: string; turns: number; status: string; cliWorktree?: { path: string; branch: string; caches: "cloned" | "install"; reason?: string }; cliWorktreeLeft?: { path: string; reason: string } }
+
+/** A headless session's first turn in a worktree the server made and seeded
+ * (R13-gate G2), through the chain. The worktree is used only when its
+ * preparation ENDED within the deadline — the ready mark is `cliWorktree`,
+ * set then and never by a start aborted (R3-1). A start given up (deadline
+ * or throw) never touches what it left: the session goes the old way, `-w`,
+ * under a NEW name (claude -w meeting a folder half made by us would run in
+ * it), and the folder, whatever its state, is told in the worktree report
+ * for a person to remove — removing a worktree whose git may still be
+ * writing it is the riskier choice, and the server removes none. A
+ * temporary copy of an aborted clone is taken back by the clone itself. */
+export function enqueueSeededStart(enqueue: ReturnType<typeof seededStartChain>, session: SeededSession, deps: {
+  prepare: (repo: string, name: string, signal: AbortSignal) => Promise<{ ok: true; plan: OwnPlan; caches: CloneOutcome } | { ok: false; reason: string }>;
+  spawn: (session: SeededSession, line: string, outcome: { ok: true; plan: OwnPlan; caches: CloneOutcome } | { ok: false; reason: string }) => void;
+  exists: (path: string) => boolean;
+  save: () => void;
+  log: (line: string) => void;
+  /** A new name for the old way's worktree. */
+  rename: (name: string) => string;
+  install?: string;
+}): Promise<void> {
+  return enqueue(async (live, signal) => {
+    const outcome = await deps.prepare(session.repo, session.worktree, signal);
+    // aborted, or past its deadline: no ready mark, no spawn — the late path decides (R3-1)
+    if (signal.aborted || !live()) {
+      deps.log(`${session.id}: its worktree's preparation was given up (${outcome.ok ? "made, but past the deadline" : outcome.reason}); not used`);
+      return;
+    }
+    if (session.status === "stopped" || session.status === "archived") {
+      deps.log(`${session.id}: stopped while its worktree was made${outcome.ok ? ` (${outcome.plan.path}, left as it is)` : ""}`);
+      return;
+    }
+    if (outcome.ok) {
+      session.cliWorktree = { path: outcome.plan.path, branch: outcome.plan.branch, caches: outcome.caches.mode, ...(outcome.caches.reason ? { reason: outcome.caches.reason } : {}) };
+      deps.save();
+    }
+    deps.spawn(session, cliDependencyLine(outcome, deps.install), outcome);
+  }, (why, stopped) => {
+    // never "running" with no process, never a 2nd first turn
+    if (session.turns !== 0 || session.status !== "running") return;
+    const partial = cliWorktreePlan(session.repo, session.worktree).path;
+    if (deps.exists(partial)) session.cliWorktreeLeft = { path: partial, reason: why };
+    delete session.cliWorktree;
+    const was = session.worktree;
+    session.worktree = deps.rename(was);
+    deps.save();
+    deps.log(`${session.id}: seeded start given up (${why}${stopped ? "" : "; it did not stop within the grace"}); the old way, claude -w ${session.worktree}${session.cliWorktreeLeft ? `, ${partial} left for the worktree report` : ""}`);
+    deps.spawn(session, cliDependencyLine({ ok: false, reason: why }, deps.install), { ok: false, reason: why });
+  });
+}
+
+/** The line a headless session's first brief carries about its dependencies:
+ * cloned and checked — do not install; otherwise install before anything,
+ * and above all before the gate (ci:local, pr:merge). */
+export function cliDependencyLine(outcome: { ok: true; caches: Pick<CloneOutcome, "mode" | "reason"> & { dirs?: string[]; install?: string; hooks?: string } } | { ok: false; reason: string }, install = "npm ci"): string {
+  if (outcome.ok && outcome.caches.mode === "cloned" && outcome.caches.hooks) return cacheLine(outcome.caches);
+  const said = outcome.ok ? cacheLine(outcome.caches) : `As dependências NÃO foram clonadas (o servidor não criou a worktree: ${outcome.reason.slice(0, 160)}): rode \`${install}\` na sua worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.`;
+  const run = outcome.ok ? outcome.caches.install ?? install : install;
+  return `${said} Em especial, rode \`${run}\` na worktree ANTES de qualquer \`npm run ci:local\` ou \`npm run pr:merge\`: sem node_modules o gate reprova à toa (vite ausente) e prende o lease por ~14 min.`;
 }
 
 // ── what was saved: the ledger behind the metrics and the report ──────────
@@ -782,13 +1006,18 @@ export class OwnWorktreeStore {
 // (one it made itself with its worktree option on, the root, another
 // worktree) stops at its folder check and fails. Two in a row in the same
 // repository and the server stops using this path there: the owner gets
-// one item with the diagnosis, and the starts go the old way (New Session,
-// its 409 and gesture) until a create works or the owner resolves the item
-// (R11-dispatch R11-1).
+// one item with the diagnosis, and the starts go straight to the cli — no
+// app at all, the old way failed with it every time on 06/10 — until the
+// owner resolves the item (R11-dispatch R11-1, R13-dispatch R13-2). Every
+// give-up of this path counts: a wrong folder, the worktree option on, and
+// a link that opened no new session or showed another folder's chips.
 
 export const OWN_BREAKER_FAILURES = 2;
 
-export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string }
+/** `chip`: the session never opened — its worktree option read ON or
+ * unreadable, so nothing was typed (R12-1); `missed`: it never opened for
+ * another reason, the last one of its misses (R13-2). `folder` is then empty. */
+export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string; chip?: "on" | "unknown"; missed?: string; seen?: string }
 export interface OwnBreakerRepo { failures: OwnFailure[]; trippedAt?: number; itemId?: string }
 export interface OwnBreakerState { repos: Record<string, OwnBreakerRepo> }
 
@@ -809,6 +1038,16 @@ export function breakerRepo(repo: string, realpath: (path: string) => string = r
   try { return realpath(repo); } catch { return repo; }
 }
 
+/** Why a new session of `repo` goes straight to the cli: its breaker tripped
+ * and the owner was asked (an item open), until they resolve it — or null.
+ * Tripped with nobody asked, the old way still runs, so a create that works
+ * can rearm it (R13-dispatch R13-2). */
+export function ownBreakerCli(state: OwnBreakerState, repo: string): string | null {
+  const entry = state.repos[repo];
+  if (entry?.trippedAt === undefined || !entry.itemId) return null;
+  return `o app Claude não abriu as últimas ${entry.failures.length} sessões de ${basename(repo)} na worktree que o servidor cria (disjuntor desde ${new Date(entry.trippedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}); as sessões novas vão direto para a CLI até o dono resolver o item`;
+}
+
 /** Rearmed: a create that worked, or the owner's item resolved. */
 export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreakerState {
   if (!state.repos[repo]) return state;
@@ -818,43 +1057,103 @@ export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreake
 }
 
 /** What happened to one failure, in words: the app's own worktree inside or beside ours means its worktree option was on. */
-export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected">, repo: string): string {
+export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected" | "chip" | "missed" | "seen">, repo: string): string {
+  if (failure.missed) return `${missedCause(failure.missed)}${failure.seen ? ` (a tela mostrou: ${failure.seen.slice(0, 120)})` : ""}; nada foi colado`;
+  if (failure.chip) return `a opção worktree estava ${failure.chip === "on" ? "LIGADA" : "ilegível"} na sessão nova${failure.seen ? ` (a tela mostrou: ${failure.seen.slice(0, 120)})` : ""}; nada foi colado — desligue-a antes de abrir sessão`;
   if (failure.folder.startsWith(`${failure.expected}/`)) return `o app criou uma worktree própria dentro da pasta do OMB (${failure.folder}): a opção worktree estava LIGADA`;
   if (failure.folder === repo) return "o app abriu na raiz do repositório, não na pasta do OMB";
   if (failure.folder.includes("/.claude/worktrees/")) return `o app abriu em outra worktree (${failure.folder}), não na do OMB: a opção worktree estava LIGADA, ou o app reaproveitou uma pasta`;
   return `o app abriu em ${failure.folder}, não na pasta do OMB`;
 }
 
+/** A miss of the screen (desktop-work's reason, in English) said in pt-BR. */
+function missedCause(reason: string): string {
+  if (/New Session did not show a new session's screen/i.test(reason)) return "a sessão nova pelo jeito antigo também não apareceu (a tela mostrou uma conversa)";
+  if (/no empty task field/i.test(reason)) return "o link do app não abriu uma sessão nova (a tela mostrou uma conversa, sem o campo vazio de tarefa)";
+  if (/does not show the folder|shows another folder in its chips/i.test(reason)) return "a sessão nova mostrou outra pasta nos chips (a da sessão anterior), não a worktree do OMB";
+  if (/could not read the new session's folder chip/i.test(reason)) return "não deu para ler o chip da pasta na sessão nova (nenhum nome de pasta legível na tela)";
+  if (/cut short to a start that another worktree/i.test(reason)) return "o nome da pasta nos chips veio cortado e serve para mais de uma worktree; não dá para saber se é a do OMB";
+  if (/again after the server clicked it once/i.test(reason)) return "o app pediu de novo para confiar no workspace depois do clique do servidor";
+  if (/scratch folder/i.test(reason)) return "a sessão nova mostrou uma pasta de rascunho (scratch) do app";
+  if (/still asks to trust/i.test(reason)) return "o app continuou pedindo para confiar no workspace depois do clique";
+  if (/saved the trust for (\S+), not/i.test(reason)) return `o app gravou a confiança para outra pasta (${/saved the trust for (\S+), not/i.exec(reason)![1]}), não para a worktree do OMB`;
+  if (/asks to trust the workspace (\S+), not /i.test(reason)) return `o app pediu para confiar em outra pasta (${/asks to trust the workspace (\S+), not /i.exec(reason)![1]}), não na worktree do OMB; não cliquei`;
+  if (/which is not a worktree the server made/i.test(reason)) return "o app pediu para confiar numa pasta que não é uma worktree do OMB; não cliquei";
+  if (/trusted the workspace/i.test(reason)) return "confiei no workspace da worktree do OMB, mas a sessão não abriu nela depois";
+  return `o app não abriu a sessão na worktree do OMB (motivo registrado no log do servidor)`;
+}
+
 /** The owner's item when the breaker trips. */
 export function ownBreakerItem(repo: string, failures: readonly OwnFailure[]): { title: string; why: string; steps: Array<{ text: string }> } {
   const name = basename(repo);
+  const chipOnly = failures.every((each) => each.chip);
+  const missedOnly = failures.every((each) => each.missed);
   return {
-    title: `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
+    title: chipOnly
+      ? `O app Claude abriu ${failures.length} sessões de ${name} com a opção worktree LIGADA ou ilegível: desligue-a antes de abrir sessão (o servidor já cria a pasta)`
+      : missedOnly
+        ? `O app Claude não abriu ${failures.length} sessões seguidas de ${name} na worktree que o servidor criou: as próximas vão direto para a CLI até você conferir o app`
+        : `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
     why: [
-      `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela e pararam no Passo 0, sem mexer em nada:`,
+      chipOnly
+        ? `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app, e só com a opção worktree desligada. Nas últimas ${failures.length}, a opção estava ligada ou não deu para lê-la, e nada foi colado:`
+        : missedOnly
+          ? `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. Nas últimas ${failures.length}, a tela não mostrou a sessão nova nessa pasta, e nada foi colado:`
+          : `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela (ou nem abriram), sem mexer em nada:`,
       ...failures.map((each) => `- "${each.title.slice(0, 60)}": ${ownFailureCause(each, repo)}`),
-      "Até você resolver este item, as sessões novas vão pelo jeito antigo (Nova sessão), com o 409 e o gesto de sempre. As worktrees criadas ficam como estão (o servidor nunca remove) e aparecem no relatório de disco.",
+      "Até você resolver este item, as sessões novas deste repositório vão direto para a CLI (no terminal, fora do app Claude), sem tentar o app de novo; elas não aparecem na lista do app. As worktrees criadas ficam como estão (o servidor nunca remove) e aparecem no relatório de disco.",
     ].join("\n"),
-    steps: [
-      { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e veja o chip “worktree” ao lado da pasta." },
-      { text: "Deixe-o DESLIGADO e feche sem enviar nada: a pasta das sessões do servidor já é a worktree." },
-      { text: "Resolva este item: o servidor volta a criar a worktree e abrir o app nela. Se falhar de novo duas vezes, este item volta com o que a tela mostrou." },
-    ],
+    steps: missedOnly
+      ? [
+        { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e confira que aparece o campo vazio (“Descreva uma tarefa…” ou “Descreva algo para criar…”) com a pasta e o chip “worktree” logo acima." },
+        { text: "Se aparecer uma conversa em vez da sessão nova, ou outra pasta nos chips, feche e abra o app Claude de novo (ele pode ter atualizado) e confira outra vez; feche sem enviar nada." },
+        { text: "Resolva este item: o servidor volta a abrir as sessões no app. Se falhar de novo duas vezes seguidas, este item volta com o que a tela mostrou." },
+      ]
+      : [
+        { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e veja o chip “worktree” ao lado da pasta." },
+        { text: "Deixe-o DESLIGADO e feche sem enviar nada: a pasta das sessões do servidor já é a worktree." },
+        { text: "Resolva este item: o servidor volta a criar a worktree e abrir o app nela. Se falhar de novo duas vezes, este item volta com o que a tela mostrou." },
+      ],
   };
 }
 
 // ── the worktrees of sessions that did not use them: told, never removed ──
 
-export interface LeftWorktree { path: string; repo: string; sessionId: string; title: string; why: "failed" | "unused"; command: string }
+export interface LeftWorktree { path: string; repo: string; sessionId: string; title: string; why: "failed" | "unused" | "interrupted"; command: string }
 
 const quote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
+
+/** What a person runs for a folder a seeded start left half made (INSP-R4-2):
+ * a plain remove refuses an interrupted checkout, and a folder git never
+ * registered is "not a working tree". `registered`: whether git lists it,
+ * null when unknown (then both ways are said). The --force is for that one
+ * folder only — the OMB made it and gave it up mid-preparation, and no
+ * session uses it; a folder never registered goes to the Trash, not rm. */
+export function interruptedCommand(repo: string, path: string, registered: boolean | null): string {
+  const branch = `worktree-${basename(path)}`;
+  const git = `git -C ${quote(repo)}`;
+  const listed = `${git} worktree remove --force ${quote(path)}`;
+  const unlisted = `${git} worktree prune, e mova a pasta para o Lixo (mv ${quote(path)} ~/.Trash/)`;
+  const how = registered === true ? listed : registered === false ? unlisted : `confira com ${git} worktree list; se ela estiver na lista: ${listed}; se não estiver: ${unlisted}`;
+  return `${how}; depois, ${git} branch -D ${branch} (a branch que o OMB criou para ela). O --force vale SÓ para esta pasta: o OMB a abandonou no meio da preparação (checkout incompleto) e nenhuma sessão a usa`;
+}
 
 /** The server's worktrees whose session failed, or that the session never
  * used (it went the old way): for the disk report, with the command a
  * person runs. Nothing here removes anything. */
-export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } } }>, exists: (path: string) => boolean): LeftWorktree[] {
+export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } }; cliWorktreeLeft?: { path: string } }>, exists: (path: string) => boolean, registered?: (repo: string) => readonly string[] | null): LeftWorktree[] {
   const out: LeftWorktree[] = [];
   for (const session of sessions) {
+    // a headless start given up past its deadline left one (R3-1): its checkout may be half made,
+    // or git never registered it — its own lines, with what works for each (INSP-R4-2)
+    if (!session.desktop?.own && session.cliWorktreeLeft) {
+      const path = session.cliWorktreeLeft.path;
+      if (!exists(path)) continue;
+      const listed = registered?.(session.repo) ?? null;
+      const real = (each: string) => { try { return realpathSync(each); } catch { return each; } };
+      out.push({ path, repo: session.repo, sessionId: session.id, title: session.title, why: "interrupted", command: interruptedCommand(session.repo, path, listed === null ? null : listed.some((each) => real(each) === real(path))) });
+      continue;
+    }
     const own = session.desktop?.own;
     if (!own || !exists(own.path)) continue;
     const why = session.status === "failed" ? "failed" as const : own.state === "abandoned" || own.state === "failed" ? "unused" as const : null;
@@ -867,6 +1166,51 @@ export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: st
 /** The disk report's lines for them (null when there are none). */
 export function leftWorktreesReport(left: readonly LeftWorktree[]): string | null {
   if (!left.length) return null;
-  const lines = left.map((each) => `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
+  const lines = left.map((each) => each.why === "interrupted"
+    ? `- ${each.path}: preparação interrompida (prazo de ${Math.round(SEEDED_START_MAX_MS / 1000)} s) da sessão de CLI "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que seguiu em outra worktree — para remover, depois de conferir com git -C ${quote(each.repo)} worktree list: ${each.command}`
+    : `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
   return `Worktrees criadas pelo OMB que ficaram sem uso (${left.length}). O servidor não remove nada; uma pessoa confere (git status, o que há dentro) e decide:\n${lines.join("\n")}`;
+}
+
+// ── the aliases whose worktree is gone: removed (R13-dispatch R13-2d) ─────
+// 06/10: 13 aliases in ~/Projetos/.omb-worktree-links/nuria-platform/
+// pointed at worktrees removed by hand. An alias is only a symlink the
+// server made: removing one whose target is gone removes nothing else.
+
+/** What the cleanup touches, so a test runs it on a fake folder. */
+export interface LinkFs {
+  list: (dir: string) => string[];
+  /** The link's target as written, or null when `path` is not a symlink. */
+  readlink: (path: string) => string | null;
+  exists: (path: string) => boolean;
+  unlink: (path: string) => void;
+}
+
+export const realLinkFs: LinkFs = {
+  list: (dir) => { try { return readdirSync(dir); } catch { return []; } },
+  readlink: (path) => { try { return lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null; } catch { return null; } },
+  exists: (path) => existsSync(path),
+  // unlink: the symlink itself, never what it points to (and never a folder)
+  unlink: (path) => unlinkSync(path),
+};
+
+/** Remove the aliases of `repo` (ownLinkPath's folder) that are symlinks
+ * pointing at a folder that no longer exists, and only them — a live link,
+ * a plain folder or file, or a link still named by a session that is not
+ * archived are left as they are. The paths removed. */
+export function pruneDanglingLinks(repo: string, keep: ReadonlySet<string>, fs: LinkFs = realLinkFs): string[] {
+  const dir = join(dirname(repo), OWN_LINK_DIR, basename(repo));
+  const removed: string[] = [];
+  for (const name of fs.list(dir)) {
+    const path = join(dir, name);
+    const target = fs.readlink(path);
+    if (target === null || keep.has(path)) continue;
+    // a relative target is read from the link's own folder
+    if (fs.exists(target.startsWith("/") ? target : join(dir, target))) continue;
+    try {
+      fs.unlink(path);
+      removed.push(path);
+    } catch { /* left: told next time */ }
+  }
+  return removed;
 }

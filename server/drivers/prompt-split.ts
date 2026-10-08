@@ -1,9 +1,9 @@
 // The stable/volatile prompt split, shared by the drivers that deliver it.
 // The stable half is everything that must stay byte-identical for a
 // provider's cached prefix (or a spawned CLI's session contract) to
-// survive; the volatile half (memory, mentions, outstanding teammate
-// work, recent work) legitimately changes mid-conversation and reaches
-// the model inside the turn that changed it, after the cacheable prefix.
+// survive; the volatile half (the sections in VOLATILE_SECTIONS,
+// system-prompt.ts) legitimately changes mid-conversation and reaches the
+// model inside the turn that changed it, after the cacheable prefix.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ export const VOLATILE_CONTEXT_NOTE_PREFIX =
   "Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:";
 
 export const VOLATILE_CONTEXT_CLEARED_NOTE =
-  "The OpenMausBot context notes from earlier in this conversation (memory, mentions, outstanding teammate work) have been cleared; the standing instructions still apply.";
+  "The OpenMausBot context notes from earlier in this conversation have been cleared; the standing instructions still apply.";
 
 /** The labelled block that carries a changed volatile half inside a user
  * turn. A half that is empty and always was needs no note; one that was
@@ -60,6 +60,11 @@ export interface PromptSplitReceipt {
   /** Turns delivered since the full prompt last rode. Re-anchor
    * bookkeeping; absent on receipts written before the counter existed. */
   turnsSinceFull?: number;
+  /** Last reported context size, for compaction detection; absent on
+   * receipts written before it existed. */
+  lastUsed?: number;
+  /** Highest reported context size since the last detected compaction. */
+  peakUsed?: number;
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -81,12 +86,14 @@ export function readPromptSplitReceipt(scope: string, key: string): PromptSplitR
   try {
     const raw = JSON.parse(readFileSync(receiptPath(scope, key), "utf8")) as unknown;
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      const record = raw as { stable?: unknown; volatile?: unknown; turnsSinceFull?: unknown };
+      const record = raw as { stable?: unknown; volatile?: unknown; turnsSinceFull?: unknown; lastUsed?: unknown; peakUsed?: unknown };
       if (typeof record.stable === "string" && typeof record.volatile === "string") {
         return {
           stable: record.stable,
           volatile: record.volatile,
           ...(typeof record.turnsSinceFull === "number" ? { turnsSinceFull: record.turnsSinceFull } : {}),
+          ...(typeof record.lastUsed === "number" && record.lastUsed > 0 ? { lastUsed: record.lastUsed } : {}),
+          ...(typeof record.peakUsed === "number" && record.peakUsed > 0 ? { peakUsed: record.peakUsed } : {}),
         };
       }
     }

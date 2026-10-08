@@ -21,6 +21,7 @@ import type { Message } from "./store.ts";
 import type { UsageTrigger } from "./usage-ledger.ts";
 import { MessageSearchWorker } from "./message-search-worker.ts";
 import { searchMessagesInDatabase, type SearchHit } from "./message-search-query.ts";
+import { NARRATION_NOTE } from "./turn-narration.ts";
 export type { SearchHit } from "./message-search-query.ts";
 
 const DB_FILE = () => join(DATA_DIR, "messages.db");
@@ -228,7 +229,9 @@ export interface FollowupPayload {
   unattended?: boolean;
   peerAsk?: Message["peerAsk"];
   mode?: "chat" | "goal";
-  via?: "api";
+  /** "api": a room line sent through the local API with no session behind
+   * it. "call": a person's words relayed from a Live call. */
+  via?: "api" | "call";
   /** Who queued these words. Absent on the owner's own sends and on every
    * row written before this existed; both read as the profile name. */
   sender?: ResolvedSender;
@@ -581,6 +584,14 @@ export function threadsReferencing(fragment: string): string[] {
   if (!fragment) return [];
   const rows = db().prepare("SELECT DISTINCT thread_id FROM messages WHERE instr(json, ?) > 0").all(fragment) as Array<{ thread_id: string }>;
   return rows.map((row) => row.thread_id);
+}
+
+/** What any bot wrote as text since `since` that names a "#N" (every thread):
+ * which issues a bot is on (pipeline-idle.ts). */
+export function botTextsWithRefsSince(since: number, limit = 5_000): string[] {
+  // a line turned into a work note (turn-narration.ts) still says what the bot is on (INSP-R12F r2 R2-4)
+  const rows = db().prepare("SELECT text FROM messages WHERE role = 'bot' AND (kind = 'text' OR (kind = 'activity' AND json_extract(json, '$.tool.name') = ?)) AND at >= ? AND instr(text, '#') > 0 ORDER BY at DESC LIMIT ?").all(NARRATION_NOTE, since, limit) as Array<{ text: string | null }>;
+  return rows.map((row) => row.text ?? "");
 }
 
 /** Case-insensitive substring search over text messages, newest first.
