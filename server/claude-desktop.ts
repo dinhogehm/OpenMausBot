@@ -354,7 +354,7 @@ function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null; rootHead?: string | null; branches?: readonly string[] }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; repoPath?: string; worktree?: "on"; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null; rootHead?: string | null; branches?: readonly string[] }): Promise<DesktopStep> {
   // the app's root session, when it has one, must be what New Session opened from (an unreadable branch chip is judged by it)
   let fromRoot: boolean | undefined = input.anchor ? false : undefined;
   return withScreen(driver, async (screen) => {
@@ -373,14 +373,55 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch, { rootHead: input.rootHead, fromRoot, branches: input.branches });
       return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. ${ROOT_SESSION_HOWTO(input.repoName, input.baseBranch ?? "main")}`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
+    const band = (lines: OcrLine[]) => lines.filter((line) => line.y > size.h * 0.55);
+    // What is set on screen before the brief (o73): another folder in the
+    // chips is set in the folder picker (only an item naming exactly the
+    // repository is clicked); the worktree option OFF is switched on when
+    // `worktree` asks it (a repository without the server's own worktrees:
+    // the app makes the session's worktree, and OFF would put it in the root
+    // itself, rootFolderRefusal — with them the option stays as it is, the
+    // owner's item says OFF); another base branch is set in the
+    // branch picker, only with the option on (the base of the new worktree,
+    // never the root's own checkout). A trust prompt is the person's.
+    const judge = (bottom: OcrLine[]): SetupNeed | DesktopStop | null => {
+      // the app asks to trust the folder — read only in the new session's band, once it opened (a
+      // conversation above can say those words, INSP-R12a X3-3): never clicked in the old way, the person decides
+      if (trustPrompt(bottom)) {
+        return { ok: false, reason: `the app asks to trust the workspace of the new session (${input.repoName}); nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.repoName, seen: seenText(bottom.slice(-8)) };
+      }
+      if (!showsFolder(bottom, input.repoName)) {
+        // no new session at all (no empty field, no chips) is not "another folder": a session opened by hand would not change it (R13-dispatch R13-2c)
+        if (!newSessionScreen(bottom, input.repoName)) return { ok: false, reason: `New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+        return { fix: "folder", stop: { ok: false, reason: `the new session did not open in ${input.repoName} (it shows another folder in its chips: the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } };
+      }
+      if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      const option = worktreeOption(chipRow(bottom));
+      if (option === "off" && input.worktree === "on") return { fix: "worktree", stop: { ok: false, reason: `the new session has the worktree option OFF (the session would work in the root of ${input.repoName} itself, not in a worktree of its own); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } };
+      const refusal = reused(bottom);
+      if (!refusal) return null;
+      const branch = chipTargets(bottom).branch;
+      return option === "on" && branch && !BRANCH_ICON.test(branch.text) ? { fix: "branch", stop: refusal } : refusal;
+    };
+    const fix = async (need: SetupNeed, bottom: OcrLine[]): Promise<SetupDone | DesktopStop> => {
+      const targets = chipTargets(bottom);
+      if (need.fix === "folder") return targets.folder ? pickInChip(screen, targets.folder, "folder", { name: input.repoName, ...(input.repoPath ? { path: input.repoPath } : {}) }) : { did: "found no folder chip to click", failed: true };
+      if (need.fix === "branch") return targets.branch ? pickInChip(screen, targets.branch, "branch", { name: input.baseBranch ?? "main" }) : { did: "found no branch chip to click", failed: true };
+      return targets.worktree ? toggleWorktree(screen, targets.worktree, "on") : { did: "found no worktree option to click", failed: true };
+    };
     if (open) {
-      const refusal = reused(before);
-      if (refusal) return refusal;
-      stop = await guard(screen, "empty session field");
-      if (stop) return stop;
-      await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
-      await driver.sleep(300);
-      return typeBrief(screen, input.text, size, input.repoName);
+      const setUp = await setUpNewSession(screen, (lines) => band(mainArea(lines)), band(before), judge, fix);
+      if ("ok" in setUp) return setUp;
+      if (setUp.tried.length) {
+        stop = await focusNewField(screen, setUp.bottom, setUp.tried);
+        if (stop) return stop;
+      } else {
+        stop = await guard(screen, "empty session field");
+        if (stop) return stop;
+        await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
+        await driver.sleep(300);
+      }
+      const sent = await typeBrief(screen, input.text, size, input.repoName);
+      return sent.ok && setUp.tried.length ? { ...sent, note: `set on screen first: ${setUp.tried.join("; ")}` } : sent;
     }
     // New Session from a session in the repository root, never from a
     // worktree session that happens to be on screen (R9-dispatch R9-1b: the
@@ -412,22 +453,15 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     if (sameScreen(before, lines)) {
       return { ok: false, reason: "New Session did not open (the screen did not change)", retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
     }
-    const bottom = lines.filter((line) => line.y > size.h * 0.55);
-    // the app asks to trust the folder — read only in the new session's band, once it opened (a
-    // conversation above can say those words, INSP-R12a X3-3): never clicked in the old way, the person decides
-    if (trustPrompt(bottom)) {
-      return { ok: false, reason: `the app asks to trust the workspace of the new session (${input.repoName}); nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.repoName, seen: seenText(bottom.slice(-8)) };
+    const setUp = await setUpNewSession(screen, (all) => band(mainArea(all)), band(lines), judge, fix);
+    if ("ok" in setUp) return setUp;
+    if (setUp.tried.length) {
+      stop = await focusNewField(screen, setUp.bottom, setUp.tried);
+      if (stop) return stop;
     }
-    if (!showsFolder(bottom, input.repoName)) {
-      // no new session at all (no empty field, no chips) is not "another folder": a session opened by hand would not change it (R13-dispatch R13-2c)
-      if (!newSessionScreen(bottom, input.repoName)) return { ok: false, reason: `New Session did not show a new session's screen (no empty task field and no folder chips; the screen shows a conversation); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-      return { ok: false, reason: `the new session did not open in ${input.repoName} (it shows another folder in its chips: the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-    }
-    if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-    const refusal = reused(lines);
-    if (refusal) return refusal;
     const sent = await typeBrief(screen, input.text, size, input.repoName);
-    return sent.ok && note ? { ...sent, note } : sent;
+    const said = [note, setUp.tried.length ? `set on screen first: ${setUp.tried.join("; ")}` : undefined].filter(Boolean).join("; ");
+    return sent.ok && said ? { ...sent, note: said } : sent;
   });
 }
 
@@ -652,9 +686,41 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       if (lines.some((line) => SCRATCH_FOLDER.test(line.text))) return { ok: false, reason: `the new session shows a scratch folder of the app's, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, ...(clicked ? { cliNow: true } : {}), seen: seenText(lines.slice(-8)) };
       return { field };
     };
-    let bottom = await band();
+    // What is set on screen before anything else (o73): the folder chip on
+    // another folder (or cut to a start another worktree shares) is set in
+    // the folder picker, never by a guess — only an item naming exactly our
+    // folder (or a cut no other worktree shares) is clicked, and the reading
+    // after it must show our chip; the worktree option ON is switched off;
+    // an unread chip or option is read again. A trust prompt is left to the
+    // rules below.
+    const judge = (lines: OcrLine[]): SetupNeed | DesktopStop | null => {
+      const seen = ours(lines);
+      if ("ok" in seen) {
+        if (seen.previousFolder) return { fix: "folder", stop: seen };
+        if (/could not read the new session's folder chip/.test(seen.reason)) return { fix: "reread", stop: seen };
+        return seen;
+      }
+      if (trustPrompt(lines)) return null;
+      const option = worktreeOption(chipRow(lines));
+      if (option === "on" || option === "unknown") {
+        const stop: DesktopStop = { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)), worktreeOption: option };
+        return { fix: option === "on" ? "worktree" : "reread", stop };
+      }
+      return null;
+    };
+    const setUp = await setUpNewSession(screen, (lines) => mainArea(lines).filter((line) => line.y > size.h * 0.55), await band(), judge, async (need, lines) => {
+      const targets = chipTargets(lines);
+      if (need.fix === "folder") {
+        if (!targets.folder) return { did: "found no folder chip to click", failed: true };
+        return pickInChip(screen, targets.folder, "folder", { name: input.folderName, path: input.folder, others: () => registered().map((path) => path.split("/").filter(Boolean).pop() ?? path) });
+      }
+      if (!targets.worktree) return { did: "found no worktree option to click", failed: true };
+      return toggleWorktree(screen, targets.worktree, "off");
+    });
+    if ("ok" in setUp) return setUp;
+    let bottom = setUp.bottom;
     const seen = ours(bottom);
-    if ("ok" in seen) return seen;
+    if ("ok" in seen) return afterTries(seen, setUp.tried);
     const trust = trustPrompt(bottom);
     // The app asks to trust a folder it has not seen ("Confiar no workspace",
     // 05/10 #9378), with our folder's chip on screen. Clicked only when that
@@ -688,17 +754,318 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     }
     const { field } = seen;
     // the folder IS the worktree: with the app's worktree option on, the app
-    // would make one of its own inside or beside it (R11-dispatch R11-1)
-    const option = worktreeOption(chipRow(bottom));
-    if (option === "on" || option === "unknown") {
-      return { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)), worktreeOption: option };
-    }
+    // would make one of its own inside or beside it (R11-dispatch R11-1) —
+    // judged above (judge), on the reading the brief now goes on
     stop = await guard(screen, "empty session field");
     if (stop) return stop;
     await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
     await driver.sleep(300);
-    return typeBrief(screen, input.text, size, input.folderName);
+    const sent = await typeBrief(screen, input.text, size, input.folderName);
+    return sent.ok && setUp.tried.length ? { ...sent, note: `set on screen first: ${setUp.tried.join("; ")}` } : sent;
   });
+}
+
+// ── setting the new session up on screen before the brief (o73) ──────────
+// The new session showed the wrong folder, the worktree option the wrong way
+// or another base branch: before, the create stopped there and asked the
+// owner. Now the server sets it as a person would — the folder picker, the
+// option's box, the branch picker — reads the screen again after each click,
+// and pastes only once the screen reads right. Each thing is tried at most
+// SETUP_MAX_TRIES times; then the create stops as it did, nothing typed, the
+// reason saying what was tried. Nothing here clicks a trust prompt: that
+// stays with openDesktopSessionIn's own rules.
+
+/** Rounds of setting one thing (folder, worktree option, branch, a re-read) before the create stops as before. */
+export const SETUP_MAX_TRIES = 2;
+/** A picker's search field: its placeholder, as the whole line. */
+const PICKER_SEARCH = /^(?:\W{1,2}\s*)?(?:Pesquisar|Buscar|Procurar|Filtrar|Search|Filter|Find)\b.{0,30}$/i;
+/** The picker's item that opens the system's folder panel ("Abrir pasta…", "Choose folder"). */
+const PICKER_OPEN_FOLDER = /^(?:\W{1,2}\s*)?(?:Abrir (?:uma |outra )?pasta|Escolher (?:uma |outra )?pasta|Selecionar (?:uma )?pasta|Adicionar pasta|Open (?:a )?folder|Choose (?:a |another )?folder|Select (?:a )?folder|Add folder|Browse)\b.{0,12}$/i;
+/** The system's open panel, by its two buttons. */
+const PANEL_CANCEL = /^(?:Cancelar|Cancel)$/i;
+const PANEL_OPEN = /^(?:Abrir|Open|Escolher|Choose|Selecionar|Select)$/i;
+/** The branch chip's icon, as OCR reads it ("gº", "g9", "q", "2º"). */
+const BRANCH_ICON = /^(?:[gq][º°9]?|2º)$/i;
+/** A chip's word without the marks OCR puts around it (bullets, the box's edges, a cut). */
+const chipWord = (raw: string) => raw.replace(/^[([•·"'|]+|[)\],;:"'•·|]+$/g, "");
+
+/** A word of an OCR line with where it sits: OCR gives one box per line
+ * ("• Local | nuria-platform | gº main" at times), so a word's centre is
+ * estimated from its place in the line's text. */
+export interface ScreenWord { text: string; x: number; y: number }
+
+export function wordsAt(lines: OcrLine[]): ScreenWord[] {
+  const out: ScreenWord[] = [];
+  for (const line of lines) {
+    for (const match of line.text.matchAll(/\S+/g)) {
+      const centre = (match.index + match[0].length / 2) / Math.max(1, line.text.length);
+      out.push({ text: match[0], x: line.x + line.w * centre, y: line.y + line.h / 2 });
+    }
+  }
+  return out;
+}
+
+/** Where to click the new session's chips: the folder chip, the branch chip,
+ * the worktree option's box (its word when the box was not read). From the
+ * row of chips (chipRow); the folder chip also from its own line above the
+ * empty field, the one folderChip reads as "another folder". null: not on screen. */
+export function chipTargets(lines: OcrLine[]): { folder: ScreenWord | null; branch: ScreenWord | null; worktree: ScreenWord | null } {
+  const row = wordsAt(chipRow(lines)).sort((a, b) => a.x - b.x);
+  const option = row.findIndex((word) => /^worktree$/i.test(chipWord(word.text)));
+  const box = option > 0 && row[option - 1]!.text.length <= 3 && Math.abs(row[option - 1]!.y - row[option]!.y) <= 4 ? row[option - 1]! : null;
+  const worktree = option < 0 ? null : box ?? row[option]!;
+  const icon = row.findIndex((word) => BRANCH_ICON.test(word.text));
+  const afterIcon = icon >= 0 ? row[icon + 1] : undefined;
+  const branch = icon < 0 ? null : afterIcon && /[\p{L}\p{N}]/u.test(chipWord(afterIcon.text)) && !/^worktree$/i.test(chipWord(afterIcon.text)) && afterIcon !== box ? afterIcon : row[icon]!;
+  // the folder: the first word of the row that is a name, before the branch (or the option)
+  const end = icon >= 0 ? icon : option >= 0 ? option : row.length;
+  const named = row.slice(0, end).find((word) => {
+    const bare = chipWord(word.text);
+    return bare.length >= 3 && /[\p{L}\p{N}]/u.test(bare) && !/^local$/i.test(bare) && word !== box;
+  });
+  if (named) return { folder: named, branch, worktree };
+  const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+  const own = lines
+    .filter((line) => (!field || line.y < field.y) && !/worktree/i.test(line.text))
+    .filter((line) => {
+      const text = line.text.trim().replace(/^[•·]\s*/, "");
+      return /^[A-Za-z0-9][\w.-]*(?:…|\.{2,})?[.,·'"]*$/.test(text) && text.length >= 3 && !/^local$/i.test(text);
+    })
+    .sort((a, b) => b.y - a.y)[0];
+  return { folder: own ? { text: own.text.trim(), x: own.x + own.w / 2, y: own.y + own.h / 2 } : null, branch, worktree };
+}
+
+/** Lines of `after` not on `before` (same text within a few points): what a click opened. */
+export function newLines(before: OcrLine[], after: OcrLine[]): OcrLine[] {
+  return after.filter((line) => !before.some((old) => normalize(old.text) === normalize(line.text) && Math.abs(old.x - line.x) <= 8 && Math.abs(old.y - line.y) <= 8));
+}
+
+/** The one item of an open picker that names `name` — a word of it equal to
+ * it, a path ending in it ("~/Projetos/nuria-platform"), or its start cut
+ * short by the app that no other of `others` shares (given `others` only). Several: the one whose
+ * text holds the last two parts of `path`, else the one whose whole line is
+ * the name. null when none, or no single one: never a guess. */
+export function pickerItem(popup: OcrLine[], name: string, opts: { path?: string; others?: () => readonly string[] } = {}): OcrLine | null {
+  const wanted = name.toLowerCase();
+  const names = (line: OcrLine) => line.text.toLowerCase().split(/\s+/).some((raw) => {
+    const word = chipWord(raw);
+    if (word === wanted) return true;
+    if (/^[~/]/.test(word) && word.split("/").filter(Boolean).pop() === wanted) return true;
+    const cut = word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
+    // a cut start counts only against a list of the others it could also be
+    return opts.others !== undefined && cut !== word && cut.length >= 10 && wanted.startsWith(cut) && !opts.others().some((other) => other.toLowerCase() !== wanted && other.toLowerCase().startsWith(cut));
+  });
+  const matches = popup.filter(names);
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1 && opts.path) {
+    const tail = opts.path.split("/").filter(Boolean).slice(-2).join("/").toLowerCase();
+    const byPath = matches.filter((line) => line.text.toLowerCase().includes(tail));
+    if (byPath.length === 1) return byPath[0]!;
+  }
+  const whole = matches.filter((line) => chipWord(line.text.trim().replace(/^[•·✓✔]\s*/, "")).toLowerCase() === wanted);
+  return whole.length === 1 ? whole[0]! : null;
+}
+
+/** Two readings in a row that agree (up to `tries`, 400 ms apart): a click's
+ * popover or panel is drawn before the screen is judged. */
+async function settledRead(driver: DesktopDriver, tries = 3): Promise<OcrLine[]> {
+  let last = await driver.ocr();
+  for (let i = 1; i < tries; i++) {
+    await driver.sleep(400);
+    const now = await driver.ocr();
+    if (sameScreen(last, now)) return now;
+    last = now;
+  }
+  return last;
+}
+
+/** What one setup action did, for the reason a person reads; `failed`: it could not do it (no point in another round). */
+type SetupDone = { did: string; failed?: boolean };
+type SetupFix = "folder" | "worktree" | "branch" | "reread";
+/** A screen that needs setting: what to set, and the stop (as before o73) should it not take. */
+export type SetupNeed = { fix: SetupFix; stop: DesktopStop };
+
+/** Close what a click opened, if Claude is still in front and the person away. */
+async function closePopup(screen: Screen): Promise<DesktopStop | null> {
+  const stop = await guard(screen, "close the picker");
+  if (stop) return stop;
+  await act(screen, () => screen.driver.key(ESCAPE));
+  await screen.driver.sleep(300);
+  return null;
+}
+
+/** Pick `want` in the picker a chip opens: its item in the list, else typed
+ * into the picker's search, else (a folder with a path) through the
+ * system's folder panel. Every click is followed by a reading; a picker that
+ * shows no single item for it is closed and the round fails. */
+async function pickInChip(screen: Screen, chip: ScreenWord, what: "folder" | "branch", want: { name: string; path?: string; others?: () => readonly string[] }): Promise<SetupDone | DesktopStop> {
+  const { driver } = screen;
+  const before = await driver.ocr();
+  let stop = await guard(screen, `${what} chip`);
+  if (stop) return stop;
+  await act(screen, () => driver.click(chip.x, chip.y));
+  await driver.sleep(800);
+  const opened = await settledRead(driver);
+  const popup = newLines(before, opened);
+  const clicked = `clicked the ${what} chip ("${chip.text}")`;
+  if (!popup.length) return { did: `${clicked}: nothing opened`, failed: true };
+  let item = pickerItem(popup, want.name, want);
+  let how = "in its list";
+  if (!item) {
+    const search = popup.find((line) => PICKER_SEARCH.test(line.text.trim()));
+    if (search) {
+      stop = await guard(screen, `${what} search`);
+      if (stop) return stop;
+      await act(screen, () => driver.click(search.x + Math.min(40, search.w / 2), search.y + search.h / 2));
+      await driver.sleep(200);
+      stop = await guard(screen, `${what} search text`);
+      if (stop) return stop;
+      await act(screen, () => driver.typeText(want.name));
+      await driver.sleep(800);
+      const found = await settledRead(driver);
+      const typedIn = found.some((line) => Math.abs(line.y - search.y) <= 8 && normalize(line.text).includes(normalize(want.name).slice(0, 10)));
+      if (!typedIn) {
+        // the name did not show in the search: it may have gone into the
+        // session's field — taken out again (the field was empty), never sent
+        const fieldBefore = before.some((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+        const fieldNow = found.some((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+        const closed = await closePopup(screen);
+        if (closed) return closed;
+        if (fieldBefore && !fieldNow) {
+          stop = await guard(screen, "clear the field");
+          if (stop) return stop;
+          await act(screen, () => driver.key(KEY_A, true));
+          await act(screen, () => driver.key(BACKSPACE));
+        }
+        return { did: `${clicked} and typed "${want.name}" in its search, which did not show it`, failed: true };
+      }
+      // the search's own line now holds the name: never the item
+      item = pickerItem(newLines(before, found).filter((line) => Math.abs(line.y - search.y) > 8), want.name, want);
+      how = "after searching it";
+    }
+  }
+  if (!item && what === "folder" && want.path) {
+    const browse = popup.find((line) => PICKER_OPEN_FOLDER.test(line.text.trim()));
+    if (browse) return openFolderPanel(screen, before, browse, want.path, clicked);
+  }
+  if (!item) {
+    const closed = await closePopup(screen);
+    if (closed) return closed;
+    return { did: `${clicked}: its picker showed no single "${want.name}" (it showed: ${seenText(popup, 10)})`, failed: true };
+  }
+  stop = await guard(screen, `pick the ${what}`);
+  if (stop) return stop;
+  await act(screen, () => driver.click(item.x + Math.min(60, item.w / 2), item.y + item.h / 2));
+  await driver.sleep(1_000);
+  return { did: `${clicked} and picked "${item.text.trim()}" ${how}` };
+}
+
+/** The system's folder panel, opened from the picker: "/" opens its "go to
+ * folder" field, the path is pasted there and shown before Return, then its
+ * Open button. Anything unexpected closes the panel. */
+async function openFolderPanel(screen: Screen, before: OcrLine[], browse: OcrLine, path: string, clicked: string): Promise<SetupDone | DesktopStop> {
+  const { driver } = screen;
+  const did = `${clicked}, then "${browse.text.trim()}"`;
+  let stop = await guard(screen, "open folder");
+  if (stop) return stop;
+  await act(screen, () => driver.click(browse.x + Math.min(60, browse.w / 2), browse.y + browse.h / 2));
+  await driver.sleep(1_500);
+  const panelOpen = (lines: OcrLine[]) => {
+    const added = newLines(before, lines);
+    return added.some((line) => PANEL_CANCEL.test(line.text.trim())) && added.some((line) => PANEL_OPEN.test(line.text.trim()));
+  };
+  const giveUp = async (why: string): Promise<SetupDone | DesktopStop> => {
+    // two Escapes: the "go to" field, then the panel
+    for (let i = 0; i < 2; i++) {
+      const closed = await closePopup(screen);
+      if (closed) return closed;
+    }
+    return { did: `${did}: ${why}`, failed: true };
+  };
+  if (!panelOpen(await settledRead(driver))) return giveUp("the folder panel did not show");
+  stop = await guard(screen, "go to folder");
+  if (stop) return stop;
+  await act(screen, () => driver.typeText("/"));
+  await driver.sleep(600);
+  stop = await guard(screen, "folder path");
+  if (stop) return stop;
+  await act(screen, () => driver.paste(path, true));
+  await driver.sleep(600);
+  const typed = await settledRead(driver);
+  const last = path.split("/").filter(Boolean).pop() ?? path;
+  if (!panelOpen(typed) || !newLines(before, typed).some((line) => line.text.includes(last))) return giveUp(`the path ${path} did not show in the panel`);
+  stop = await guard(screen, "go to the path");
+  if (stop) return stop;
+  await act(screen, () => driver.key(RETURN));
+  await driver.sleep(1_200);
+  const there = await settledRead(driver);
+  const open = newLines(before, there).find((line) => PANEL_OPEN.test(line.text.trim()));
+  if (!open || !panelOpen(there)) return giveUp("the panel's Open button did not show after the path");
+  stop = await guard(screen, "open the folder");
+  if (stop) return stop;
+  await act(screen, () => driver.click(open.x + open.w / 2, open.y + open.h / 2));
+  await driver.sleep(1_500);
+  return { did: `${did} and opened ${path} in the folder panel` };
+}
+
+/** Click the worktree option's box; the reading after it says whether it took. */
+async function toggleWorktree(screen: Screen, box: ScreenWord, to: "on" | "off"): Promise<SetupDone | DesktopStop> {
+  const stop = await guard(screen, "worktree option");
+  if (stop) return stop;
+  await act(screen, () => screen.driver.click(box.x, box.y));
+  await screen.driver.sleep(700);
+  return { did: `clicked the worktree option ("${box.text}") to turn it ${to}` };
+}
+
+/** The reason of a stop after setup rounds: what was tried, before what the screen showed. */
+function afterTries(stop: DesktopStop, tried: readonly string[]): DesktopStop {
+  // the setup clicked: never "nothing was clicked" any more, only nothing typed
+  return tried.length ? { ...stop, reason: `${stop.reason.replace("nothing was clicked or typed", "nothing was typed")}; tried on screen first: ${tried.join("; ")}` } : stop;
+}
+
+/**
+ * Set the new session up until `judge` reads it right. `judge` gets the
+ * new session's band and answers null (ready), a need (what to set, and the
+ * stop if it will not take) or a stop (nothing the server sets fixes it).
+ * Each need is tried at most SETUP_MAX_TRIES times and the screen read again
+ * (settled) after each; `tried` says what was done. A screen read right the
+ * first time is not read again: the create goes on exactly as before o73.
+ */
+async function setUpNewSession(
+  screen: Screen,
+  band: (lines: OcrLine[]) => OcrLine[],
+  first: OcrLine[],
+  judge: (bottom: OcrLine[]) => SetupNeed | DesktopStop | null,
+  fix: (need: SetupNeed, bottom: OcrLine[]) => Promise<SetupDone | DesktopStop>,
+): Promise<{ bottom: OcrLine[]; tried: string[] } | DesktopStop> {
+  const tried: string[] = [];
+  const rounds: Partial<Record<SetupFix, number>> = {};
+  let bottom = first;
+  for (;;) {
+    const need = judge(bottom);
+    if (!need) return { bottom, tried };
+    if ("ok" in need) return afterTries(need, tried);
+    rounds[need.fix] = (rounds[need.fix] ?? 0) + 1;
+    if (rounds[need.fix]! > SETUP_MAX_TRIES) return afterTries(need.stop, tried);
+    const done = need.fix === "reread" ? { did: "read the screen again" } : await fix(need, bottom);
+    if ("ok" in done) return afterTries(done, tried);
+    tried.push(done.did);
+    if (done.failed) return afterTries(need.stop, tried);
+    if (need.fix === "reread") await screen.driver.sleep(800);
+    bottom = band(await settledRead(screen.driver));
+  }
+}
+
+/** After setup clicks the field may not have the focus: click the new
+ * session's own empty field, which must be on screen. */
+async function focusNewField(screen: Screen, bottom: OcrLine[], tried: readonly string[]): Promise<DesktopStop | null> {
+  const field = bottom.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+  if (!field) return afterTries({ ok: false, reason: "the new session's empty task field was not on screen after setting it up; nothing was typed", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) }, tried);
+  const stop = await guard(screen, "empty session field");
+  if (stop) return stop;
+  await act(screen, () => screen.driver.click(field.x + 20, field.y + field.h / 2));
+  await screen.driver.sleep(300);
+  return null;
 }
 
 /** Paste the brief into the new session's field, type the note, send. */

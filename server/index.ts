@@ -10731,6 +10731,8 @@ const desktopWork: DesktopWorkDeps = {
   registeredWorktrees: (session) => parseWorktreeList(gitLine(session.repo, ["worktree", "list", "--porcelain"]) ?? "").map((entry) => entry.path),
   // the app's own log, read only: what ties a "trust this workspace" prompt to a folder (its last 256 KiB)
   trustLog: () => readTail(join(homedir(), "Library", "Logs", "Claude", "main.log"), 256 * 1024),
+  // the old way needs the worktree option on, except in a repository of the server's own worktrees (its owner item: OFF)
+  worktreeWanted: (session) => (ownWorktreesOn(session.repo) ? undefined : "on"),
   branches: (session) => (gitLine(session.repo, ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean),
   // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
   rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),

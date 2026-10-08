@@ -258,7 +258,10 @@ describe("createDesktopSession", () => {
       const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "gº main": `gº ${chip}` })] });
       const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", liveWorktrees: ["fix-9298-stage-time-rule-572720"] });
       expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("another session's worktree") });
-      expect(app.actions).toEqual(["activate", "menu new session"]);
+      // o73: the option is on, so the branch picker is tried first — it opened nothing here: one click, nothing typed
+      expect(step).toMatchObject({ reason: expect.stringContaining("tried on screen first: clicked the branch chip") });
+      expect(app.actions.filter((action) => !action.startsWith("click"))).toEqual(["activate", "menu new session"]);
+      expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
     }
     // "main" is the repository's own branch: it goes on
     expect(reusedWorktreeChip([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }], ["fix-9298-stage-time-rule-572720"])).toBeNull();
@@ -273,7 +276,9 @@ describe("createDesktopSession", () => {
       const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", baseBranch: "main" });
       expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("not in the root of nuria-platform") });
       expect(step).toMatchObject({ reason: expect.stringContaining("send it a short message") });
-      expect(app.actions).toEqual(["activate", "menu new session"]);
+      expect(step).toMatchObject({ reason: expect.stringContaining("tried on screen first: clicked the branch chip") });
+      expect(app.actions.filter((action) => !action.startsWith("click"))).toEqual(["activate", "menu new session"]);
+      expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
     }
   });
 
@@ -312,7 +317,10 @@ describe("createDesktopSession", () => {
     const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "nuria-platform": "soph-ia" })] });
     const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" });
     expect(step).toMatchObject({ ok: false, retry: true, miss: true });
-    expect(app.actions).toEqual(["activate", "menu new session"]);
+    // o73: the folder picker is tried first (it opened nothing here): one click on the folder chip, nothing typed
+    expect(step).toMatchObject({ reason: expect.stringContaining('tried on screen first: clicked the folder chip ("soph-ia"): nothing opened') });
+    expect(app.actions.filter((action) => !action.startsWith("click"))).toEqual(["activate", "menu new session"]);
+    expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
   });
 
   it("tells no new-session screen at all apart from a new session in another folder: only the latter asks for a session by hand (R13-dispatch R13-2c)", async () => {
