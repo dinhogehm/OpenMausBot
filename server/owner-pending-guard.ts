@@ -255,7 +255,8 @@ export class RowCheckBackoff {
 
   /** Forget items no longer open. */
   keep(keys: ReadonlySet<string>): void {
-    for (const key of [...this.state.keys()]) if (!keys.has(key)) this.state.delete(key);
+    // deleting the entry being visited is safe while iterating a Map
+    for (const key of this.state.keys()) if (!keys.has(key)) this.state.delete(key);
   }
 }
 
