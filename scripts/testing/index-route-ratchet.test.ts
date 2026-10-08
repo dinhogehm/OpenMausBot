@@ -8,8 +8,8 @@ const INDEX = readFileSync(new URL("../../server/index.ts", import.meta.url), "u
 const EXACT: Record<string, number> = {
   // Internal harness routes have no server/routes module yet; moving them out is the follow-up that lowers this.
   // This fork's own routes (now, reports, worktrees, pipeline board, cc sessions, owner items, delegate) add 14, 6 and 1.
-  'path === "/': 178,
-  "path.match(": 94,
+  'path === "/': 177,
+  "path.match(": 95,
   "path.startsWith(": 12,
   ".exec(path)": 18,
   ".test(path)": 1,

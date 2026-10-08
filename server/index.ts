@@ -94,7 +94,10 @@ import {
   messageFileRoots,
   messageImageTargetAt,
   messageReferencesFile,
+  listMessageFolder,
+  messageFolderEntryName,
   openMessageFile,
+  openMessageFolderEntry,
 } from "./message-file.ts";
 import {
   avatarGenerationRequestSchema,
@@ -214,7 +217,7 @@ import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread
 import { ComputerControl } from "./computer-control.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
 import { registerEnginesBinDir } from "./engine-install.ts";
-import { appendUsage, parseUsageRange, readUsage, summarizeUsage, usageCsv, USAGE_GROUPINGS, flushUsageLedger, type UsageGroupBy, type UsageRow, type UsageTrigger } from "./usage-ledger.ts";
+import { appendUsage, parseUsageRange, readUsage, flushUsageLedger, type UsageRow, type UsageTrigger } from "./usage-ledger.ts";
 import { loadPlanUsage, planAccountsFromInstances } from "./plan-usage.ts";
 import { GroupUsageReader } from "./group-thread-usage.ts";
 import { ledgerCost } from "./model-prices.ts";
@@ -251,7 +254,7 @@ import {
   parseMcpServersImport,
   parseStoredMcpServer,
 } from "./mcp-registry.ts";
-import { McpOAuthError, McpSignInError, McpOAuthManager, mcpOAuthRedirectUri, withMcpSignIn, withoutPendingSignIn } from "./mcp-oauth.ts";
+import { MCP_OAUTH_CALLBACK_PATH, McpOAuthError, McpSignInError, McpOAuthManager, mcpCallbackOrigin, mcpOAuthRedirectUri, withMcpSignIn, withoutPendingSignIn } from "./mcp-oauth.ts";
 import { probeMcpServer } from "./mcp-probe.ts";
 import {
   GROUP_GOAL_MAX_TURNS,
@@ -586,6 +589,7 @@ import {
   skillPackageStamps,
   skillsSystemPrompt,
   stageSkillWrite,
+  undoSkillWrite,
 } from "./skills.ts";
 import { fetchSkillFromSource } from "./skill-fetch.ts";
 import { pickBotName } from "./names.ts";
@@ -655,6 +659,7 @@ import {
 import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
 import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { asSchedule, RoutineRequestService } from "./routine-requests.ts";
+import { directApply, UNDO_STALE, type DirectApply } from "./direct-apply.ts";
 import { createOptionsCard } from "./options-card.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
@@ -738,6 +743,7 @@ import {
   isLoopbackHost,
   isProxied,
   labelFromUserAgent,
+  provesSameOrigin,
   requestOrigin,
   requestSource,
   requiredScope,
@@ -807,11 +813,13 @@ import { createBotPresetRoutes } from "./routes/bot-presets.ts";
 import { createBotMemoryRoutes } from "./routes/bot-memory.ts";
 import { createDeciderRoutes } from "./routes/decider.ts";
 import { createThreadModelRoutes } from "./routes/thread-models.ts";
+import { createUndoRoutes } from "./routes/undo.ts";
 import { createDesktopViewer, desktopViewerUrl } from "./routes/desktop-viewer.ts";
 import { localDesktopTarget, localVmViewerStatus, viewerTargetId } from "./desktop-viewer-targets.ts";
 import { createAntigravityLeftoverRoutes } from "./routes/antigravity-leftovers.ts";
 import { findAntigravityLeftovers, removeAntigravityLeftovers } from "./drivers/antigravity-temp.ts";
 import { createLiveRoutes } from "./routes/live.ts";
+import { createUsageRoutes } from "./routes/usage.ts";
 import { withScopeHint } from "./connector-scope-hint.ts";
 
 /** owner_pending refuses a title that only names someone (INSP-I r1 #2): the person could not tell what to do. */
@@ -1885,6 +1893,7 @@ function adminAuditPlan(method: string, path: string): AuditPlan | null {
   if (m && method === "POST") plan.engineAction = { id: m[1]!, action: m[2]!.replace("/", "-") };
   if (method === "POST" && path === "/api/instances/claude-accounts") plan.engineAction = { id: "claude", action: "account-add" };
   if (method === "POST" && path === "/api/instances/chatgpt-accounts") plan.engineAction = { id: "chatgpt", action: "account-add" };
+  if (method === "POST" && path === "/api/instances/antigravity-accounts") plan.engineAction = { id: "antigravity", action: "account-add" };
   return plan.config || plan.botId || plan.createsBots || plan.deletesBot || plan.createsWebhook || plan.webhookId || plan.sessionId || plan.pairing || plan.engineAction || plan.roomId ? plan : null;
 }
 
@@ -3952,6 +3961,24 @@ else enginesRead = defaultSelection().then(
   (selection) => { bootSelection = selection; },
   (error) => console.warn(`[engines] reading the engines at start failed: ${error instanceof Error ? error.message : String(error)}`),
 ).finally(() => { enginesRead = null; });
+// Model lists served from the last run refresh behind listen. Each one
+// notifies the picker when it lands, then the new-bot default is read again
+// so a bot created this session sees the discovered model.
+const startupCatalogs = registry.instances().flatMap((instance) =>
+  instance.startupModelRefresh ? [instance.startupModelRefresh] : []);
+for (const pending of startupCatalogs) {
+  void pending.then(() => broadcast({ kind: "config", ...configStatus() }), () => {});
+}
+if (startupCatalogs.length) {
+  void Promise.all(startupCatalogs).then(async () => {
+    if (store.needsSeed()) return;
+    try {
+      bootSelection = await defaultSelection();
+    } catch (error) {
+      console.warn(`[engines] refreshing the new-bot default after model discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+}
 store.seedIfEmpty();
 hostedModels?.reconcile(store);
 // Skills library boot sweep (features.skillsLibrary): migrate per-bot
@@ -4250,6 +4277,26 @@ function sourceApprovalMode(botId: string, threadId: string): ApprovalMode {
 
 function fullAccessForSource(botId: string, threadId: string): boolean {
   return sourceApprovalMode(botId, threadId) === "full";
+}
+
+/** On a Cloud home a turn a guest drives keeps a card for every change,
+ * even one to the bot itself. */
+function selfApplyBlocked(threadId: string): boolean {
+  return cloudGuestDriven(threadId);
+}
+
+/** Whether a bot's routine, skill, profile or model change applies without
+ * a person, and why: Full access applies everything as it always has, and
+ * at any level a change to the bot itself applies, shown as a one-line
+ * receipt with Undo (server/direct-apply.ts). Team setup and peer approvals
+ * stay Full access only (fullAccessForSource). */
+function appliesDirectly(botId: string, threadId: string, targetBotId: string): DirectApply | null {
+  return directApply({
+    fullAccess: fullAccessForSource(botId, threadId),
+    botId,
+    targetBotId,
+    blocked: selfApplyBlocked(threadId) || !connectorThread(botId, threadId),
+  });
 }
 
 function peerReviewRequired(bot: BotRecord, threadId: string): boolean {
@@ -16040,7 +16087,7 @@ async function cloudRoutineReadiness(botId: string, threadId?: string): Promise<
 const routineRequests = new RoutineRequestService({
   store,
   routines,
-  autoApply: fullAccessForSource,
+  autoApply: appliesDirectly,
   cloudReady: cloudRoutineReadiness,
   canPersist: proposalPersistence,
   // Cross-bot routines: the confirmation card can sit open indefinitely, so
@@ -16373,14 +16420,14 @@ function resolveAndSendTrust(res: ServerResponse, threadId: string, requestId: s
 
 const profileRequests = new ProfileRequestService({
   store,
-  autoApply: fullAccessForSource,
+  autoApply: appliesDirectly,
   canPersist: proposalPersistence,
   // A Chief may change a section peer; anyone else only itself. Re-checked at confirm.
   validateTarget: chiefPeerTargetRule("profile"),
 });
 const modelRequests = new ModelRequestService({
   store,
-  autoApply: fullAccessForSource,
+  autoApply: appliesDirectly,
   canPersist: proposalPersistence,
   // Same authority rule as profile proposals: a Chief may name one section peer.
   validateTarget: chiefPeerTargetRule("default model"),
@@ -16690,6 +16737,93 @@ function resolveAndSendModel(
   }
   json(res, 200, { ok: true, outcome: "rejected" });
   return true;
+}
+
+type UndoResult =
+  | { claimed: false }
+  | { claimed: true; state: "already_undone" | "undone" }
+  | { claimed: true; state: "invalid"; error: string; status: number; stale?: true };
+
+/** Undo for a learned skill a bot wrote without a person (undoSkillWrite). */
+function undoSkillCard(botId: string, threadId: string, messageId: string): UndoResult {
+  const message = store.messagesFor(threadId).find((candidate) => candidate.id === messageId);
+  const card = message?.card;
+  const request = card?.skillRequest;
+  if (!message || !card || !request) return { claimed: false };
+  if (card.undone) return { claimed: true, state: "already_undone" };
+  if (!card.autoApplied || card.answered !== "allow") {
+    return { claimed: true, state: "invalid", error: "Only a change that applied on its own can be undone here.", status: 409 };
+  }
+  if (request.botId !== botId || request.threadId !== threadId) {
+    return { claimed: true, state: "invalid", error: "this skill request belongs to a different bot", status: 403 };
+  }
+  const undone = undoSkillWrite(botId, {
+    stagedId: request.stagedId,
+    name: request.name,
+    action: request.action,
+    ...(request.previous ? { previous: { skillMd: request.previous.preview, source: request.previous.source } } : {}),
+  });
+  if ("stale" in undone) return { claimed: true, state: "invalid", error: UNDO_STALE, status: 409, stale: true };
+  if ("error" in undone) return { claimed: true, state: "invalid", error: undone.error, status: 409 };
+  store.patchMessage(threadId, message.id, { card: { ...card, undone: true } });
+  return { claimed: true, state: "undone" };
+}
+
+/** Undo on the one-line receipt of a change that applied without a person
+ * (a bot's change to itself, or Full access). The caller authorizes it
+ * exactly like answering that card; the card remembers it was undone. */
+function undoAppliedChange(res: ServerResponse, threadId: string, requestId: string): void {
+  const message = store.messagesFor(threadId).find((candidate) => candidate.card?.requestId === requestId);
+  const card = message?.card;
+  if (!message || !card) return json(res, 404, { error: "this change is no longer in the conversation" });
+  // The proposing bot comes from the conversation (a room card's trusted
+  // sender, else the thread's bot), never from the card payload.
+  const botId = message.from?.botId ?? store.botByThread(threadId)?.id;
+  if (!botId) return json(res, 400, { error: "this change has no valid owner" });
+  let result: UndoResult = { claimed: false };
+  if (card.routineRequest) {
+    const undone = routineRequests.undo({ botId, threadId, requestId });
+    // On a Cloud home a routine Undo removed is forgotten, and one it put
+    // back is the owner's only if it was theirs before the change.
+    if (undone.claimed && undone.state === "undone" && cloudRoutineAuthors) {
+      if (undone.action === "create") cloudRoutineAuthors.remove(undone.routineId);
+      else if (undone.action === "update") {
+        if (undone.ownersBefore) cloudOwnersRoutine(undone.routineId);
+        else cloudRoutineAuthors.forget(undone.routineId);
+      } else if (undone.action === "delete" && undone.restoredId) {
+        if (undone.ownersBefore) cloudOwnersRoutine(undone.restoredId);
+        else cloudRoutineAuthors.wrote(undone.restoredId, CLOUD_NOBODY_KEY);
+      }
+    }
+    result = undone;
+  } else if (card.profileRequest) {
+    const undone = profileRequests.undo({ botId, threadId, requestId });
+    if (undone.claimed && undone.state === "undone") {
+      const target = store.bot(undone.targetBotId);
+      if (target) broadcast({ kind: "bot", bot: wireBot(target) });
+    }
+    result = undone;
+  } else if (card.modelRequest) {
+    const undone = modelRequests.undo({ botId, threadId, requestId });
+    if (undone.claimed && undone.state === "undone") {
+      const target = store.bot(undone.targetBotId);
+      if (target) broadcast({ kind: "bot", bot: wireBot(target) });
+    }
+    result = undone;
+  } else if (card.skillRequest) {
+    result = undoSkillCard(botId, threadId, message.id);
+  }
+  if (!result.claimed) return json(res, 409, { error: "Only a change that applied on its own can be undone here." });
+  if (result.state === "invalid") {
+    return json(res, result.status, { error: result.error, ...(result.stale ? { code: "changed-since" } : {}) });
+  }
+  if (result.state === "undone") {
+    appendDecision(DATA_DIR, {
+      threadId, requestId, botId, botName: store.bot(botId)?.name,
+      tool: card.tool, summary: card.subtitle, decision: "user-undone", source: "user",
+    });
+  }
+  json(res, 200, { ok: true, undone: true, ...(result.state === "already_undone" ? { alreadyUndone: true } : {}) });
 }
 
 // Webhook definitions are independent from calendar schedules, but every
@@ -18841,14 +18975,16 @@ function roomPostEligibility(
   return { ok: true };
 }
 
-function proposalPersistence(botId: string, threadId: string) {
+/** `opensCard` false for a change that applies directly: it adds no open
+ * card, so the open-card budget does not hold it back. */
+function proposalPersistence(botId: string, threadId: string, opensCard = true) {
   if (!store.bot(botId)) {
     return { ok: false as const, status: 403, error: "unknown sender" };
   }
   if (!connectorThread(botId, threadId)) {
     return { ok: false as const, status: 403, error: "source conversation does not belong to sender" };
   }
-  if (fullAccessForSource(botId, threadId)) return { ok: true as const };
+  if (!opensCard || fullAccessForSource(botId, threadId)) return { ok: true as const };
   // Only cards on the visible branch can be acted on from the composer.
   // Abandoned branches must not permanently consume the proposal quota.
   // Routine, profile, default-model and team-setup proposals
@@ -18864,14 +19000,14 @@ function proposalPersistence(botId: string, threadId: string) {
     : { ok: true as const };
 }
 
-function skillProposalPersistence(botId: string, threadId: string) {
+function skillProposalPersistence(botId: string, threadId: string, opensCard = true) {
   if (!store.bot(botId)) {
     return { ok: false as const, status: 403, error: "unknown sender" };
   }
   if (!connectorThread(botId, threadId)) {
     return { ok: false as const, status: 403, error: "source conversation does not belong to sender" };
   }
-  if (fullAccessForSource(botId, threadId)) return { ok: true as const };
+  if (!opensCard || fullAccessForSource(botId, threadId)) return { ok: true as const };
   const openRequests = store.activePath(threadId).filter(
     (message) =>
       message.card?.skillRequest?.botId === botId &&
@@ -18932,7 +19068,9 @@ function skillCardCopy(staged: { action: "create" | "update"; name: string; gist
 function appendSkillRequestCard(args: {
   botId: string;
   threadId: string;
+  /** Applied without a person: a one-line receipt with Undo. */
   applied?: boolean;
+  previous?: SkillRequestCardData["previous"];
   staged: {
     id: string;
     action: "create" | "update";
@@ -18960,6 +19098,7 @@ function appendSkillRequestCard(args: {
     sha256: args.staged.sha256,
     warnings: args.staged.warnings,
     createdAt: Date.now(),
+    ...(args.applied && args.previous ? { previous: args.previous } : {}),
   };
   const from = store.bot(args.botId);
   store.appendMessage(args.threadId, {
@@ -18970,7 +19109,7 @@ function appendSkillRequestCard(args: {
       title: copy.title,
       subtitle: copy.subtitle,
       options: args.applied ? [] : [args.staged.action === "create" ? "Enable" : "Update", "Deny"],
-      ...(args.applied ? { answered: "allow", title: `Skill "${args.staged.name}" ${args.staged.action === "create" ? "enabled" : "updated"}` } : {}),
+      ...(args.applied ? { answered: "allow", autoApplied: true, title: `Skill "${args.staged.name}" ${args.staged.action === "create" ? "enabled" : "updated"}` } : {}),
       requestId,
       tool: copy.tool,
       skillRequest: payload,
@@ -20365,6 +20504,13 @@ ROUTES.push(createBotMemoryRoutes({
   },
 }));
 ROUTES.push(createDeciderRoutes({ decider }));
+// The usage ledger (JSON and CSV). Admin scope stays in server/request-auth.ts.
+ROUTES.push(createUsageRoutes({
+  dataDir: DATA_DIR,
+  prices: operatorPrices,
+  budget: () => spendState(cfg, DATA_DIR),
+  currency: () => cfg.billing?.currency ?? "USD",
+}));
 // "Switch them too": a bot's threads on a model of their own follow its model again.
 ROUTES.push(createThreadModelRoutes({
   bot: (id) => store.bot(id),
@@ -20373,6 +20519,11 @@ ROUTES.push(createThreadModelRoutes({
   // Like updateBotDefault on a thread: on a Cloud home, the owner's alone.
   mayChangeModel: (auth) => !CLOUD_HOME || cloudOwnerSession(auth),
   reply: (botId) => publicBot(store.bot(botId)!),
+}));
+// Undo on the one-line receipt of a change that applied without a person.
+ROUTES.push(createUndoRoutes({
+  refusal: (auth, threadId, requestId) => cardAnswerRefusal(auth, threadId, requestId, "allow"),
+  undo: (auth, res, threadId, requestId) => withDecisionActor(decisionActorFor(auth), () => undoAppliedChange(res, threadId, requestId)),
 }));
 ROUTES.push(createAntigravityLeftoverRoutes({
   hosted: Boolean(hostedModels),
@@ -20514,6 +20665,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (method === "POST" && ["/api/auth/pair", "/api/pair", "/api/auth/pairing", "/api/auth/email/start", "/api/auth/email/verify"].includes(path)) {
       const refusal = managedPolicy.remoteAccessRefusal();
       if (refusal) return json(res, 403, { error: refusal, code: "managed_policy" });
+    }
+    // An MCP server's sign-in, started in a browser on another computer,
+    // comes back here (server/mcp-oauth.ts). Public like the loopback
+    // listener it stands in for: the state is the credential, checked once.
+    if (path === MCP_OAUTH_CALLBACK_PATH) {
+      const answer = method === "GET"
+        ? await mcpOAuth.publicCallback(req.headers.host, url.search)
+        : { status: 400, text: "Invalid sign-in callback. Return to OpenMausBot and try again." };
+      res.writeHead(answer.status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" });
+      res.end(answer.text);
+      return;
     }
     // ── who is asking (server/request-auth.ts) ──────────────────────────
     // Two public routes come first: what this server is, and turning a pairing
@@ -21520,7 +21682,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             forBot = { botId: target.id, name: target.name };
           }
         }
-        const persistence = proposalPersistence(from.id, fromThreadId);
+        // Sender and conversation only: the service checks the open-card
+        // budget once it knows whether this change opens a card at all.
+        const persistence = proposalPersistence(from.id, fromThreadId, false);
         if (!persistence.ok) {
           return json(res, persistence.status, { error: persistence.error });
         }
@@ -21553,6 +21717,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           cloudRoutineAuthors?.forget(applied.resultId);
           cloudRoutineAuthors?.wrote(applied.resultId, CLOUD_NOBODY_KEY);
         }
+        // Undo puts an updated or deleted routine back as the owner's only
+        // if it was theirs before this change.
+        if (applied && wasOwners && proposedCard?.autoApplied && proposedCard.routineRequest?.undo) {
+          store.patchMessage(fromThreadId, proposed.messageId, { card: { ...proposedCard,
+            routineRequest: { ...proposedCard.routineRequest, undo: { ...proposedCard.routineRequest.undo, ownersBefore: true } } } });
+        }
         appendDecision(DATA_DIR, {
           threadId: fromThreadId,
           requestId: proposed.requestId,
@@ -21563,7 +21733,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // response returned to the model.
           summary: proposedCard?.subtitle ?? proposed.summary,
           decision: proposed.state === "applied" ? "auto-approved" : "card-shown",
-          source: proposed.state === "applied" ? "full-access" : "routine",
+          source: proposed.state === "applied" ? proposed.appliedBy ?? "full-access" : "routine",
         });
         return json(res, 201, proposed);
       }
@@ -21645,7 +21815,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         appendDecision(DATA_DIR, {
           threadId: body.fromThreadId, requestId: proposed.requestId, botId: from.id, botName: from.name,
           tool: "update_profile", summary: proposed.detail, decision: proposed.state === "applied" ? "auto-approved" : "card-shown",
-          source: proposed.state === "applied" ? "full-access" : "profile",
+          source: proposed.state === "applied" ? proposed.appliedBy ?? "full-access" : "profile",
         });
         return json(res, 201, proposed);
       }
@@ -21674,7 +21844,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         appendDecision(DATA_DIR, {
           threadId: body.fromThreadId, requestId: proposed.requestId, botId: from.id, botName: from.name,
           tool: "update_model", summary: proposed.detail, decision: proposed.state === "applied" ? "auto-approved" : "card-shown",
-          source: proposed.state === "applied" ? "full-access" : "model",
+          source: proposed.state === "applied" ? proposed.appliedBy ?? "full-access" : "model",
         });
         return json(res, 201, proposed);
       }
@@ -21864,7 +22034,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!connectorThread(from.id, fromThreadId)) {
           return json(res, 403, { error: "source conversation does not belong to sender" });
         }
-        const persistence = skillProposalPersistence(from.id, fromThreadId);
+        // Skills written here are always the sender's own, so they apply at
+        // any level, with a one-line receipt and Undo (appliesDirectly).
+        const direct = appliesDirectly(from.id, fromThreadId, from.id);
+        const persistence = skillProposalPersistence(from.id, fromThreadId, !direct);
         if (!persistence.ok) return json(res, persistence.status, { error: persistence.error });
         const action = body.action === "create" || body.action === "update" ? body.action : "";
         if (!action) return json(res, 400, { error: 'action must be "create" or "update"' });
@@ -21886,11 +22059,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           source: learnSource(source),
         });
         if ("error" in staged) return json(res, 422, { error: staged.error });
-        if (fullAccessForSource(from.id, fromThreadId)) {
+        if (direct) {
+          // What an update replaces, so Undo can put it back.
+          const previousSkillMd = staged.action === "update" ? readSkillFile(from.id, staged.name) : null;
+          const previousSource = listSkills(from.id).find((skill) => skill.name === staged.name)?.source;
+          const previous = previousSkillMd !== null && previousSource ? { preview: previousSkillMd, source: previousSource } : undefined;
           const applied = applySkillWriteWithReceipt(from.id, staged, () => {
-            const receipt = appendSkillRequestCard({ botId: from.id, threadId: fromThreadId, staged, applied: true });
+            const receipt = appendSkillRequestCard({ botId: from.id, threadId: fromThreadId, staged, applied: true, previous });
             appendDecision(DATA_DIR, { threadId: fromThreadId, requestId: receipt.requestId, botId: from.id, botName: from.name,
-              tool: "stage_skill", summary: receipt.summary, decision: "auto-approved", source: "full-access" });
+              tool: "stage_skill", summary: receipt.summary, decision: "auto-approved", source: direct });
           });
           if ("error" in applied) {
             rejectStagedSkillWrite(from.id, staged.id);
@@ -24600,7 +24777,25 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         roots = messageFileRootsForThread(senderId, threadId);
       }
 
-      const file = await openMessageFile(href, roots);
+      // A link to a folder answers with its files; each one is then fetched
+      // by plain name under the same message grant and file checks.
+      const folderEntry = method === "POST" && body.entry !== undefined
+        ? messageFolderEntryName(body.entry)
+        : undefined;
+      if (folderEntry === null) return json(res, 400, { error: "entry must be one file name" });
+      let file: Awaited<ReturnType<typeof openMessageFile>>;
+      try {
+        file = folderEntry
+          ? await openMessageFolderEntry(href, folderEntry, roots)
+          : await openMessageFile(href, roots);
+      } catch (error) {
+        // Only a client that asks for listings gets one; older clients keep the 400.
+        if (body?.listFolder !== true || folderEntry || (error as { code?: unknown } | null)?.code !== "directory") throw error;
+        const listing = await listMessageFolder(href, roots);
+        res.setHeader("x-openmausbot-folder", "1");
+        res.setHeader("cache-control", "private, no-store");
+        return json(res, 200, listing);
+      }
       if ((streamsMessageImage || botAttachment?.kind === "image") && !file.mime.startsWith("image/")) {
         await file.handle.close();
         return json(res, 415, { error: "only images can be previewed here" });
@@ -29041,40 +29236,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // Read-only like the inspector above: the rows were written at the
     // request.opened fold and in answerRequest; this only reads them back,
     // newest last, same order as thread events.
-    // ── the usage ledger: what this workspace spent over a period ──
-    // Read-only over the month files usage-ledger.ts appends at turn.completed.
-    // Admin scope by default, like every route not opened to clients.
-    if (method === "GET" && (path === "/api/usage" || path === "/api/usage.csv")) {
-      const range = parseUsageRange(url.searchParams.get("from"), url.searchParams.get("to"));
-      if (!range) return json(res, 400, { error: "from and to must be YYYY-MM-DD, from no later than to, at most a year apart" });
-      const rows = readUsage(DATA_DIR, range);
-      // The operator's price list is applied only with the billing entitlement.
-      const prices = operatorPrices();
-      if (path === "/api/usage.csv") {
-        const stamp = (date: Date) => date.toISOString().slice(0, 10);
-        res.writeHead(200, {
-          "content-type": "text/csv; charset=utf-8",
-          "content-disposition": `attachment; filename="usage-${stamp(range.from)}-${stamp(range.to)}.csv"`,
-          "cache-control": "no-store",
-        });
-        res.end(usageCsv(rows, prices));
-        return;
-      }
-      const requested = url.searchParams.get("groupBy") ?? "bot";
-      if (!USAGE_GROUPINGS.includes(requested as UsageGroupBy)) {
-        return json(res, 400, { error: `groupBy must be one of ${USAGE_GROUPINGS.join(", ")}` });
-      }
-      const groupBy = requested as UsageGroupBy;
-      res.setHeader("cache-control", "no-store");
-      return json(res, 200, {
-        from: range.from.toISOString(),
-        to: range.to.toISOString(),
-        groupBy,
-        ...summarizeUsage(rows, groupBy, prices),
-        budget: spendState(cfg, DATA_DIR),
-        billing: prices ? { currency: cfg.billing?.currency ?? "USD" } : null,
-      });
-    }
 
     // ── "Agora" (lot Y): the delivery line now, and what the owner last saw ──
     // Admin scope by default. GET answers from the last minute's status
@@ -29336,6 +29497,26 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         cfg.instances = changed.instances;
         broadcast({ kind: "config", ...configStatus() });
         return json(res, 200, { instances: await describeInstances() });
+      } finally { providerConfigBusy = false; }
+    }
+
+    if (method === "POST" && path === "/api/instances/antigravity-accounts") {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) return json(res, 415, { error: "content-type must be application/json" });
+      const parsed = createClaudeAccountSchema.pick({ displayName: true }).extend({ sourceInstanceId: z.string().min(1).max(200) }).safeParse(await readBody(req, 8192));
+      if (!parsed.success) return json(res, 400, { error: "Enter an account name (up to 80 characters) and select an Antigravity provider." });
+      if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
+      providerConfigBusy = true;
+      try {
+        const instances = persistableInstanceConfigs(cfg);
+        const source = instances[parsed.data.sourceInstanceId];
+        if (source?.driver !== "antigravityAgent") return json(res, 400, { error: "Select a personal Antigravity provider." });
+        const instanceId = `antigravity-${randomUUID()}`;
+        const cli = (source.config as { cli?: unknown } | undefined)?.cli;
+        // Only share the runtime. Each instance gets its own Google profile.
+        instances[instanceId] = { driver: "antigravityAgent", displayName: parsed.data.displayName,
+          config: typeof cli === "string" && cli ? { cli } : {} };
+        await persistProviderInstance(instanceId, instances);
+        return json(res, 201, { instanceId, instances: await describeInstances() });
       } finally { providerConfigBusy = false; }
     }
 
@@ -29629,7 +29810,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
     }
 
-    // The loopback listener and authenticated paste-back complete the same flow.
+    // The loopback listener, the public callback and authenticated paste-back complete the same flow.
     const mcpSignIn = /^\/api\/mcp\/servers\/([a-z][a-z0-9_-]{0,31})\/(sign-in|sign-out)(?:\/([0-9a-f-]{36}))?$/.exec(path);
     if (mcpSignIn) {
       const [, name, action, flowId] = mcpSignIn;
@@ -29662,7 +29843,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 200, { auth: await mcpOAuth.completeCallback(name!, flowId, body.callbackUrl, owner) });
         }
         if (action === "sign-in" && method === "POST" && !flowId) {
-          const started = await mcpOAuth.start(name!, url, undefined, owner);
+          // A browser on another computer cannot reach this machine's
+          // loopback: it comes back to the https address it is using now,
+          // when that is one this server vouches for (mcpCallbackOrigin).
+          const remote = auth.kind === "session" && (isProxied(req) || !isLoopbackHost(req.headers.host));
+          const origin = remote
+            ? mcpCallbackOrigin(provesSameOrigin(req) ? requestOrigin(req) : null,
+              [CLOUD_HOME?.publicOrigin, hostedWorkspaceConfiguration()?.tenant.origin, savedCustomDomain(), FALLBACK_PUBLIC_URL])
+            : null;
+          const started = await mcpOAuth.start(name!, url, undefined, owner, { remote, origin });
           if (auth.kind === "session" && !sessions.isLive(auth.session.id)) {
             mcpOAuth.revokeOwner(owner);
             return json(res, 401, { error: "Your session ended. Start a new sign-in." });

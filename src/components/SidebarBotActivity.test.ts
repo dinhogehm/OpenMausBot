@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { Bot, Group, GroupTask, Task } from "@/state/store";
 import { setLocale, t } from "@/lib/i18n";
 import {
-  attentionJumpAction, attentionOwnerName, attentionRowStatus, attentionUnpinAction, BotActivityRow, crossBotAttentionThreads,
+  attentionHasRunningWork, attentionJumpAction, attentionOwnerName, attentionRowStatus, attentionTriggerLabel, attentionUnpinAction, BotActivityRow, crossBotAttentionThreads,
   crossBotPinnedThreads, sidebarBotActivityTasks, sidebarGroupActivityTasks, threadsWhenTreeHidden,
 } from "./SidebarBotActivity";
 import { botShowsUnread } from "@/lib/bot-unread";
@@ -35,6 +35,25 @@ describe("botShowsUnread", () => {
       task("p1", "Failed run", { routineRunId: "run-1", unread: true }),
     ]);
     expect(botShowsUnread(visible)).toBe(true);
+  });
+});
+
+describe("header activity", () => {
+  const entry = (task: Partial<Task> & { queued?: boolean }) => ({ kind: "bot" as const, botId: "a", botName: "Alpha", task: { threadId: "t", title: "T", createdAt: 0, queued: false, ...task } });
+
+  it("names the pulse with the count only when there is something to count", () => {
+    expect(attentionTriggerLabel(0)).toBe("Active Threads");
+    expect(attentionTriggerLabel(2)).toBe(t("attention.titleCount", { count: 2 }));
+  });
+
+  it("marks running or queued work and leaves unread alone", () => {
+    expect(attentionHasRunningWork([entry({ unread: true })])).toBe(false);
+    expect(attentionHasRunningWork([entry({ activity: "waiting-on-you" })])).toBe(false);
+    expect(attentionHasRunningWork([entry({ activity: "waiting-on-you", busy: true })])).toBe(false);
+    expect(attentionHasRunningWork([entry({ activity: "waiting-on-you", busy: true, queued: true })])).toBe(true);
+    expect(attentionHasRunningWork([entry({ activity: "working" })])).toBe(true);
+    expect(attentionHasRunningWork([entry({ busy: true })])).toBe(true);
+    expect(attentionHasRunningWork([entry({ queued: true })])).toBe(true);
   });
 });
 
