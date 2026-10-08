@@ -1,4 +1,5 @@
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
+import type { RoutineRunCardData } from "../../shared/routine-run";
 import type { ConnectorCardData } from "../../shared/wire";
 
 export const PINNED_SECTION_ID = "builtin:pinned";
@@ -67,6 +68,52 @@ export function sidebarGoalRunPreview(run: GroupGoalRunCardData): string {
   const label = GOAL_RUN_PREVIEW_LABEL[run.status];
   return summary ? `${label}: ${summary}` : label;
 }
+
+/** The catalog keys a routine run's preview reads its state from. */
+export type SidebarRoutineRunPreviewKey =
+  | "sidebar.preview.routineRun.queued"
+  | "sidebar.preview.routineRun.running"
+  | "sidebar.preview.routineRun.waiting"
+  | "sidebar.preview.routineRun.completed"
+  | "sidebar.preview.routineRun.failed"
+  | "sidebar.preview.routineRun.cancelled"
+  | "sidebar.preview.routineRun.missed"
+  | "sidebar.preview.routineRun.needsInput"
+  | "sidebar.preview.routineRun.blocked"
+  | "sidebar.preview.routineRun.limitReached"
+  | "sidebar.preview.routineRun.paused"
+  | "sidebar.preview.routineRun.stopped";
+
+/** A routine run's receipt previews as what the run said, in the bot's own
+ * words, or as where it stands in the reader's language — never as the
+ * English line the computer writes for clients without the card
+ * ("Routine “…” completed", R13-visual N25). A run that failed says so: its
+ * error is the provider's text, not the bot's. */
+export function sidebarRoutineRunPreview(
+  run: Pick<RoutineRunCardData, "routineName" | "status" | "goalStatus" | "summary">,
+  say: (key: SidebarRoutineRunPreviewKey, params: { name: string }) => string,
+): string {
+  const failed = run.status === "failed" || run.status === "missed" || run.status === "cancelled";
+  const summary = failed ? "" : (run.summary ?? "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s*(?:[-*+•]|\d+[.)]|#{1,6})\s+/gm, "")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (summary) return summary;
+  // the goal's own outcome first, as the computer's line does: a run "completed" whose goal got blocked did not
+  // complete what it was for (INSP-R13VIS A6)
+  const goal = run.goalStatus && run.goalStatus !== "completed" ? GOAL_PREVIEW_KEY[run.goalStatus] : undefined;
+  return say(goal ?? `sidebar.preview.routineRun.${run.status}`, { name: run.routineName });
+}
+const GOAL_PREVIEW_KEY = {
+  "needs-input": "sidebar.preview.routineRun.needsInput",
+  blocked: "sidebar.preview.routineRun.blocked",
+  "limit-reached": "sidebar.preview.routineRun.limitReached",
+  paused: "sidebar.preview.routineRun.paused",
+  stopped: "sidebar.preview.routineRun.stopped",
+  failed: "sidebar.preview.routineRun.failed",
+} satisfies Record<Exclude<NonNullable<RoutineRunCardData["goalStatus"]>, "completed">, SidebarRoutineRunPreviewKey>;
 
 /** The catalog keys a connection card's preview reads its state from. */
 export type SidebarConnectorPreviewKey = "connectors.card.connected" | "connectors.card.waiting" | "connectors.card.connectSecurely";

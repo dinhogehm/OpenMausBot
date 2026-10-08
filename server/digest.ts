@@ -133,6 +133,9 @@ export function renderDigest(d: TurnDigest): string {
     const tools = d.tools.map((t) => `${t.name} ×${t.count}${t.failed ? ` (${t.failed} failed)` : ""}`).join(", ");
     parts.push(`tools: ${tools}${d.toolsDropped ? ` +${d.toolsDropped} more` : ""}${d.hookCoverage === "preview" ? " (from tool previews)" : ""}`);
   } else if (d.hookCoverage === "none") {
+    // English on purpose (R11/R12/R13-visual N11): this line is read by the model (digestPromptLine), the recall
+    // index and the phones' parsers, never shown on the desktop — the DigestChip hides a turn with no tools, and its
+    // tooltip says it in the reader's language (src/lib/digest-text.ts, chat.digestNoActivity)
     parts.push("no tool activity observed in this turn");
   } else {
     parts.push("no tool calls");

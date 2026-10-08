@@ -123,10 +123,11 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
 // ── KPI cards ───────────────────────────────────────────────────────────────
 
 /** The comparison under a card, by the one rule the exports use: a trend on a
- * comparable base of at least 5, the previous value below it, a reason otherwise. */
+ * comparable base of at least 5, the previous value below it, a reason otherwise.
+ * No release source for both periods is said once, above the cards (R13-visual N17). */
 export function DeltaLine({ comparison, polarity, kind = "count" }: { comparison: Comparison; polarity: Polarity; kind?: ComparisonKind }) {
   if (comparison.kind === "none") {
-    const key: LocaleKey = comparison.reason === "before-repo" ? "report.delta.beforeRepo" : comparison.reason === "not-comparable" ? "report.delta.noSource" : "report.delta.none";
+    const key: LocaleKey = comparison.reason === "before-repo" ? "report.delta.beforeRepo" : comparison.reason === "not-comparable" ? "report.delta.noSourceShort" : "report.delta.none";
     return <p className="text-[12px] text-ink-secondary">{t(key)}</p>;
   }
   if (comparison.kind === "absolute") return <p className="text-[12px] text-ink-secondary">{t("report.delta.previous", { value: formatComparisonValue(comparison.previous, kind) })}</p>;
@@ -678,6 +679,12 @@ export function ReportView({ report, onGoalsSaved }: { report: ProductivityRepor
         <div role="note" className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[13px] text-ink">
           <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warning" aria-hidden />
           <p>{t("report.gaps", { gaps: gaps.map((gap) => `${formatWhen(gap.from, false)} – ${formatWhen(gap.to, false)}`).join("; ") })}</p>
+        </div>
+      )}
+      {!releaseComparable(report) && (
+        <div role="note" className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[13px] text-ink">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warning" aria-hidden />
+          <p>{t("report.releaseNotComparable")}</p>
         </div>
       )}
       {lines.length > 0 && (

@@ -1,0 +1,260 @@
+// Every attack phrase of the INSP-R13VIS rounds 1-4 (the inspector's attack*.mts), with what a routine's reply
+// must give: the titles of the items it opens, in order — none when it is a report, not an ask. Any change to
+// routine-owner-ask.ts keeps this corpus green, and the differential over the real replies of 7 days too.
+//
+// The rule it holds (INSP-R13VIS round 4): an item too many costs the owner one click on "Já resolvi"; an ask
+// lost costs the ask. So a reply opens no item only when it is a report — a decision taken ("como você decidiu",
+// "O Chief concordou: …", "como combinado"), or what the routine left alone ("continua com você, então não
+// mexi") — and no ask in it stands: an ask stands unless its own clause takes it back, with "você já <verbo>",
+// the thing asked done in the passive and no one named ("…a resposta final, que já foi enviada"), or "só se".
+//
+// "detector": the conversation detector (ownerAskIndex, bot-autonomy.ts) does not read an ask in it — the same
+// on df13caa18; not this file's filter. A reading of its own for routines ("falta você aprovar", "aguarda sua
+// aprovação", "a decisão … é sua") was tried and reverted (662ceaf59, INSP-R13VIS round 5): over the 409 routine
+// replies of 7 days it opened as many asks as the base (14 against 14), and 9 of the 23 narrations of R5 below
+// opened false items. These stay 0 until a reading that holds both. "eco": a pronoun with nothing it can point
+// to, read as an echo — the same on df13caa18.
+//
+// R5: narrations that carry an ask's words and ask nothing — someone else's words, a sheet's or ticket's status, the
+// bot's own report, a denial — never an item, whatever reads them; and a reply that points at the item that already
+// holds its ask ("no item o1", "(o2)", "é lá que você decide") or says it opened none ("Não abri item").
+//
+// R6: the mark of an item counts where the ask is said — its own sentence, or the label of its list — and never for
+// an ask about another ticket, issue or row than the item's; "Não abri item" never across a "mas" (INSP-R13VIS F1).
+// Open in the test: o1 (linha 190, #9384), o3 (#9374), o9 (the hook), o11 (#9326), o15.
+//
+// R7: a neighbour sentence points an ask at an open item only with something in common with the item's title — the
+// same id and no other action, or, for an ask with no id, a word of what it is about (INSP-R13VIS G1); "PR 9400",
+// "issue 9400" and a cell ("H192", "Atendimento!B190") are ids (G2).
+//
+// R8: "PR", "GO", "OK", "CI" and the like say how, never what about; every row or issue the ask names must be the
+// item's; a cell needs a sheet said around it; "publicar"/"publicação", "merge"/"mesclar" and "deploy"/"publicar em
+// produção" are one act each (INSP-R13VIS H1, H2).
+//
+// R9: the sentence beside an ask makes it an echo only when the ask has no subject of its own; the title comparison
+// of R7-R8 is gone (INSP-R13VIS I1). Over the replies of 7 days, 5 of the 22 echoes came back as items — all from
+// conversations, none from a routine's reply, the only path this runs on.
+//
+// R10: a pronoun is resolved before the echo is judged ("Ela continua com você" after "A linha 192… está parada");
+// a pointer that says it is about something else points nowhere (INSP-R13VIS J1 and round 10).
+export type CorpusRound = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "R10";
+/** The items open when a phrase is read, any bot's, by id and title — the test's default set when a phrase gives none. */
+export type CorpusItems = ReadonlyArray<{ id: string; title: string }>;
+export const ROUTINE_ASK_CORPUS: ReadonlyArray<readonly [round: CorpusRound, text: string, titles: readonly string[], note?: "detector" | "eco" | "", open?: CorpusItems]> = [
+  ["R1", "Como você decidiu ontem, preciso agora da sua aprovação para fazer o merge da #9400.", [], "detector"],
+  ["R1", "Como você decidiu ontem, a #9400 está pronta. Preciso da sua aprovação para o merge.", ["Ver: preciso da sua aprovação para o merge"]],
+  ["R1", "Continua com você: não mexi, mas decida até amanhã se a #9400 entra.", ["Ver: não mexi, mas decida até amanhã se a #9400 entra"]],
+  ["R1", "A #9400 fica com você, não mexi; falta você aprovar a PR.", ["Ver: a #9400"]],
+  ["R1", "A #9400 fica com você e não mexi. Falta você aprovar a PR.", ["Ver: a #9400"]],
+  ["R1", "O Chief concordou que a #9400 precisa da sua aprovação para subir.", ["Ver: a #9400"]],
+  ["R1", "Conforme você pediu, falta só o seu OK para o merge da #9400.", [], "detector"],
+  ["R1", "Como combinado, aguardo seu OK para publicar a #9400.", ["Ver: aguardo seu OK para publicar a #9400"]],
+  ["R1", "Você aprovou a #9389; agora falta decidir a #9390.", [], "detector"],
+  ["R1", "Você já decidiu a escala, mas a #9400 ainda depende de você: falta o seu GO.", ["Ver: falta o seu GO (#9400)"]],
+  ["R1", "A linha 192 continua com você, não mexi. Me diga se posso gravar a nota", ["Ver: a linha 192"]],
+  ["R1", "A #9400 continua com você, então não mexi. Pode aprovar o merge quando der.", ["Ver: a #9400"]],
+  ["R1", "A #9400 continua com você, então não mexi. Preciso do seu GO para o merge.", ["Ver: a #9400", "Ver: preciso do seu GO para o merge"]],
+  ["R1", "O Chief concordou: a #9400 precisa do seu GO para o merge.", ["Ver: a #9400"]],
+  ["R1", "A Marluce respondeu na #9389. Ela aguarda você decidir se a linha entra hoje.", [], "detector"],
+  ["R1", "A planilha está ok. Ela continua com você, então não mexi.", []],
+  ["R1", "Abri a #9401 para o Roberto. Ele precisa que você aprove o acesso.", [], "detector"],
+  ["R1", "A sessão da #9402 abriu. Isso fica com você: aprovar o merge.", ["Aprovar o merge (#9402)"]],
+  ["R1", "Fechei a #9403. A Daiane respondeu. Ela precisa da sua decisão sobre o reembolso", ["Decidir: o reembolso (a Daiane)"]],
+  ["R1", "Como combinado, ainda dependem de você:\n- aprovar a #9400\n- decidir a escala da #9401", ["Aprovar a #9400", "Decidir a escala da #9401"]],
+  ["R1", "Ainda dependem de você, como você pediu:\n- aprovar a #9400\n- decidir a escala da #9401", ["Aprovar a #9400", "Decidir a escala da #9401"]],
+  ["R1", "Ainda dependem de você:\n- aprovar a #9400\n- decidir a escala da #9401", ["Aprovar a #9400", "Decidir a escala da #9401"]],
+  ["R1", "O Chief concordou com o plano, e a decisão sobre a #9400 fica com você.", ["Decidir: a #9400"]],
+  ["R1", "A #9400 fica com você, não mexi, mas preciso do seu GO até amanhã.", ["Ver: a #9400"]],
+  ["R1", "Fechei a #9403. A Daiane respondeu. Ela precisa da sua decisão sobre o reembolso.", ["Decidir: o reembolso (a Daiane)"]],
+  ["R1", "A #9404 subiu. O Filipe pediu acesso. Ele aguarda sua aprovação.", [], "detector"],
+  ["R2", "O Chief concordou com você: a linha da Marluce (#9389) fica com você, como você decidiu às 11:05.", []],
+  ["R2", "O Chief concordou com você: a linha da Marluce (#9389) fica com você.", []],
+  ["R2", "O Chief e o Lead concordaram: a #9389 fica com você.", []],
+  ["R2", "O Chief concordou, e a #9389 fica com você.", []],
+  ["R2", "O Chief já concordou: a #9389 continua com você.", []],
+  ["R2", "O Chief concordou que a #9389 fica com você.", []],
+  ["R2", "A Marluce concordou que a linha 192 fica com você, então não mexi.", []],
+  ["R2", "A #9389 continua com você, então não mexi; o cliente depende de você para a resposta final, que já foi enviada.", []],
+  ["R2", "A linha 192 continua com você, então não mexi. O Matheus disse que depende de você, mas já resolveu sozinho.", ["Ver: a linha 192"]],
+  ["R2", "A #9400 continua com você, então não mexi. Falta o seu nome na planilha só por formatação; corrigi.", ["Ver: a #9400"]],
+  ["R2", "Como você decidiu às 11:05, a #9389 fica com você; a Marluce precisa da sua resposta, que você já mandou às 11:10.", []],
+  ["R2", "Como combinado, a escala depende de você só nas férias, e isso já está registrado.", []],
+  ["R2", "Como você pediu, aguardo seu retorno apenas se mudar algo; por enquanto sigo.", []],
+  ["R2", "A linha 192 continua com você, então não mexi. Ela depende de você.", ["Ver: a linha 192"]],
+  ["R2", "A #9400 entrou na main. Ela continua com você, então não mexi, mas preciso do seu GO.", ["Ver: a #9400"]],
+  ["R2", "O ticket ATD-202610-0042 voltou. Ela precisa da sua decisão sobre o reembolso.", ["Decidir: o reembolso"]],
+  ["R2", "A Daiane abriu o ticket ATD-202610-0042. Ele precisa da sua decisão sobre o reembolso.", ["Decidir: o reembolso"]],
+  ["R2", "O Filipe respondeu. A Daiane escreveu de novo. Ele precisa da sua resposta.", ["Ver: o Filipe"]],
+  ["R2", "A linha 192 está incompleta. O Matheus pediu ajuda. Ela depende de você para o Status.", ["Ver: a linha 192"]],
+  ["R2", "O Chat ficou quieto. Isso depende de você: liberar o Jev.", ["Liberar o Jev"]],
+  ["R2", "A #9400 subiu. Isso depende de você: decidir se volta.", ["Decidir se volta (#9400)"]],
+  ["R2", "A Marluce pediu a #9400. Isso precisa da sua decisão.", [], "eco"],
+  ["R2", "Isso depende de você no item \"Precisa de você: o1\": ajustar o corredor.", ["Ajustar o corredor"]],
+  ["R2", "A linha 185 está incompleta. Responda no item “Ver: linha 185”: ajustar o corredor ou gravar à mão.", [], "detector"],
+  ["R2", "Preciso que você diga \"sim: pode remover\" ou \"não: mantenha\" para as worktrees.", ["Ver: preciso que você diga \"sim: pode remover\" ou \"não: mantenha\" para as worktrees"]],
+  ["R2", "A #9400 precisa da sua aprovação para o merge da #9401.", ["Ver: a #9400"]],
+  ["R2", "Preciso do seu GO para o merge (#9400 e #9401).", ["Ver: preciso do seu GO para o merge (#9400 e #9401)"]],
+  ["R2", "O ticket ATD-202610-0042 precisa da sua decisão sobre o reembolso.", ["Decidir: o reembolso (o ticket ATD-202610-0042)"]],
+  ["R2", "Responder ao Filipe sobre a #9400 depende de você.", ["Responder ao Filipe sobre a #9400 depende de você"]],
+  ["R2", "A decisão sobre os 31 chamados antigos da #9298 continua com você.", ["Decidir: os 31 chamados antigos da #9298"]],
+  ["R2", "Preciso de uma decisão sua sobre o que a correção promete.", ["Decidir: preciso de uma decisão sua sobre o que a correção promete"]],
+  ["R2", "A Daiane aguarda a decisão sobre o reembolso, que é sua.", [], "detector"],
+  ["R2", "Continuam com você a sessão da #9052 e a decisão sobre o Lead.", ["Decidir: continuam com você a sessão da #9052 e a decisão sobre o Lead"]],
+  ["R2", "A decisão sobre a escala do Lead ficou com você: ele cobre 24/7 ou só no expediente?", [], "detector"],
+  ["R3", "O Chief concordou com isso, e a decisão sobre a #9400 fica com você.", ["Decidir: a #9400"]],
+  ["R3", "O Chief concordou com tudo, e a escala do Lead depende da sua decisão.", ["Decidir: a escala do Lead"]],
+  ["R3", "O Lead concordou com o Chief: a #9400 precisa da sua aprovação.", ["Ver: a #9400"]],
+  ["R3", "O Lead concordou com a proposta, mas a #9400 ainda precisa do seu GO.", ["Ver: a #9400"]],
+  ["R3", "O Chief concordou com a ideia: falta você aprovar a #9400.", [], "detector"],
+  ["R3", "O Chief concordou, mas o merge da #9400 é decisão sua.", ["Decidir: a #9400"]],
+  ["R3", "O Chief concordou, e eu preciso que você aprove o merge da #9400.", ["Ver: a #9400"]],
+  ["R3", "O Matheus concordou com o prazo, e a resposta a ele fica com você.", ["Ver: a resposta a ele"]],
+  ["R3", "A #9400 continua com você, então não mexi; preciso do seu GO para o merge, que já passou no gate.", ["Ver: a #9400"]],
+  ["R3", "A #9400 continua com você, então não mexi; aguardo seu OK, já que o gate passou.", ["Ver: a #9400"]],
+  ["R3", "Como combinado, preciso do seu GO para a #9400, que já está pronta.", ["Ver: preciso do seu GO para a #9400, que já está pronta"]],
+  ["R3", "Como combinado, aguardo sua aprovação para a #9400, já com o gate verde.", ["Ver: aguardo sua aprovação para a #9400, já com o gate verde"]],
+  ["R3", "Como você pediu, falta o seu GO na #9400; o gate já passou.", [], "detector"],
+  ["R3", "Como você decidiu, a #9400 depende de você só se o cliente reclamar.", []],
+  ["R3", "Como combinado, preciso que você aprove a #9400 só se o gate passar.", ["Ver: preciso que você aprove a #9400 só se o gate passar"]],
+  ["R3", "A linha 192 fica com você, não mexi: decida se entra hoje, já que a Marluce cobrou.", ["Ver: decida se entra hoje, já que a Marluce cobrou (linha 192)"]],
+  ["R3", "Como você pediu, a #9400 depende de você: o merge já pode sair.", ["Ver: o merge já pode sair (#9400)"]],
+  ["R3", "Jev: liberar push da #9295 depende de você.", ["Liberar push da #9295 (Jev)"]],
+  ["R3", "Planilha: gravar a nota da #9032 na H192 depende de você.", ["Gravar a nota da #9032 na H192 (Planilha)"]],
+  ["R3", "Recomendo: aprovar o merge da #9400 ainda hoje, isso depende de você.", ["Aprovar o merge da #9400 ainda hoje"]],
+  ["R3", "o17: a worktree da #9378 depende da sua decisão.", ["Decidir: a worktree da #9378"]],
+  ["R3", "Gate: falhou o ci:local da #9400 e preciso do seu GO para rodar de novo.", ["Ver: gate (#9400)"]],
+  ["R3", "Urgente: responder ao Filipe depende de você.", ["Responder ao Filipe"]],
+  ["R3", "Matheus: aguarda você decidir sobre o reembolso.", [], "detector"],
+  ["R3", "Osvaldo, a #9314 travou e depende de você.", ["Ver: a #9314"]],
+  ["R3", "Osvaldo, a Marluce aguarda sua resposta sobre a linha 192.", [], "detector"],
+  ["R3", "Marluce, a linha 192 depende de você.", ["Ver: a linha 192"]],
+  ["R3", "Atualizei o item o19 (\"Decidir o destino de 17 worktrees paradas\") e ele continua dependendo de você.", [], "detector"],
+  ["R3", "Atualizei o item o19 (\"17 worktrees paradas, 40G\") e ele depende de você.", ["Ver o recado do Monitor na rotina \"Atendimento\""]],
+  ["R3", "Ainda depende de você a o2 (linha 105, #9058), e a o12 segue resolvida.", ["Ver: ainda depende de você a o2 (linha 105, #9058), e a o12 segue resolvida"]],
+  ["R3", "Dependem de você a #9400 (merge e deploy, com rollback) e a #9401.", ["Ver: dependem de você a #9400 (merge e deploy, com rollback) e a #9401"]],
+  ["R4", "O Chief concordou, e a #9389 fica com você para decidir.", ["Decidir: a #9389"]],
+  ["R4", "O Chief concordou, e decidir a #9389 fica com você.", ["Decidir: a #9389"]],
+  ["R4", "O Chief concordou, e a decisão da #9389 fica com você.", ["Decidir: a #9389"]],
+  ["R4", "O Chief concordou: a decisão sobre a #9389 é sua, como você já tinha dito.", [], "detector"],
+  ["R4", "O Chief concordou que a decisão sobre a #9389 é sua.", [], "detector"],
+  ["R4", "O Chief concordou com você: a decisão sobre a #9389 já foi tomada às 11:05.", [], "detector"],
+  ["R4", "O Chief concordou: a #9389 fica com você e a decisão sobre o prazo já foi dada.", []],
+  ["R4", "O Chief concordou, e a escolha da #9389 fica com você.", ["Decidir: a #9389"]],
+  ["R4", "O Chief concordou, e cabe a você aprovar a #9389.", [], "detector"],
+  ["R4", "O Chief concordou, e a aprovação da #9389 é com você.", [], "detector"],
+  ["R4", "A Marluce respondeu, e a linha 192 precisa do seu GO.", ["Ver: a linha 192"]],
+  ["R4", "Fechei a #9400, e a #9401 depende de você.", ["Ver: a #9401"]],
+  ["R4", "O gate passou, e o merge da #9400 depende da sua decisão.", ["Decidir: o merge da #9400 (o gate passou)"]],
+  ["R4", "Rodei o ci:local, e os testes, e o lint; a #9400 depende de você.", ["Ver: a #9400"]],
+  ["R4", "A #9400 continua com você, não mexi; preciso do seu GO, porque o Chief já aprovou a outra parte.", ["Ver: a #9400"]],
+  ["R4", "A #9400 continua com você, não mexi; aguardo seu OK, o Jev já liberou o push.", ["Ver: a #9400"]],
+  ["R4", "Como combinado, preciso do seu GO na #9400; a #9401 já foi aprovada.", ["Ver: preciso do seu GO na #9400"]],
+  ["R4", "Como combinado, preciso do seu GO na #9400, que o Lead já aprovou.", ["Ver: preciso do seu GO na #9400, que o Lead já aprovou"]],
+  ["R4", "Como combinado, preciso do seu GO na #9400, porque a Marluce já respondeu.", ["Ver: preciso do seu GO na #9400, porque a Marluce já respondeu"]],
+  ["R4", "Como você pediu, falta o seu OK na #9400, que eu já resolvi pelo lado do gate.", [], "detector"],
+  ["R4", "A linha 192 fica com você, não mexi; preciso que você grave a nota, a Marluce já mandou o texto.", ["Ver: a linha 192"]],
+  ["R4", "Como combinado, depende da sua decisão a #9400, já resolvida pelo Lead.", []],
+  ["R4", "Como você decidiu, a #9389 fica com você; a Marluce precisa da sua resposta, que você já mandou às 11:10.", []],
+  ["R4", "Como combinado, a escala foi decisão sua e está registrada.", []],
+  ["R4", "Como você decidiu às 11:05, a decisão sobre a #9389 ficou registrada.", [], "detector"],
+  ["R4", "A #9389 continua com você, então não mexi; a decisão sobre o prazo foi sua, ontem.", []],
+  ["R4", "Como você pediu, registrei a sua decisão na #9389.", [], "detector"],
+  ["R5", "A Marluce disse no Chat: \"falta você aprovar meu acesso\", mas era para o Chief, que já resolveu.", []],
+  ["R5", "O Matheus reclamou que falta você responder ao cliente dele; respondi por você às 10:02.", []],
+  ["R5", "Segundo o Roberto, falta só o seu OK no orçamento, mas isso é com o comercial, não com você.", []],
+  ["R5", "O cliente escreveu que falta você liberar o acesso; encaminhei ao suporte N1, que liberou.", []],
+  ["R5", "A Daiane respondeu: \"cabe a você decidir se reabre\", falando com o atendente dela.", []],
+  ["R5", "O cliente disse ao atendente que cabe a você escolher o plano.", []],
+  ["R5", "Planilha, linha 192: Status \"Aguarda sua aprovação\" (texto padrão da coluna).", []],
+  ["R5", "A coluna E da linha 185 mostra \"aguarda sua revisão\", que é o valor padrão do formulário.", []],
+  ["R5", "O ticket 142515 está com o status \"Aguarda seu retorno\" para o cliente.", []],
+  ["R5", "A automação marca como \"aguarda você\" todo ticket sem resposta em 24 h.", []],
+  ["R5", "Relatei ao Chief que a linha 192 aguarda sua decisão.", []],
+  ["R5", "Repassei ao Matheus que falta o seu OK na #9400.", []],
+  ["R5", "Notifiquei a Marluce de que a #9400 precisa que você aprove.", []],
+  ["R5", "Documentei na #9400 que falta você decidir o prazo.", []],
+  ["R5", "Registrei no Chat que cabe a você aprovar a #9400.", []],
+  ["R5", "No comentário da #9400 eu expliquei que a decisão sobre o prazo é sua.", []],
+  ["R5", "Escrevi para a Marluce que a linha 192 aguarda sua decisão.", []],
+  ["R5", "Hoje não há nada em que falte você aprovar.", []],
+  ["R5", "Não tem mais nenhum caso em que a decisão sobre o prazo é sua.", []],
+  ["R5", "Nenhuma das três linhas da planilha ainda aguarda sua decisão.", []],
+  ["R5", "Não é verdade que falta você aprovar a #9400; já aprovei com o Chief.", []],
+  ["R5", "Agora já não falta o seu OK na #9400: o Chief aprovou.", []],
+  ["R5", "Já não cabe a você aprovar a #9400.", []],
+  ["R5", "Falta você aprovar a #9400.", [], "detector"],
+  ["R5", "A linha 192 aguarda sua decisão.", [], "detector"],
+  ["R5", "Cabe a você aprovar a #9400.", [], "detector"],
+  // an ask whose item already exists, said in its paragraph (real 02/10 07:37, 05/10 14:50 and 20:52; INSP-R13VIS E2)
+  ["R5", "**Precisa de você (o11):** feche a #9326. Tentei fechar com um comentário com essa prova, mas o Jev barrou o comando e não tentei de novo.", []],
+  ["R5", "**Decisão sua (item o1 em \"Precisa de você\"):**\n- **Recomendo:** ajustar o corredor C1 para aceitar as colunas B, C e E numa linha nova da aba Atendimento.\n- **Ou:** você grava à mão a B185, a C185 e a E185. O comando está no item.", [], "", [{ id: "o1", title: "Aprovar as 3 escritas da planilha (linhas 185 e 186) para eu gravar" }]],
+  // R9: an ask that says what it is about opens its item, whatever the sentence beside it points at — a duplicate at worst (I1)
+  ["R5", "Continua com você a linha 190 da #9384, que o Jev barrou. O comando está em \"Precisa de você\" (o1).", ["Ver: continua com você a linha 190 da #9384, que o Jev barrou"]],
+  ["R5", "Para destravar, falta você criar a trava; a pendência é a o15, e quem a abriu foi o Chief.", []],
+  // the bot opened none, or says where the owner decides (real 05/10 21:26, 06/10 09:57)
+  ["R5", "Nenhuma está na tag de produção, então a decisão sobre elas é sua. Não abri item para essas pastas porque liberam pouco espaço.", []],
+  ["R5", "Fora essas, a rotina de medição monta o item \"Decidir o destino de N worktrees paradas\" com os comandos, e é lá que você decide. Isso depende de você.", []],
+  ["R6", "Não abri item novo, mas preciso que você aprove o merge da #9400.", ["Ver: preciso que você aprove o merge da #9400"]],
+  ["R6", "Não abri item novo: o merge da #9400 depende de você e prefiro que você veja aqui.", ["Ver: o merge da #9400"]],
+  ["R6", "Não criei pendência para o disco. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "Não abri item para a #9401, que é pequena. A #9400 precisa do seu GO para o merge.", ["Ver: a #9400"]],
+  ["R6", "Atualizei o item o9 com o comando. Também preciso do seu GO na #9400.", ["Ver: também preciso do seu GO na #9400"]],
+  ["R6", "A #9401 já está no item o9. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "Para a #9401 é lá que você decide, no item do Chief. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "O merge da #9400 depende de você. O caso parecido de setembro foi o item o3.", ["Ver: o merge da #9400"]],
+  ["R6", "Decisão sua (item o3): aprovar o merge da #9400.", ["Decidir: aprovar o merge da #9400"]],
+  ["R6", "- A #9401 já está no item o9.\n- O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  ["R6", "Use o item em \"Precisa de você\" para a #9401. O merge da #9400 depende de você.", ["Ver: o merge da #9400"]],
+  // the same marks, on the ask's own subject, still make it an echo
+  ["R6", "Decisão sua (item o3): manter a pausa só no envio, e a #9374 é fechada.", []],
+  ["R6", "Só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo. Atualizei o item o9 com o passo a passo.", ["Ver: só você pode instalar, porque o hook tem trava e os agentes não podem editá-lo"]],
+  ["R7", "Avisar o Matheus depende de você. Atualizei o item o1 com o passo a passo do disco.", ["Avisar o Matheus depende de você"], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
+  ["R7", "Avisar o Matheus depende de você. O hotfix dele está no item o33.", ["Avisar o Matheus depende de você"], "", [{ id: "o33", title: "Decidir como a #9386 vai para produção (hotfix P1 do Matheus)" }]],
+  ["R7", "O deploy da #9386 depende de você. O caminho do merge está no item o33.", ["Ver: o deploy da #9386"], "", [{ id: "o33", title: "Decidir como a #9386 vai para produção (hotfix P1 do Matheus)" }]],
+  ["R7", "O deploy da #9400 depende de você. O merge já está no item o3.", ["Ver: o deploy da #9400"], "", [{ id: "o3", title: "Aprovar o merge da PR #9400" }]],
+  ["R7", "Decisão sua (item o3): aprovar o merge da PR 9400.", ["Decidir: aprovar o merge da PR 9400"], "", [{ id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" }]],
+  ["R7", "O merge da PR 9400 depende de você. O caso parecido de setembro foi o item o3.", ["Ver: o merge da PR 9400"], "", [{ id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" }]],
+  // what the item is about, said beside it: still the echo it was (real 03/10 13:41 and 05/10 16:32, by their words)
+  ["R7", "Liberar o disco depende de você. Atualizei o item o1 com o passo a passo.", ["Liberar o disco depende de você"], "", [{ id: "o1", title: "URGENTE: liberar disco, 4 GiB livres com release de produção rodando" }]],
+  // the o38 duplicate: the row by its cell ("H192") is the row of the ask (real 06/10 22:16)
+  ["R7", "A linha 192 depende de você. O comando está no o38.", ["Ver: a linha 192"], "", [{ id: "o38", title: "Colar você mesmo as Observações da H192 (#9032): o Jev barrou o Monitor" }]],
+  // R8: an acronym every pendency has is no subject; every row of the ask must be the item's (INSP-R13VIS H1)
+  ["R8", "Preciso que você dê o GO no deploy do Lead. Atualizei o item o5.", ["Ver: preciso que você dê o GO no deploy do Lead"], "", [{ id: "o5", title: "Dar o GO no merge da #9400" }]],
+  ["R8", "A PR do Redator depende de você. O item o5 tem o comando.", ["Ver: a PR do Redator"], "", [{ id: "o5", title: "Criar a PR da #9374 que o Jev barrou" }]],
+  ["R8", "O OK do Matheus depende de você. Atualizei o item o5.", ["Ver: o OK do Matheus"], "", [{ id: "o5", title: "Dar OK no push da #9311" }]],
+  ["R8", "O CI do Lead depende de você. Atualizei o item o5 com o comando.", ["Ver: o CI do Lead"], "", [{ id: "o5", title: "Rodar o CI da #9332 de novo" }]],
+  ["R8", "As linhas 185 e 186 dependem de você. A 185 já está no item o1.", ["Ver: as linhas 185 e 186"], "", [{ id: "o1", title: "Gravar a linha 185" }]],
+  // a cell only where a sheet is said; one act said two ways (INSP-R13VIS H2)
+  ["R8", "O modelo A100 depende de você. Atualizei o item o5.", ["Ver: o modelo A100"], "", [{ id: "o5", title: "Escrever na linha 100 da planilha" }]],
+  ["R8", "Liberar o cluster K80 depende de você.", ["Liberar o cluster K80 depende de você"]],
+  ["R8", "Mesclar a #9400 depende de você. Está no item o5.", ["Mesclar a #9400 depende de você"], "", [{ id: "o5", title: "Aprovar o merge da #9400" }]],
+  ["R8", "O merge da #9400 depende de você. Está no item o5.", ["Ver: o merge da #9400"], "", [{ id: "o5", title: "Mesclar a #9400 pelo gate" }]],
+  ["R8", "Publicar a #9400 depende de você. Está no item o5.", ["Publicar a #9400 depende de você"], "", [{ id: "o5", title: "Aprovar a publicação da #9400" }]],
+  ["R8", "A publicação da #9400 depende de você. Está no item o5.", ["Ver: a publicação da #9400"], "", [{ id: "o5", title: "Publicar a #9400" }]],
+  ["R8", "O deploy da #9400 depende de você. Está no item o5.", ["Ver: o deploy da #9400"], "", [{ id: "o5", title: "Publicar a #9400 em produção" }]],
+  ["R8", "O rollback da #9400 depende de você. O deploy dela está no item o3.", ["Ver: o rollback da #9400"], "", [{ id: "o3", title: "Aprovar o deploy da #9400" }]],
+  // R9: a verb in common is no subject in common — and no comparison is made at all: these say what they are about (I1)
+  ["R9", "Liberar o MCP do Chat depende de você. Atualizei o item o3 com o passo a passo.", ["Liberar o MCP do Chat depende de você"], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  ["R9", "Abrir a sessão do Redator depende de você. Atualizei o item o3.", ["Abrir a sessão do Redator depende de você"], "", [{ id: "o3", title: "Abrir no app uma sessão na raiz de nuria-platform" }]],
+  ["R9", "Gravar a nota do ticket depende de você. O comando está no item o3.", ["Gravar a nota do ticket depende de você"], "", [{ id: "o3", title: "Gravar a linha 185 da planilha" }]],
+  ["R9", "Criar a conta do Redator depende de você. Atualizei o item o3.", ["Criar a conta do Redator depende de você"], "", [{ id: "o3", title: "Criar a PR da #9374 que o Jev barrou" }]],
+  ["R9", "Renomear a sessão do Lead depende de você. Atualizei o item o3.", ["Renomear a sessão do Lead depende de você"], "", [{ id: "o3", title: "Renomear no app: Sobrecarga D1 → 9337 Sobrecarga D1" }]],
+  ["R9", "Trocar a senha do Redator depende de você. Atualizei o item o3.", ["Trocar a senha do Redator depende de você"], "", [{ id: "o3", title: "Trocar a senha das duas contas do piperun" }]],
+  ["R9", "Publicar o changelog da #9400 depende de você. O deploy dela está no item o3.", ["Publicar o changelog da #9400 depende de você"], "", [{ id: "o3", title: "Publicar a #9400 em produção" }]],
+  // an ask with no subject of its own is the item the sentence beside it points at
+  ["R9", "Continua com você. Atualizei o item o3.", [], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  ["R9", "Isso depende de você. Está no item o3.", [], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  // "planilha" alone makes no cell; a range is one id; "a linha 12 e a 13" is one noun
+  ["R9", "A planilha tem 120 linhas; o modelo A100 depende de você. Atualizei o item o3.", ["Ver: o modelo A100"], "", [{ id: "o3", title: "Escrever na linha 100 da planilha" }]],
+  ["R9", "Entre as linhas 100 a 200 da planilha, a 150 depende de você.", ["Ver: a 150 (entre as linhas 100 a 200 da planilha)"]],
+  ["R9", "A linha 12 e a 13 dependem de você.", ["Ver: a linha 12 e a 13"]],
+  // R10: the pronoun resolved before the echo is judged — its antecedent is its subject (INSP-R13VIS J1)
+  ["R10", "A linha 192 da Marluce está parada. Ela continua com você. Atualizei o item o3 com outra coisa.", ["Ver: a linha 192"], "", [{ id: "o3", title: "Aplicar a exceção do WAF da Cloudflare (#9381)" }]],
+  ["R10", "O merge da #9400 travou. Ele depende de você. Atualizei o item o3 com o WAF.", ["Ver: o merge da #9400"], "", [{ id: "o3", title: "Aplicar a exceção do WAF da Cloudflare (#9381)" }]],
+  ["R10", "A cliente Daiane mandou o anexo de novo. Isso continua com você. O WAF está no item o3.", ["Ver o recado do Monitor na rotina \"Atendimento\""], "", [{ id: "o3", title: "Aplicar a exceção do WAF da Cloudflare (#9381)" }]],
+  ["R10", "Uma coisa nova depende de você. Atualizei o item o3, mas isso é outra coisa.", ["Ver o recado do Monitor na rotina \"Atendimento\""], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  // the sentence before the pronoun only points at the item: still the item's echo
+  ["R10", "Atualizei o item o3 com o passo a passo. Isso continua com você.", [], "", [{ id: "o3", title: "Liberar o pre-push no Jev" }]],
+  // another item of the same list, without a pointer, is its own ask (real 03/10 15:47)
+  ["R5", "**O que depende de você:**\n- Quando terminar de usar a VM, devolva o controle.\n- Os artigos só saem depois que a conta osvaldo@odig.net for convidada no workspace piperun (item o3 em \"Precisa de você\").", ["Ver: quando terminar de usar a VM, devolva o controle"]],
+];

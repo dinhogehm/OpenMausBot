@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
-import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { ROUTINE_ASK_CORPUS } from "./routine-owner-ask.corpus.ts";
+import { type RoutineAsk, applyRoutineAsks, keepRoutineAsk, routineAskItem, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
 const MONITOR_0510 = [
@@ -171,6 +172,70 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
     now = new Date(2026, 9, 5, 9, 0).getTime();
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  // INSP-R13VIS I2: a sheet item and an ask about more of its rows, or fewer, are one pendency
+  it("A: an item on the 185, then \"linhas 185 e 186\": the one item, grown to both rows", () => {
+    const ledger = make();
+    const [first] = run(ledger, "A linha 185 depende de você.").opened;
+    now += 3_600_000;
+    const next = run(ledger, "As linhas 185 e 186 dependem de você.");
+    expect(next.opened).toEqual([]);
+    expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[first!.id, "routine-ask:linha:185+186"]]);
+    expect(ledger.ownerPendingOf("monitor")).toHaveLength(1);
+    // the title the owner reads names both rows (round 10)
+    expect(first!.title).toBe("Ver: a linha 185");
+    expect(next.refreshed[0]!.title).toBe("Ver: as linhas 185 e 186");
+  });
+
+  it("a range holds the rows inside it: \"linhas 100 a 200\" and \"a linha 150\" are one item, either way round (round 10)", () => {
+    const ledger = make();
+    const [range] = run(ledger, "As linhas 100 a 200 da planilha dependem de você.").opened;
+    expect(range!.key).toBe("routine-ask:linha:100-200");
+    now += 3_600_000;
+    expect(run(ledger, "A linha 150 depende de você.").opened).toEqual([]);
+    // the other way round, in a ledger of its own
+    const apart = mkdtempSync(join(tmpdir(), "omb-routine-ask-range-"));
+    try {
+      const other = new BotAutonomy({ path: join(apart, "bot-autonomy.json"), now: () => now });
+      const [row] = run(other, "A linha 150 depende de você.").opened;
+      now += 3_600_000;
+      const next = run(other, "As linhas 100 a 200 da planilha dependem de você.");
+      expect(next.opened).toEqual([]);
+      expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[row!.id, "routine-ask:linha:150"]]);
+    } finally {
+      rmSync(apart, { recursive: true, force: true });
+    }
+  });
+
+  it("B: an item on the 185 and 186, then \"a linha 185\": the same item, still both rows", () => {
+    const ledger = make();
+    const [first] = run(ledger, "As linhas 185 e 186 dependem de você.").opened;
+    now += 3_600_000;
+    const next = run(ledger, "A linha 185 depende de você.");
+    expect(next.opened).toEqual([]);
+    expect(next.refreshed.map((item) => [item.id, item.key])).toEqual([[first!.id, "routine-ask:linha:185+186"]]);
+  });
+
+  it("C: the 185 answered by the owner, then \"linhas 185 e 186\": only the 186 opens", () => {
+    const ledger = make();
+    const [first] = run(ledger, "A linha 185 depende de você.").opened;
+    ledger.resolveOwnerPending({ botId: "monitor", key: first!.key!, by: "owner" });
+    now += 3_600_000;
+    const next = run(ledger, "As linhas 185 e 186 dependem de você.");
+    expect(next.opened.map((item) => item.key)).toEqual(["routine-ask:linha:186"]);
+    // and the 185 alone, said again, stays answered
+    now += 3_600_000;
+    expect(run(ledger, "A linha 185 depende de você.").opened).toEqual([]);
+  });
+
+  // INSP-R13VIS E2: the Monitor pointing at the Chief's item opened a second item for the same pendency
+  it("an item another bot opened is an echo too: the routine pointing at it opens nothing", () => {
+    const ledger = make();
+    const chiefs = ledger.addOwnerPending("chief", "chief-thread", { title: "Criar a linha 190 da #9384" });
+    expect(run(ledger, `Continua com você a linha 190 da #9384, que a pendência é a ${chiefs.id}.`).opened).toEqual([]);
+    // an id no bot has open is no echo: the ask opens its item
+    expect(run(ledger, "Continua com você a linha 191 da #9385, que a pendência é a o99.").opened).toHaveLength(1);
+  });
 
   it("the hourly repetition refreshes the one item: same id, same title, why says since when and the last time", () => {
     const ledger = make();
@@ -654,5 +719,248 @@ describe("INSP-N22 r6", () => {
     expect(ledger.ownerPendingById("m", item!.id)!.demotedAt).toBeUndefined();
     // a new message of the owner after that folds it again
     expect(ownerSettlesRoutineAsks(ledger, "m", [...said, { at: clock + 60_000, text: "Conversei com o Luis Rossi sobre o widget agora, falei com ele." }])).toHaveLength(1);
+  });
+});
+
+// R13-visual N26: the two routine items of 06/10 (o16, o17) got titles with no subject. The Monitor's replies, verbatim
+// from messages.db (threads 61532c8d at 11:08 and 31df5560 at 15:00).
+const MONITOR_0610_1108 = [
+  "O Chief concordou: a linha da Marluce ([#9389](https://github.com/dinhogehm/nuria-platform/issues/9389)) fica com você, como você decidiu às 11:05. Ele não vai me pedir para gravar nada nela.",
+  "",
+  "- **Próximo passo:** quando você avisar que gravou a linha 191, eu leio as linhas 190 a 192. A ideia é confirmar que a 190 continua com o Matheus (#9384), que a 191 ficou com a Marluce e que a coluna de Observações não quebrou. Mando o resultado para o Chief.",
+  "- **Quem regravou a 190:** continua sem resposta. O Chief não achou essa gravação no log dos comandos e prefere não dizer que foi você.",
+  "- **Se demorar:** se a 191 ainda estiver vazia quando a #9389 andar, o Chief fala com você.",
+  "",
+  "Nesta passada não há mais nada pendente no Chat nem no GitHub.",
+].join("\n");
+const MONITOR_0610_1500 = [
+  "Passada das 15h feita. Não postei nada, porque não havia novidade.",
+  "",
+  "- **Chat:** a última mensagem continua sendo a sua resposta à Marluce na conversa dela, às 10:10 BRT, sobre a [#9389](https://github.com/dinhogehm/nuria-platform/issues/9389). Ninguém escreveu depois e nenhuma pergunta ficou sem resposta.",
+  "- **GitHub:** nenhuma issue foi atualizada desde as 13h BRT.",
+  "- **Planilha:** comparei com o snapshot das 07h. As diferenças são as que já conhecíamos: a linha da Jess ([#9380](https://github.com/dinhogehm/nuria-platform/issues/9380)) agora está \"Pendente\" e a linha do Matheus ([#9384](https://github.com/dinhogehm/nuria-platform/issues/9384)) entrou. A linha da Marluce ([#9389](https://github.com/dinhogehm/nuria-platform/issues/9389)) ainda não aparece na planilha. Ela continua com você, então não mexi. Salvei um snapshot novo para comparar na próxima passada.",
+].join("\n");
+
+describe("R13-visual N26: a routine item's title always says what it is about", () => {
+  // R13-followup 1: the only two routine items in 22 h of N22 were both reports, not asks
+  it("o16 (real 11:08): a decision already taken, reported, opens no item", () => {
+    expect(routineOwnerAsks(MONITOR_0610_1108, ctx)).toEqual([]);
+    for (const said of ["A escala de sábado fica com você, como combinado ontem.", "A linha 179 fica com você, conforme você pediu.", "Você decidiu às 9h: a #9370 fica com você."]) {
+      expect(routineOwnerAsks(said, ctx), said).toEqual([]);
+    }
+  });
+
+  it("o17 (real 15:00): what the routine left alone because it is the owner's opens no item", () => {
+    expect(routineOwnerAsks(MONITOR_0610_1500, ctx)).toEqual([]);
+    // the inspector's third phrase
+    expect(routineOwnerAsks("A linha 192 da Marluce continua com você, então não mexi.", ctx)).toEqual([]);
+  });
+
+  // INSP-R13VIS A1: the filter ran before the list, and a lead saying "como combinado" dropped every item
+  it("a list is asked in so many words: \"como combinado\" or \"como você pediu\" in its lead drops nothing", () => {
+    const listed = ["routine-ask:issue:9400 | Aprovar a #9400", "routine-ask:issue:9401 | Decidir a escala da #9401"];
+    expect(titles("Como combinado, ainda dependem de você:\n- aprovar a #9400\n- decidir a escala da #9401")).toEqual(listed);
+    expect(titles("Ainda dependem de você, como você pediu:\n- aprovar a #9400\n- decidir a escala da #9401")).toEqual(listed);
+  });
+
+  // INSP-R13VIS A2: an ask said the way routines say it wins over a decision taken or a "não mexi"
+  it.each([
+    ["O Chief concordou: a #9400 precisa do seu GO para o merge."],
+    ["O Chief concordou que a #9400 precisa da sua aprovação para subir."],
+    ["O Chief concordou com o plano, e a decisão sobre a #9400 fica com você."],
+    ["Como combinado, aguardo seu OK para publicar a #9400."],
+    ["Você já decidiu a escala, mas a #9400 ainda depende de você: falta o seu GO."],
+    ["A #9400 fica com você, não mexi, mas preciso do seu GO até amanhã."],
+    ["A #9400 fica com você, não mexi; falta você aprovar a PR."],
+  ])("an explicit ask opens one item about the #9400: %s", (text) => {
+    expect(titles(text)).toEqual([expect.stringMatching(/^routine-ask:issue:9400 \| .*#9400/)]);
+  });
+
+  // INSP-R13VIS round 2
+  it.each([
+    ["B1", "O Chief concordou com você: a linha da Marluce (#9389) fica com você, como você decidiu às 11:05."],
+    ["B1", "O Chief concordou com você: a linha da Marluce (#9389) fica com você."],
+    ["B1", "O Chief concordou, e a #9389 fica com você."],
+    ["B2", "Como você decidiu às 11:05, a #9389 fica com você; a Marluce precisa da sua resposta, que você já mandou às 11:10."],
+    ["B2", "Como combinado, a escala depende de você só nas férias, e isso já está registrado."],
+    ["B2", "Como você pediu, aguardo seu retorno apenas se mudar algo; por enquanto sigo."],
+  ])("%s: a report opens no item: %s", (_finding, text) => {
+    expect(routineOwnerAsks(text, ctx)).toEqual([]);
+  });
+
+  // INSP-R13VIS C1: the 9 phrases round 2 opened and round 3 dropped
+  it.each([
+    ["O Chief concordou com isso, e a decisão sobre a #9400 fica com você."],
+    ["O Chief concordou com tudo, e a escala do Lead depende da sua decisão."],
+    ["O Chief concordou, mas o merge da #9400 é decisão sua."],
+    ["A #9400 continua com você, então não mexi; preciso do seu GO para o merge, que já passou no gate."],
+    ["A #9400 continua com você, então não mexi; aguardo seu OK, já que o gate passou."],
+    ["Como combinado, preciso do seu GO para a #9400, que já está pronta."],
+    ["Como combinado, aguardo sua aprovação para a #9400, já com o gate verde."],
+    ["A linha 192 fica com você, não mexi: decida se entra hoje, já que a Marluce cobrou."],
+    ["Como você pediu, a #9400 depende de você: o merge já pode sair."],
+  ])("C1: an ask is not taken back by \"já que\", \"já com\", \"já pode\" nor by another clause after \"concordou\": %s", (text) => {
+    expect(routineOwnerAsks(text, ctx)).toHaveLength(1);
+  });
+
+  it("C1: titles of those asks name what is asked, not who agreed", () => {
+    expect(titles("O Chief concordou com tudo, e a escala do Lead depende da sua decisão.")).toEqual([expect.stringMatching(/\| Decidir: a escala do Lead$/)]);
+  });
+
+  it("C2: a one-word label leaves no \"depende de você\" in the title", () => {
+    const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    expect(title("Jev: liberar push da #9295 depende de você.")).toEqual(["Liberar push da #9295 (Jev)"]);
+    expect(title("Planilha: gravar a nota da #9032 na H192 depende de você.")).toEqual(["Gravar a nota da #9032 na H192 (Planilha)"]);
+    expect(title("Recomendo: aprovar o merge da #9400 ainda hoje, isso depende de você.")).toEqual(["Aprovar o merge da #9400 ainda hoje"]);
+  });
+
+  it("B1: agreeing to a plan, in another clause, still leaves the decision asked", () => {
+    expect(titles("O Chief concordou com o plano, e a decisão sobre a #9400 fica com você.")).toEqual(["routine-ask:issue:9400 | Decidir: a #9400"]);
+  });
+
+  it("B3: a pronoun nothing before it agrees with is left out of the title, never \"(ela)\"", () => {
+    expect(titles("O ticket ATD-202610-0042 voltou. Ela precisa da sua decisão sobre o reembolso.")).toEqual(["routine-ask:frase:reembolso | Decidir: o reembolso"]);
+  });
+
+  // B5: the real titles of 30/09, 03/10 and 06/10 that read "Ver: jev (#9278)", "Ver: #9058) (a o12…" and "Ver: o17 (#9378)"
+  it("B5: a one-word tag or an item's id before the colon is no title; nor a list cut inside parentheses", () => {
+    const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    expect(title("Ainda depende de você: Jev: liberar push, pr:merge e carrier no nuria-platform. Sem isso, a #9278, que corrige o 503, não entra.")).toEqual([expect.stringMatching(/^Liberar push, pr:merge e carrier no nuria-platform \(Jev\)/)]);
+    expect(title("Nada mudou na planilha nem no Chat neste turno; a o12 segue resolvida e a o2 (linha 105, #9058) continua com você.")).toEqual(["Ver: a o2 (linha 105, #9058)"]);
+    expect(title("Ainda dependem de você: o17: a worktree da #9378 com a linha do graft no .gitignore.")).toEqual(["Ver: a worktree da #9378 com a linha do graft no .gitignore"]);
+    expect(title("Ainda dependem de você: o18: abrir uma sessão à mão no nuria-platform no app, para destravar a sessão nova da #9378.")).toEqual(["Abrir uma sessão à mão no nuria-platform no app, para destravar a sessão nova da #9378"]);
+    // the bot's own voice before the colon names nothing
+    expect(title("Decisão sua: Recomendo: ajustar o corredor C1 para aceitar as colunas da linha 185.")[0]).toMatch(/^Decidir: ajustar o corredor C1/);
+    // a fact the bot told of an item it names by title (06/10 07:39)
+    expect(title("Precisa de você: atualizei o item já existente o19 (\"Decidir o destino de 17 worktrees paradas\") com a lista nova e o espaço livre, sem criar item repetido.")).toEqual(["Decidir o destino de 17 worktrees paradas"]);
+    // the vocative is who, not what (01/10 18:07); the article the bot used is kept (INSP-R13VIS C3)
+    expect(title("Osvaldo, a #9314 (https://github.com/dinhogehm/nuria-platform/pull/9314) (9295) travou e precisa de você para seguir.")).toEqual(["Ver: a #9314"]);
+  });
+
+  it("an explicit ask in the same paragraph still opens it, titled with its subject", () => {
+    expect(titles("A linha 192 da Marluce continua com você, então não mexi. Preciso que confirme o valor da coluna H.")).toEqual(["routine-ask:linha:192 | Ver: a linha 192 da Marluce"]);
+    expect(titles("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você, então não mexi: pode confirmar se grava hoje?")).toHaveLength(1);
+    expect(titles("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você, então não mexi: pode confirmar se grava hoje?")[0]).toMatch(/^routine-ask:issue:9389 \| /);
+    // a decision taken, with a new one asked in the same sentence
+    expect(titles("Como você decidiu, a #9370 fica com você: decida até sexta se ela entra no lote.")).toHaveLength(1);
+  });
+
+  it("a pronoun inherits only the subject of the sentence right before; the ask is still its own sentence, and the why quotes both", () => {
+    const asks = routineOwnerAsks("A linha da Marluce (#9389) ainda não aparece na planilha. Ela continua com você.", ctx);
+    expect(asks.map((ask) => `${routineAskKey(ask)} | ${routineAskTitle(ask)}`)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389)"]);
+    const item = routineAskItem(asks[0]!, { botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", firstAt: 0, lastAt: 0 });
+    expect(item.why).toContain("escreveu: \"A linha da Marluce (#9389) ainda não aparece na planilha.");
+    expect(item.why).toContain("Ela continua com você.\"");
+  });
+
+  // INSP-R13VIS A3: the nearest sentence that NAMES something was taken, and its whole fact became the title
+  it("the sentence right before, never one further up that names an id: Daiane, not the closed #9403", () => {
+    expect(titles("Fechei a #9403. A Daiane respondeu. Ela precisa da sua decisão sobre o reembolso.")).toEqual(["routine-ask:frase:daiane-reembolso | Decidir: o reembolso (a Daiane)"]);
+    // a pronoun with no agreeing subject right before stays as the bot said it ("Ela" is not "a #9403"… nor "o widget")
+    expect(titles("O widget caiu de novo às 14h. Ela continua com você.")[0]).not.toMatch(/widget/);
+    // another item of the list is another paragraph: never its subject
+    expect(titles("- A #9380 está pendente.\n- Ela continua com você.")[0]).not.toContain("9380");
+  });
+
+  // INSP-R13VIS A3: the five real titles that got worse (01/10 3e55c0fd ×3, 02/10 9f80f3ae, 03/10 52417e4a) and the "cisa de você" of 05/10
+  it("the real cases: a label line, a fact the bot did or a time clause is no subject", () => {
+    const origin = { botName: "Chief of Staff", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    for (const scope of ["o mesmo escopo de antes", "é o mesmo das outras tentativas"]) {
+      expect(title(`Pedido: ${scope}, com o padrão "sem limite". Ela não faz o merge sem o meu OK, porque o valor padrão ainda depende do Osvaldo.`)).toEqual(["Ver: porque o valor padrão (ela não faz o merge sem o meu OK)"]);
+    }
+    expect(title("Quando essa publicação terminar, a sessão envia de novo, roda o CI e publica o gate. Ela não faz o merge sem o meu OK, e o valor padrão \"sem limite\" ainda depende do Osvaldo.")[0]).toMatch(/^Ver: o valor padrão "sem limite"/);
+    expect(title("Abri então uma sessão do Claude Code com prioridade Reprovado: \"8204 Reprovado sidebar da fila não reflete no atendimento\". Ela roda sem o app, porque o app está preso reaproveitando uma worktree, e isso já está com o Osvaldo como pendência.")[0]).not.toMatch(/abri/i);
+    expect(title("Osvaldo, o Redator KB Nuria mandou o levantamento do que entrou em produção. Ele ainda não consegue publicar artigo nem cadastrar entradas no changelog porque falta acesso, e só você pode liberar.")[0]).toMatch(/^Ver: o Redator KB Nuria ainda não consegue publicar/);
+    expect(title("A linha 185 da planilha ainda está incompleta. Isso depende de você no item o1 de \"Precisa de você\": ajustar o corredor (recomendo) ou gravar as três células à mão.")).toEqual(["Ajustar o corredor (recomendo) ou gravar as três células à mão (linha 185)"]);
+  });
+
+  it("a fact told in the past is no title, with or without a colon (INSP-R13VIS A4)", () => {
+    const origin = { botName: "Monitor", routineName: "R", firstAt: 0, lastAt: 0 };
+    const title = (text: string) => routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title);
+    expect(title("Fechei a #9403 e isso fica com você.")).toEqual(["Ver: a #9403"]);
+    expect(title("O Redator KB Nuria mandou o levantamento e isso fica com você.")).toEqual(["Ver o recado do Monitor na rotina \"R\""]);
+  });
+
+  it("a told fact before the colon is no label: what follows is the subject", () => {
+    expect(titles("O Filipe respondeu: a linha 110 continua com você.")).toEqual(["routine-ask:linha:110 | Ver: a linha 110"]);
+  });
+
+  it("the subject from the paragraph: the sentence before, or the one before it when that one names nothing that agrees", () => {
+    expect(titles("A linha 191 ainda está vazia. O Chat ficou quieto a tarde toda. Isso continua com você.")).toEqual(["routine-ask:linha:191 | Ver: a linha 191"]);
+    expect(titles("A #9380 voltou para Pendente.\nIsso continua com você.")).toEqual(["routine-ask:issue:9380 | Ver: a #9380"]);
+  });
+
+  it("still no subject: whose message it is, in which routine — never a pronoun nobody can place", () => {
+    const [ask] = routineOwnerAsks("Ela continua com você.", ctx);
+    const item = routineAskItem(ask!, { botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", firstAt: 0, lastAt: 0 });
+    expect(item.title).toBe("Ver o recado do Monitor Chat Atendimento na rotina \"Atendimento: Chat, planilha e issues\"");
+  });
+
+  it("a decision still asked keeps \"Decidir\"; a label that is no told fact stays the label", () => {
+    expect(titles("Uma decisão fica com você: se o Filipe recebe a escala nova.")[0]).toMatch(/\| Decidir: se o Filipe recebe a escala nova$/);
+    expect(titles("Escala de sábado do helpdesk: a conversa continua com você.")[0]).toMatch(/\| Ver: escala de sábado do helpdesk$/);
+  });
+});
+
+// INSP-R13VIS G2: an issue said as a PR or an issue, and a row said by its cell, are the same subject
+describe("ids as the routines write them", () => {
+  it.each([
+    ["O merge da PR 9400 depende de você.", "routine-ask:issue:9400"],
+    ["O merge da PR #9400 depende de você.", "routine-ask:issue:9400"],
+    ["A issue 9400 depende de você.", "routine-ask:issue:9400"],
+    ["A célula H192 depende de você.", "routine-ask:linha:192"],
+    // "planilha" alone makes no cell (INSP-R13VIS round 9)
+    ["A H192 da planilha depende de você.", "routine-ask:frase:h192-planilha"],
+    ["Entre as linhas 100 a 200 da planilha, a 150 depende de você.", "routine-ask:linha:100-200"],
+    ["A célula Atendimento!B190 depende de você.", "routine-ask:linha:190"],
+    ["Gravar a B185, a C185 e a E185 depende de você.", "routine-ask:linha:185"],
+    // every row, one key (INSP-R13VIS H1)
+    ["As linhas 185 e 186 dependem de você.", "routine-ask:linha:185+186"],
+    ["Decisão sua: o que foi reprovado nas linhas 76, 98 e 106.", "routine-ask:linha:76+98+106"],
+    // a cell only where a sheet is said (INSP-R13VIS H2)
+    ["O modelo A100 depende de você.", "routine-ask:frase:modelo-a100"],
+  ])("%s", (text, key) => {
+    expect(routineOwnerAsks(text, ctx).map(routineAskKey)).toEqual([key]);
+  });
+});
+
+// INSP-R13VIS E3: titles of asks the conversation detector does not read today — kept right for when it does
+describe("titles of a decision or an action left with the owner", () => {
+  const ask = (sentence: string, decide: boolean, subject: RoutineAsk["subject"] = { kind: "frase", id: "x", label: "" }): RoutineAsk => ({ sentence, decide, subject });
+  it.each([
+    ["Essa decisão de produto é sua.", true, undefined, "Decidir: a decisão de produto"],
+    ["A decisão sobre a escala do Lead ficou com você: ele cobre 24/7 ou só no expediente?", true, undefined, "Decidir: a escala do Lead"],
+    ["Cabe a você aprovar a #9400.", false, { kind: "issue", id: "9400", label: "#9400" }, "Aprovar a #9400"],
+    ["O Chief concordou, e cabe a você aprovar a #9389.", false, { kind: "issue", id: "9389", label: "#9389" }, "Aprovar a #9389"],
+    // "a decisão de produto da #9356" keeps its words (real 03/10 22:32)
+    ["A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.", true, { kind: "issue", id: "9356", label: "#9356" }, "Decidir: a decisão de produto da #9356"],
+  ] as const)("%s", (sentence, decide, subject, title) => {
+    expect(routineAskTitle(ask(sentence, decide, subject))).toBe(title);
+  });
+});
+
+// INSP-R13VIS rounds 1-4: every attack phrase, with the items it must open (server/routine-owner-ask.corpus.ts)
+describe("the attack corpus", () => {
+  // the items open in the real replies the R5 and R6 phrases come from, any bot's, with their titles (bot-autonomy.json)
+  const items = [
+    { id: "o1", title: "Aprovar a criação da linha 190 da planilha (127138 do Matheus, #9384)" },
+    { id: "o3", title: "Decidir se a pausa de inatividade passa a valer no clique (#9374)" },
+    { id: "o9", title: "Liberar a planilha para os bots: instalar o corredor de planilha no hook (v2.4)" },
+    { id: "o11", title: "Fechar você mesmo a #9326 (P1): o Jev barrou de novo, mesmo liberado" },
+    { id: "o15", title: "Criar a trava da planilha" },
+  ];
+  const corpusCtx = { ownerName: "Osvaldo", knownNames: ["Chief of Staff", "Monitor Chat Atendimento", "Redator KB Nuria"], itemIds: items.map((item) => item.id), items };
+  const origin = { botName: "Monitor", routineName: "Atendimento", firstAt: 0, lastAt: 0 };
+  it.each(ROUTINE_ASK_CORPUS.map(([round, text, expected, note, open]) => [round, note ?? "", text, expected, open] as const))("%s %s: %s", (_round, _note, text, expected, open) => {
+    const ctx = open ? { ...corpusCtx, itemIds: open.map((item) => item.id), items: open } : corpusCtx;
+    expect(routineOwnerAsks(text, ctx).map((ask) => routineAskItem(ask, origin).title)).toEqual(expected);
+  });
+
+  it("holds every finding's phrases", () => {
+    expect(ROUTINE_ASK_CORPUS.length).toBeGreaterThanOrEqual(118);
+    expect(new Set(ROUTINE_ASK_CORPUS.map(([, text]) => text)).size).toBe(ROUTINE_ASK_CORPUS.length);
   });
 });

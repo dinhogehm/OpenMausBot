@@ -1579,7 +1579,7 @@ export class BotAutonomy {
    * item ("pedido há 2 min") until the bot updates it. */
   /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
    * ("Talvez já resolvido"). An undefined value clears the field. */
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack">>): OwnerPending | null {
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "key">>): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {

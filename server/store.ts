@@ -345,6 +345,25 @@ export function threadTitleFrom(title?: string): string {
 }
 
 /** A task's name, taken from the first thing you asked it to do. */
+/** The words of a "yes", "OK", "got it" or "thanks" in Chinese and Japanese, and the particles around them. */
+const CJK_ACK = /ありがとう|ありがと|ございました|ございます|どうも|はい|了解|承知|しました|かしこまりました|わかりました|分かりました|大丈夫|です|ます|お願いします|よろしく|谢谢|謝謝|多谢|多謝|感谢|感謝|收到|好的|没问题|沒問題|没事|知道了|明白|可以|[好行嗯了啊吧呢哦呀你的ねよなぁ]/gu;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+/** A first message too short to name what the conversation is about: one
+ * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
+ * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
+export function tooShortToTitle(text: string): boolean {
+  // a script written without spaces (Chinese, Japanese) counts its characters: three name it ("写测试", "直して");
+  // a "yes", "OK", "got it" or "thanks" in any of its forms ("はい", "ありがとうございました", "收到了谢谢") never does.
+  // Korean is spaced like pt-BR (INSP-R13VIS A7, B4, C4)
+  const cjk = text.match(CJK) ?? [];
+  if (cjk.length) {
+    if (!(text.replace(CJK_ACK, "").match(CJK) ?? []).length) return true;
+    // beyond a "yes" and its particles, a verb is left: "好，改", "做吧" ask (INSP-R13VIS round 4)
+    if (cjk.length >= 2) return false;
+  }
+  return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
+}
+
 export function titleFromMessage(text: string): string {
   const line = text.trim().split("\n")[0]!.trim();
   return line.length > 48 ? `${line.slice(0, 47)}…` : line || UNTITLED_TASK;
@@ -2895,7 +2914,10 @@ export class Store {
   titleTaskFromFirstMessage(botId: string, text: string, threadId?: string): TaskRecord | null {
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId);
     if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
-    task.title = titleFromMessage(text);
+    // "Pode": the row keeps its sentinel title, and the next message gets the naming attempt
+    if (tooShortToTitle(text)) return null;
+    // "Pode\nabrir a issue da Marluce": a first line too short to name it carries the next one
+    task.title = titleFromMessage(tooShortToTitle(text.trim().split("\n")[0]!) ? text.trim().replace(/\s*\n\s*/g, " ") : text);
     task.titleFromFirstMessage = true;
     this.saveBots();
     this.emit({ type: "bot", botId });
