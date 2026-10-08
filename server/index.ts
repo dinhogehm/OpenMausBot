@@ -136,7 +136,7 @@ import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
-import { answerTouchesMoved, asksOwnerToDecide, botDiskItemFolders, botItemAsk, busyNote, DISK_NOT_AUTHORIZED, stripUncheckedRemovals, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskTextNotice, keepsFolders, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
+import { answerTouchesMoved, asksBotItemRemoval, DISK_BOT_ITEM_NOT_AUTHORIZED, asksOwnerToDecide, botDiskItemFolders, botItemAsk, busyNote, DISK_NOT_AUTHORIZED, stripUncheckedRemovals, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskTextNotice, keepsFolders, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
 import { checkItemRows, fixedRowWarning, RowCheckBackoff, supersededItems, supersededLine, supersedeRefs } from "./owner-pending-guard.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -26156,6 +26156,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (item.supersededBy) text = `${text}\n\n[Servidor: ${supersededLine(item.supersededBy)}]`;
       // a bot's mixed item whose removal went to the server's item: an answer about those folders authorizes nothing (R5-1)
       if (!item.key && item.diskMoved?.length && answer.kind !== "ask" && answerTouchesMoved(answer.text, item.diskMoved, item.diskMoved)) text = `${text}\n\n${DISK_NOT_AUTHORIZED}`;
+      // any bot's item about worktrees, mixed or not: a decision or words asking for a removal there
+      // authorizes no worktree removal; a report of what the owner did passes as it is (INSP-R13fol R6-1, R6-2)
+      else if (!item.key && answer.kind !== "ask" && asksBotItemRemoval(answer.text, item)) text = `${text}\n\n${DISK_BOT_ITEM_NOT_AUTHORIZED}`;
       try {
         assertWithinBudget(cfg, DATA_DIR);
       } catch (error) {

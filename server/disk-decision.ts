@@ -125,17 +125,45 @@ export function onlyRemoval(command: string): boolean {
 export function optionRemoves(option: { label: string; reply: string }, moved: readonly string[], folders: readonly string[]): boolean {
   const said = `${option.label}\n${option.reply}`;
   if (/worktree\s+remove/.test(said)) return true;
-  const removes = /(?<![\p{L}])(?:remov|apag|limp|exclu|descart)\p{L}*/iu.test(said);
-  if (removes && /(?<![\p{L}])(?:worktrees?|pastas?)(?![\p{L}])/iu.test(said)) return true;
+  // a decision that only reports what the owner already did ("Removi eu",
+  // "Apaguei só as pastas paradas") informs the bot and stays (INSP-R13fol R6-2)
+  if (reportsOwnRemoval(said)) return false;
+  const removes = REMOVAL_WORD.test(said);
+  if (removes && WORKTREE_WORD.test(said)) return true;
   // a folder taken to the server named — unless the decision only keeps it ("Mantenha a worktree da 9378")
   const keeps = !removes && /(?<![\p{L}])(?:mant\p{L}*|preserv\p{L}*|guard\p{L}*|deix\p{L}*)/iu.test(said);
   return !keeps && namedFolders(said, folders, true).some((name) => moved.includes(name));
 }
 
-/** The words of an answer that touch folders taken to the server: a moved folder named, or "worktree"/"pasta" (R5-1). */
-export function answerTouchesMoved(text: string, moved: readonly string[], folders: readonly string[]): boolean {
-  return namedFolders(text, folders, true).some((name) => moved.includes(name)) || /(?<![\p{L}])(?:worktrees?|pastas?)(?![\p{L}])/iu.test(text);
+const REMOVAL_WORD = /(?<![\p{L}])(?:remov|apag|limp|exclu|descart)\p{L}*/iu;
+// only a worktree: a plain "pasta" (cache, task-workspace) is not one (INSP-R13fol R6-2, R6-3)
+const WORKTREE_WORD = /(?<![\p{L}])worktrees?(?![\p{L}])/iu;
+
+/** First-person past tense of a removal: the owner telling what was done, not asking for it. */
+export function reportsOwnRemoval(text: string): boolean {
+  return /(?<![\p{L}])(?:removi|apaguei|limpei|exclu[ií]|descartei|removemos|apagamos|limpamos)(?![\p{L}])/iu.test(text) && !/(?<![\p{L}])pode\s+(?:remov|apag|limp|exclu|descart)/iu.test(text);
 }
+
+/** The words of an answer that touch folders taken to the server: a moved folder named, or "worktree" (R5-1, R6-3). */
+export function answerTouchesMoved(text: string, moved: readonly string[], folders: readonly string[]): boolean {
+  return namedFolders(text, folders, true).some((name) => moved.includes(name)) || WORKTREE_WORD.test(text);
+}
+
+/** An item of a bot (no server key) that is about worktrees: its words or commands name one. */
+export function itemTalksWorktrees(item: { title?: string; why?: string; command?: string; steps?: readonly { text: string; command?: string }[] }): boolean {
+  const said = [item.title, item.why, item.command, ...(item.steps ?? []).flatMap((step) => [step.text, step.command])].filter(Boolean).join("\n");
+  return WORKTREE_WORD.test(said) || /\/\.claude\/worktrees\//.test(said);
+}
+
+/** An answer to a bot's item that asks for a removal there (a decision or words; not a report of
+ * what the owner did) while that item is about worktrees: the server says it authorizes no worktree
+ * removal, whatever kind of item it is (INSP-R13fol R6-1: "Órfãs + cache" in a non-mixed item). */
+export function asksBotItemRemoval(answerText: string, item: Parameters<typeof itemTalksWorktrees>[0]): boolean {
+  if (reportsOwnRemoval(answerText) || !REMOVAL_WORD.test(answerText)) return false;
+  return WORKTREE_WORD.test(answerText) || itemTalksWorktrees(item);
+}
+
+export const DISK_BOT_ITEM_NOT_AUTHORIZED = "[Servidor: este item do bot não autoriza remover nenhuma worktree, por decisão ou por texto. Não remova worktree por ele; a remoção de worktree só sai de um item de disco do servidor, pelos botões dele (uso, segredos e push conferidos no Mac). O resto da decisão vale.]";
 
 /** The removal commands of a bot's item that name no worktree the server checks
  * (another repository, `nuria-platform/.worktrees/`, R5-2): out of the item,

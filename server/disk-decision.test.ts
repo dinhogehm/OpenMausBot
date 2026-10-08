@@ -698,7 +698,8 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     expect(split9378.folders.map((each) => each.name)).toEqual([w9378]);
     expect(split9378.steps.map((step) => step.command)).toEqual([item9378.steps[0]!.command, undefined, "rm -rf /tmp/graft-9378-aside"]);
     expect(split9378.mixedCommands).toBe(0);
-    // R5-1: its real decisions — "Pode remover" authorized in words; "Removi eu" too; "Manter" stays
+    // R5-1: its real decisions — "Pode remover" authorized in words is rewritten;
+    // R6-2: "Removi eu" only reports what the owner did, so it stays; "Manter" stays
     const decided9378 = d.splitMixedRemoval({ ...item9378, options: [
       { label: "Pode remover", reply: "Pode remover a worktree da 9378 e o cache /tmp/graft-9378-aside." },
       { label: "Removi eu", reply: "Removi a worktree da 9378 eu mesmo." },
@@ -706,9 +707,22 @@ describe("which bot items become the server's disk item (INSP-R13fol)", () => {
     ] }, [...folders, w9378])!;
     expect(decided9378.options!.map((option) => option.reply)).toEqual([
       "Pode remover: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
-      "Removi eu: a remoção de worktree vai pelo item de disco do servidor, conferido no Mac, pelos botões dele; por este item, não remova nenhuma worktree.",
+      "Removi a worktree da 9378 eu mesmo.",
       "Mantenha a worktree da 9378.",
     ]);
+    // R6-2: the URGENT item's real decisions report what the owner deleted: both stay as they are
+    expect(d.optionRemoves({ label: "Só as pastas", reply: "Apaguei só as pastas paradas; mantenha a worktree merge-deploy" }, [], folders)).toBe(false);
+    expect(d.optionRemoves({ label: "Apaguei as duas", reply: "Apaguei as pastas paradas e a worktree merge-deploy" }, [], folders)).toBe(false);
+    // R6-2/R6-3: a plain "pasta" (cache, task-workspace) is no worktree
+    expect(d.optionRemoves({ label: "Cache", reply: "Pode apagar a pasta de cache antiga" }, [], folders)).toBe(false);
+    expect(d.answerTouchesMoved("Apaguei as pastas de cache", [w9378], folders)).toBe(false);
+    // R6-1: any bot item about worktrees — not only a mixed one — gets the server's note on a removal ask
+    const disk0410 = { title: "Decidir como liberar disco: está em 4 GiB livres", why: "3 worktrees órfãs em .claude/worktrees e cache de CI", steps: [{ text: "Ver tamanho", command: "du -sh ~/Projetos/nuria-platform/.claude/worktrees/*" }] };
+    expect(d.asksBotItemRemoval("pode salvar as órfãs no GitHub e remover, e pode apagar o cache antigo de CI", disk0410)).toBe(true);
+    expect(d.asksBotItemRemoval("Removi as órfãs no terminal", disk0410)).toBe(false);
+    expect(d.asksBotItemRemoval("Pode remover o arquivo de log", { title: "Logs grandes", steps: [] })).toBe(false);
+    expect(d.asksBotItemRemoval("Pode remover a worktree OpenMausBot-r13fol", { title: "Disco", steps: [] })).toBe(true);
+    expect(d.DISK_BOT_ITEM_NOT_AUTHORIZED).toMatch(/não autoriza remover nenhuma worktree/);
     // an answer to the bot's item about the folders taken to the server authorizes nothing
     expect(d.answerTouchesMoved("pode remover a 9378 também", [w9378], [w9378])).toBe(true);
     expect(d.answerTouchesMoved(`Remova ${w9378}`, [w9378], [w9378])).toBe(true);
