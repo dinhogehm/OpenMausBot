@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree, claudeConfigPath, trustLinkForClaude,
+  appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
 } from "./own-worktrees.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -520,59 +520,5 @@ describe("the folder the app is given", () => {
     const link = ownLinkPath(repo, "9353-x");
     expect(link).toBe("/Users/osvaldo/Projetos/.omb-worktree-links/nuria-platform/9353-x");
     expect(appLinkFolder(link)).toBe(link);
-  });
-});
-
-describe("the alias trusted in the Claude app ahead", () => {
-  const setup = (projects: Record<string, unknown>) => {
-    const dir = temp();
-    const configPath = join(dir, ".claude.json");
-    writeFileSync(configPath, JSON.stringify({ numStartups: 3, projects }), { mode: 0o600 });
-    const read = () => JSON.parse(readFileSync(configPath, "utf8")) as { numStartups: number; projects: Record<string, { hasTrustDialogAccepted?: boolean; allowedTools?: string[] }> };
-    return { dir, configPath, read };
-  };
-  const repo = "/Users/x/Projetos/nuria-platform";
-  const link = "/Users/x/Projetos/.omb-worktree-links/nuria-platform/9029-x";
-
-  it("is trusted when its repository is, keeping the rest of the file, under the app's lock", async () => {
-    const { configPath, read } = setup({ [repo]: { hasTrustDialogAccepted: true, allowedTools: ["a"] } });
-    expect(await trustLinkForClaude(link, repo, { configPath })).toBeNull();
-    const after = read();
-    expect(after.projects[link]?.hasTrustDialogAccepted).toBe(true);
-    expect(after.projects[repo]).toEqual({ hasTrustDialogAccepted: true, allowedTools: ["a"] });
-    expect(after.numStartups).toBe(3);
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
-    expect(existsSync(`${configPath}.lock`)).toBe(false);
-    // already trusted: nothing to do
-    expect(await trustLinkForClaude(link, repo, { configPath })).toBeNull();
-  });
-
-  it("is trusted when a folder above the repository is", async () => {
-    const { configPath, read } = setup({ "/Users/x/Projetos": { hasTrustDialogAccepted: true } });
-    expect(await trustLinkForClaude(link, repo, { configPath })).toBeNull();
-    expect(read().projects[link]?.hasTrustDialogAccepted).toBe(true);
-  });
-
-  it("is left to the person when the repository was never trusted", async () => {
-    const { configPath, read } = setup({ [repo]: { hasTrustDialogAccepted: false } });
-    expect(await trustLinkForClaude(link, repo, { configPath })).toContain("não é confiável");
-    expect(read().projects[link]).toBeUndefined();
-  });
-
-  it("waits for a held lock and never writes without it; a stale one is taken", async () => {
-    const { configPath, read } = setup({ [repo]: { hasTrustDialogAccepted: true } });
-    mkdirSync(`${configPath}.lock`);
-    expect(await trustLinkForClaude(link, repo, { configPath, lockWaitMs: 60 })).toContain("ocupada");
-    expect(read().projects[link]).toBeUndefined();
-    expect(existsSync(`${configPath}.lock`)).toBe(true); // someone else's: not removed
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(`${configPath}.lock`, old, old);
-    expect(await trustLinkForClaude(link, repo, { configPath, lockWaitMs: 60 })).toBeNull();
-    expect(read().projects[link]?.hasTrustDialogAccepted).toBe(true);
-  });
-
-  it("reads Claude's file where the app does", () => {
-    expect(claudeConfigPath({}, "/Users/x")).toBe("/Users/x/.claude.json");
-    expect(claudeConfigPath({ CLAUDE_CONFIG_DIR: "/c" }, "/Users/x")).toBe("/c/.claude.json");
   });
 });
