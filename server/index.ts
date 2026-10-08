@@ -131,12 +131,13 @@ import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
 import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-language.ts";
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
-import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
+import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleLogLine, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
-import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
+import { answerTouchesMoved, asksBotItemRemoval, DISK_BOT_ITEM_NOT_AUTHORIZED, asksOwnerToDecide, botDiskItemFolders, botItemAsk, busyNote, DISK_NOT_AUTHORIZED, stripUncheckedRemovals, diskAnswerLine, diskChangedText, DISK_BRANCH_LABEL, DISK_PUSH_LABEL, DISK_REPLACED_NOTE, diskTextNotice, keepsFolders, splitMixedRemoval, diskStateLine, duSize, filesBelow, goneDiskItem, keyFolders, keptOutOf, namedFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
+import { checkItemRows, fixedRowWarning, RowCheckBackoff, supersededItems, supersededLine, supersedeRefs } from "./owner-pending-guard.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -312,6 +313,7 @@ import {
   STEPS_REPORT_PREFIX,
   type OwnerPendingStep,
   type OwnerPendingOption,
+  type DiskPushCheck,
   practicalMissing,
   REMIND_REPORT_PREFIX,
   ownerPendingVisible,
@@ -498,7 +500,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersLogLine, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8172,6 +8174,10 @@ bus.subscribe((event: RuntimeEvent) => {
         }
         // the bot's reply says a routine's item is resolved: it closes (R12-visual N22)
         if (terminal?.text && bot) closeRoutineAsksSaid(bot.id, terminal.text);
+        // a reply that leaves worktrees to the owner in text only opens the disk item (R13-followup #4); a routine's run is openDiskDecision's
+        if (terminal?.text && bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId && !store.groupByThread(event.threadId)) openDiskDecisionFromReply(bot.id, event.threadId, terminal.text);
+        // "Push e remover" answered: the remote is looked at after the bot's turn (INSP-R13fol #2)
+        if (bot && autonomy.diskPushChecksOf(bot.id).length) void diskItemTurn(() => checkDiskPushes(bot.id, event.threadId)).catch((error) => console.error(`[disk] push check: ${error instanceof Error ? error.message : String(error)}`));
         // and the owner's words that started it may have dealt with one (INSP-N22 r2 F2) — never in a routine's own run
         if (bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId) closeRoutineAsksOwnerSaid(bot.id, event.threadId);
       }
@@ -9242,11 +9248,18 @@ async function checkPower(): Promise<void> {
  * desk, with the list (R12-followup #1). Only the desktop app's server looks
  * (OMB_PIPELINE_IDLE=1 lets a test's server look too), every 10 min. */
 const PIPELINE_IDLE_FILE = join(DATA_DIR, "pipeline-idle.json");
-const pipelineIdle: { state: PipelineIdleState | null; lastAt: number; running: boolean } = { state: null, lastAt: 0, running: false };
-function ghJson(args: string[]): Promise<string | null> {
+const pipelineIdle: { state: PipelineIdleState | null; lastAt: number; running: boolean; lastWhy?: string } = { state: null, lastAt: 0, running: false };
+/** `gh` with JSON out, or why it failed (said in the log, R13-followup #5). */
+function ghJson(args: string[]): Promise<{ out: string | null; error?: string }> {
   return new Promise((resolve) => {
-    execFileCc("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => resolve(error ? null : String(stdout)));
+    execFileCc("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout, stderr) => resolve(error ? { out: null, error: `gh ${args.slice(0, 2).join(" ")} falhou: ${(String(stderr ?? "").trim().split("\n").at(-1) || error.message).slice(0, 160)}` } : { out: String(stdout) }));
   });
+}
+/** A look's why, logged when it changed. */
+function logPipelineIdleWhy(why: string): void {
+  const line = pipelineIdleLogLine(pipelineIdle.lastWhy, why);
+  pipelineIdle.lastWhy = why;
+  if (line) console.log(line);
 }
 async function checkPipelineIdle(): Promise<void> {
   const enabled = process.env.OMB_PIPELINE_IDLE === "1" || (DESKTOP_MANAGED && !process.env.VITEST);
@@ -9262,24 +9275,27 @@ async function checkPipelineIdle(): Promise<void> {
     }
     const stopped = existsSync(NURIA_STOP_FILE);
     const prs = stopped ? null : await ghJson(idlePrsArgs(PRODUCTION_REPO));
-    const openPrs = stopped ? 0 : prs === null ? null : parseOpenPrCount(prs, Date.now());
+    const openPrs = stopped ? 0 : prs?.out == null ? null : parseOpenPrCount(prs.out, Date.now());
+    let unknown = prs?.error ?? (prs?.out != null && openPrs === null ? "gh pr list ilegível" : undefined);
     let releaseInFlight: boolean | null = false;
     if (!stopped && openPrs === 0) {
       await refreshReleaseHold();
       // read now by this call or another: anything older, or still being read, is unknown (INSP-R12F F4)
       releaseInFlight = releaseInFlightOf(releaseHold, Date.now(), 2 * RELEASE_HOLD_EVERY_MS);
+      if (releaseInFlight === null) unknown = "release ainda não lido";
     }
     const now = Date.now();
     let candidates: IdleCandidate[] = [];
     if (!stopped && openPrs === 0 && releaseInFlight === false) {
       const issues = await ghJson(idleIssuesArgs(PRODUCTION_REPO));
-      const parsed = issues === null ? null : parseIdleIssues(issues);
-      if (parsed === null) return;
+      const parsed = issues.out === null ? null : parseIdleIssues(issues.out);
+      if (parsed === null) return logPipelineIdleWhy(`estado desconhecido (${issues.error ?? "gh issue list ilegível"})`);
       // a bot named it in the last day, or an open "Precisa de você" item waits on the owner for it
       const taken = new Set([...mentionedNumbers(botTextsWithRefsSince(now - PIPELINE_IDLE_QUIET_MS)), ...heldByOwner(store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)))]);
       candidates = idleCandidates(parsed, ccLedger.all(), taken, now);
     }
-    const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now });
+    const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now, ...(unknown ? { unknown } : {}) });
+    logPipelineIdleWhy(step.why);
     if (!step.wake) return;
     const desk = chiefDeskThread(chief);
     // "told" is kept only once the report is on the Chief's desk (INSP-R12F F5)
@@ -9569,6 +9585,52 @@ async function reasonRefsLine(wake: BotWake): Promise<string | null> {
   }
 }
 
+/** A bot's item that says another item's commands must not run ("Os comandos
+ * antigos para a linha 190 apagariam a linha dela: não rode esses", the
+ * Monitor's o1 on 06/10) marks that sibling superseded — the Chief's o2 kept
+ * offering them and the client's row was overwritten (R13-intake #1). Its
+ * decisions and commands go off, said by which item of which bot. */
+function markSuperseded(bot: { id: string; name: string }, item: OwnerPending): string[] {
+  const refs = supersedeRefs(item, store.bots.map((each) => each.name));
+  if (!refs.length) return [];
+  const now = Date.now();
+  const open = store.bots.flatMap((each) => autonomy.ownerPendingOf(each.id));
+  const hits = supersededItems({ botId: bot.id, id: item.id, at: now }, refs, open, (botId) => store.bot(botId)?.name ?? "");
+  for (const { item: sibling, text } of hits) {
+    autonomy.patchOwnerPending(sibling.botId, sibling.id, { supersededBy: { botId: bot.id, botName: bot.name, id: item.id, at: now, text } });
+    if (store.taskByThread(sibling.botId, sibling.threadId)) store.appendMessage(sibling.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${sibling.id} superado pelo ${item.id} do ${bot.name} — decisões e comandos desligados`, 240), ok: true } });
+    refreshBotRow(sibling.botId);
+    console.log(`[owner-pending] ${sibling.id} of ${store.bot(sibling.botId)?.name ?? sibling.botId} superseded by ${item.id} of ${bot.name}: ${text}`);
+  }
+  return hits.map(({ item: sibling }) => (sibling.botId === bot.id ? sibling.id : `${sibling.id} do ${store.bot(sibling.botId)?.name ?? sibling.botId}`));
+}
+
+/** Items whose commands write a fixed row of a sheet, older than 6 h: the
+ * row read now (`gog sheets get … --plain`), at most every 30 min each, so
+ * the notice says what it holds (R13-intake #1). Only the desktop app's
+ * server reads (OMB_ROW_CHECK=1 lets a test's server read too). */
+const rowCheck = { running: false, backoff: new RowCheckBackoff() };
+async function checkFixedRows(): Promise<void> {
+  if (!(process.env.OMB_ROW_CHECK === "1" || (DESKTOP_MANAGED && !process.env.VITEST))) return;
+  // one pass at a time: a slow gog (20 s) never stacks passes (INSP-R13fol #15)
+  if (rowCheck.running) return;
+  rowCheck.running = true;
+  try {
+    await checkItemRows(store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)), {
+      now: Date.now(),
+      backoff: rowCheck.backoff,
+      gog: (args) => new Promise((resolve) => execFileCc(process.env.OMB_GOG_BIN || "gog", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout, stderr) => resolve(error ? { out: null, error: (String(stderr ?? "").trim().split("\n").at(-1) || error.message).slice(0, 160) } : { out: String(stdout) }))),
+      save: (item, checks) => {
+        autonomy.patchOwnerPending(item.botId, item.id, { rowChecks: checks });
+        refreshBotRow(item.botId);
+      },
+      log: (line) => console.log(line),
+    });
+  } finally {
+    rowCheck.running = false;
+  }
+}
+
 async function autonomyTick(): Promise<void> {
   try {
     askStepsForOlderItems();
@@ -9578,6 +9640,8 @@ async function autonomyTick(): Promise<void> {
   void checkProductionRelease().catch((error) => console.error(`[release] ${error instanceof Error ? error.message : String(error)}`));
   void checkPower().catch((error) => console.error(`[power] ${error instanceof Error ? error.message : String(error)}`));
   void checkPipelineIdle().catch((error) => console.error(`[pipeline-idle] ${error instanceof Error ? error.message : String(error)}`));
+  void checkFixedRows().catch((error) => console.error(`[owner-pending] row check: ${error instanceof Error ? error.message : String(error)}`));
+  if (store.bots.some((bot) => autonomy.diskPushChecksOf(bot.id).some((check) => Date.now() - check.at > DISK_PUSH_CHECK_MS))) void diskItemTurn(sweepDiskPushChecks).catch((error) => console.error(`[disk] push sweep: ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -10762,9 +10826,13 @@ function foldersInUse(opts: { quietWorkspaces?: Map<string, string> } = {}): str
   return folders;
 }
 const canonPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
-/** A folder's size in KB (`du -sk`, at most 2 min), or null. */
-const duKb = (path: string) => new Promise<number | null>((resolve) => {
-  execFileCc("/usr/bin/du", ["-sk", path], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? null : Number(/^(\d+)/.exec(String(stdout).trim())?.[1]) || null));
+/** A folder's size in KB (`du -sk`, at most 2 min), or null. An empty
+ * folder is 0 KB, not unmeasured (R13-followup #5: ~190 "(? KB)"). */
+const duKb = (path: string, timeoutMs = 120_000) => new Promise<number | null>((resolve) => {
+  execFileCc("/usr/bin/du", ["-sk", path], { timeout: Math.max(1, Math.round(timeoutMs)), maxBuffer: 1024 * 1024 }, (error, stdout) => {
+    const kb = /^(\d+)/.exec(String(stdout).trim())?.[1];
+    resolve(error || kb === undefined ? null : Number(kb));
+  });
 });
 async function cleanReleasedWorktrees(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
@@ -10839,7 +10907,8 @@ async function cleanReleasedWorktrees(): Promise<void> {
       // every one measured (du, 2 min each at most), so the report orders by size, not by disk order (INSP-J r1 #7b)
       for (const each of stale) each.sizeKb = await duKb(each.path);
       releasedCleanup.lastStale = { at: Date.now(), folders: stale };
-      console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
+      // said as the chip says it: the listed ones, the small and the unmeasured counted (R13-followup #5)
+      console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${staleFoldersLogLine(stale)}`);
     }
     if (!stale.length) releasedCleanup.lastStale = { at: Date.now(), folders: [] };
     const staleTold = staleNews ? staleFoldersReport(stale) : null;
@@ -10987,6 +11056,9 @@ threadSignals = (threadId) => {
     ...(item.demotedAt ? { demotedAt: item.demotedAt } : {}),
     // "Delegar a um agente": the button, why not, or the delegation running or back (lote del)
     ...wireDelegation(item),
+    // another item said its commands must not run; a fixed sheet row that may have changed (R13-intake #1)
+    ...(item.supersededBy ? { superseded: { by: `${item.supersededBy.id} do ${item.supersededBy.botName}`, at: item.supersededBy.at, text: item.supersededBy.text } } : {}),
+    ...(() => { const warning = fixedRowWarning(item, Date.now()); return warning ? { rowWarning: warning } : {}; })(),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -15162,22 +15234,106 @@ async function diskFolderFacts(path: string, used: readonly string[], processCwd
   const readdir = (dir: string) => readdirSync(dir, { withFileTypes: true }).map((entry) => ({ name: entry.name, dir: entry.isDirectory() }));
   const state = await gitAsync(["-C", path, "status", "--porcelain", "--ignored"]).then((out) => porcelainState(out, (dir) => filesBelow(join(path, dir), readdir)), () => null);
   const unpushed = await gitAsync(["-C", path, "branch", "-r", "--contains", "HEAD"]).then((out) => out.trim().length === 0, () => null);
-  return { inUse, dirty: state ? state.dirty : null, unpushed, ...(state?.ignored.length ? { ignored: state.ignored } : {}), ...(state?.secrets.length ? { secrets: state.secrets } : {}) };
+  // its branch and HEAD: "push primeiro" names the branch, and the server checks the remote after it (INSP-R13fol #2)
+  const branch = await gitAsync(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]).then((out) => out.trim(), () => "");
+  const head = await gitAsync(["-C", path, "rev-parse", "HEAD"]).then((out) => out.trim(), () => "");
+  return {
+    inUse, dirty: state ? state.dirty : null, unpushed, ...(state?.ignored.length ? { ignored: state.ignored } : {}), ...(state?.secrets.length ? { secrets: state.secrets } : {}),
+    ...(branch && branch !== "HEAD" ? { branch } : {}), ...(branch === "HEAD" ? { detached: true } : {}), ...(/^[0-9a-f]{40}$/.test(head) ? { head } : {}),
+  };
+}
+
+/** The repository the worktrees belong to. */
+const NURIA_MAIN = join(homedir(), "Projetos", "nuria-platform");
+
+/** "Push e remover" answered (or the owner's words with commits only here):
+ * the folders whose commit must reach the remote before they go. After the
+ * turn that CARRIES the answer — in the conversation it was sent to, once
+ * the answer is there — the server looks at the remote; a commit still only
+ * on this Mac, the folder kept or already removed, is said to the bot, so no
+ * commit is lost unseen (INSP-R13fol #2, R2-4). Kept in the ledger. */
+const DISK_PUSH_CHECK_MS = Number(process.env.OMB_DISK_PUSH_CHECK_MS) > 0 ? Number(process.env.OMB_DISK_PUSH_CHECK_MS) : 24 * 3_600_000;
+
+async function checkDiskPushes(botId: string, threadId: string): Promise<void> {
+  const now = Date.now();
+  for (const check of autonomy.diskPushChecksOf(botId)) {
+    if (now - check.at > DISK_PUSH_CHECK_MS) { await lookAtRemote(check, true); continue; }
+    // only the turn that carried the answer: its conversation, with the answer in it
+    if (check.threadId !== threadId) continue;
+    const carried = store.messagesFor(threadId).some((message) => message.role === "user" && message.at >= check.at - 1_000 && String(message.text ?? "").includes(check.marker));
+    if (!carried) continue;
+    await lookAtRemote(check, false);
+  }
+}
+
+/** A check never fired (its answer edited, sent another way, the removal done elsewhere): at 24 h the remote is looked at anyway (R3-4). */
+async function sweepDiskPushChecks(): Promise<void> {
+  const now = Date.now();
+  for (const bot of store.bots) {
+    for (const check of autonomy.diskPushChecksOf(bot.id)) if (now - check.at > DISK_PUSH_CHECK_MS) await lookAtRemote(check, true);
+  }
+}
+
+/** Looks at the remote for a check's commits, once, and settles it: a commit
+ * still only on this Mac is said to the bot and, in its conversation, to the
+ * owner; at expiry, said even though its turn was never seen (R3-4). */
+async function lookAtRemote(check: DiskPushCheck, expired: boolean): Promise<void> {
+  autonomy.dropDiskPushCheck(check);
+  {
+    const lines: string[] = [];
+    for (const folder of check.folders) {
+      // the remote-tracking branches holding the commit: a push from the worktree updates them
+      const remote = await gitAsync(["-C", NURIA_MAIN, "branch", "-r", "--contains", folder.head]).then((out) => out.trim(), () => null);
+      if (remote) {
+        console.log(`[disk] ${folder.name}: ${folder.head.slice(0, 9)} is on the remote (${remote.split("\n")[0]!.trim()}); it may go`);
+        continue;
+      }
+      const there = existsSync(join(NURIA_WORKTREES, folder.name));
+      lines.push(there
+        ? `${folder.name}: o commit ${folder.head.slice(0, 9)}${folder.branch ? ` (branch ${folder.branch})` : ""} ainda não está em nenhuma branch remota — não remova antes do push confirmado`
+        : `${folder.name} foi removida, mas o commit ${folder.head.slice(0, 9)}${folder.branch ? ` (branch ${folder.branch})` : ""} não está em nenhuma branch remota: ele só existe neste Mac — faça o push dessa branch agora e me confirme`);
+    }
+    if (lines.length) {
+      autonomy.addReport(check.botId, check.threadId, `[Servidor: push conferido no remoto${expired ? ", 24 h depois da resposta" : ""}] ${lines.join("; ")}.`);
+      store.appendMessage(check.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Disco: push ainda não está no remoto${expired ? " (24 h depois)" : ""} — ${check.folders.filter((each) => lines.some((line) => line.startsWith(each.name))).map((each) => each.name).join(", ")}`, 240), ok: false } });
+      refreshBotRow(check.botId);
+      console.log(`[disk] push checked on the remote${expired ? " at expiry" : ""}: ${lines.join("; ")}`);
+    } else if (expired) {
+      console.log(`[disk] push check expired; every commit is on the remote (${check.folders.map((each) => each.name).join(", ")})`);
+    }
+  }
 }
 
 /** An open disk item checked again on the Mac now (INSP-R12F r2 R2-1): a
  * folder that came into use or is no longer clean changes the item to what
  * holds now; with none left, it is closed with why. Folders gone from the
  * disk drop out. */
-async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string): Promise<{ outcome: "keep" | "replace" | "close"; line: string; note?: string }> {
+async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string, answer?: { kind: string; label?: string; text?: string }): Promise<{ outcome: "keep" | "replace" | "close"; line: string; note?: string }> {
   const folders = openItemFolders(item).filter((folder) => existsSync(join(NURIA_WORKTREES, folder.name)));
   const facts = new Map<string, FolderFacts>();
   for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
   // what the Chief reads under the owner's answer: the state found just now (INSP-R12F r3 R3-2)
   const line = diskStateLine(openItemFolders(item).map((folder) => folder.name), facts, Date.now());
-  const fresh = folders.length ? diskDecisionItem(folders, facts, NURIA_WORKTREES, text) : null;
+  // checked again, it keeps what it said of its origin and of the folders it kept out
+  const kept = keptOutOf(item);
+  const who = item.why?.split(" Juntas ocupam ")[0];
+  const fresh = folders.length ? diskDecisionItem(folders, facts, NURIA_WORKTREES, text, { ...(who ? { who } : {}), ...(kept.length ? { kept } : {}) }) : null;
   const result = diskDecisionRecheck(item.key!, fresh, folders.length ? busyNote(folders.map((folder) => folder.name), facts) : "as pastas não existem mais");
-  if (result.action === "keep") return { outcome: "keep", line };
+  if (result.action === "keep") {
+    // under the owner's answer, only what the answer itself allows, and every other folder forbidden (R13-followup #2, INSP-R13fol #1-#3)
+    const allowed = answer ? diskAnswerLine(folders.map((folder) => folder.name), facts, answer, kept) : null;
+    // what must be pushed before it goes: looked for on the remote after the turn that carries the answer (INSP-R13fol #2, R2-4)
+    const covered = answer?.text && answer.kind === "option" && (answer.label === DISK_PUSH_LABEL || answer.label === DISK_BRANCH_LABEL) ? namedFolders(answer.text, folders.map((folder) => folder.name)) : [];
+    const pending = covered.filter((name) => facts.get(name)?.unpushed !== false && facts.get(name)?.head && !facts.get(name)?.inUse);
+    if (pending.length && answer?.text) {
+      autonomy.addDiskPushCheck({
+        botId: item.botId, threadId: ownerTurnThread(item.botId, item.threadId), at: Date.now(), // the item's id with the answer's first words, as ownerPendingReplyText writes them: two items answered alike stay apart (R3-4)
+        marker: `(${item.id}): ${answer.text.trim().split("\n")[0]!.slice(0, 50)}`,
+        folders: pending.map((name) => ({ name, head: facts.get(name)!.head!, ...(facts.get(name)!.branch ? { branch: facts.get(name)!.branch! } : {}) })),
+      });
+    }
+    return { outcome: "keep", line: allowed ? `${line}\n${allowed}` : line };
+  }
   autonomy.resolveOwnerPending({ botId: item.botId, key: item.key!, by: "server", note: result.action === "replace" ? DISK_REPLACED_NOTE : result.note });
   if (result.action === "replace") {
     const opened = autonomy.addOwnerPending(item.botId, item.threadId, result.item);
@@ -15274,28 +15430,121 @@ async function openDiskDecisionNow(run: RoutineRun, routineName: string, threadI
       for (const item of openItems) await recheckDiskItem(item, used, processCwds, text);
     }
     if (!asksOwnerToDecide(text)) return;
-    let names: string[];
-    try { names = readdirSync(NURIA_WORKTREES); } catch { return; }
-    const folders = diskDecisionFolders(text, names);
-    if (!folders.length) return;
-    // checked on the Mac, not taken from the routine's words
-    const used = foldersInUse();
-    const processCwds = await allProcessCwds();
-    const facts = new Map<string, FolderFacts>();
-    for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
-    const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text);
-    if (!item) return;
-    const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(botId), autonomy.resolvedOwnerPendingOf(botId), Date.now());
-    if (!plan.add) return;
-    for (const key of plan.replace) autonomy.resolveOwnerPending({ botId, key, by: "server", note: "substituído pela lista nova da rotina de disco" });
-    const known = autonomy.ownerPendingOf(botId).some((open) => open.key === item.key);
-    const opened = autonomy.addOwnerPending(botId, threadId, item);
-    if (!known) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}): ${item.title}`, 240), ok: true } });
-    refreshBotRow(botId);
-    console.log(`[disk] the routine left ${folders.length} folder(s) to the owner: ${known ? "item refreshed" : `item ${opened.id} opened`} (${item.key})`);
+    await openDiskDecisionFromText(botId, threadId, text, "the routine");
   } catch (error) {
     console.error(`[disk] decision item: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** The folders' facts on the Mac now; a size the text did not give is
+ * measured (du) within `duBudgetMs` in all — a bot's request waits on it, so
+ * past the budget the size stays "?" (INSP-R13fol #10). */
+async function diskFactsFor(folders: LeftFolder[], duBudgetMs = 120_000): Promise<Map<string, FolderFacts>> {
+  const used = foldersInUse();
+  const processCwds = await allProcessCwds();
+  const facts = new Map<string, FolderFacts>();
+  const until = Date.now() + duBudgetMs;
+  for (const folder of folders) {
+    const path = join(NURIA_WORKTREES, folder.name);
+    facts.set(folder.name, await diskFolderFacts(path, used, processCwds));
+    // "As duas estão vazias" of two 2,2G worktrees (06/10 23:10): the Mac says the size (R13-followup #4)
+    if (folder.size === "?" && until - Date.now() > 500) {
+      const kb = await duKb(path, until - Date.now());
+      if (kb !== null) folder.size = duSize(kb);
+    }
+  }
+  return facts;
+}
+
+/** A text that leaves worktrees to the owner — a disk routine's run, or a
+ * bot's reply ("a remoção fica com você. Se quiser apagá-las:" with the
+ * commands, 06/10 23:10, R13-followup #4) — opens ONE item, checked on the Mac. */
+async function openDiskDecisionFromText(botId: string, threadId: string, text: string, said: string): Promise<void> {
+  let names: string[];
+  try { names = readdirSync(NURIA_WORKTREES); } catch { return; }
+  const folders = diskDecisionFolders(text, names);
+  if (!folders.length) return;
+  // checked on the Mac, not taken from the routine's words
+  const facts = await diskFactsFor(folders);
+  const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text, said === "the routine" ? {} : { who: "A remoção dessas worktrees é sua; o servidor conferiu cada uma no Mac." });
+  if (!item) return;
+  const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(botId), autonomy.resolvedOwnerPendingOf(botId), Date.now());
+  if (!plan.add) return;
+  for (const key of plan.replace) autonomy.resolveOwnerPending({ botId, key, by: "server", note: "substituído pela lista nova da rotina de disco" });
+  const known = autonomy.ownerPendingOf(botId).some((open) => open.key === item.key);
+  const opened = autonomy.addOwnerPending(botId, threadId, item);
+  if (!known) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}): ${item.title}`, 240), ok: true } });
+  refreshBotRow(botId);
+  console.log(`[disk] ${said} left ${folders.length} folder(s) to the owner: ${known ? "item refreshed" : `item ${opened.id} opened`} (${item.key})`);
+}
+
+/** A bot's reply that leaves worktrees to the owner, in text only: the item it did not open. */
+function openDiskDecisionFromReply(botId: string, threadId: string, text: string): void {
+  if (!replyLeavesDiskToOwner(text)) return;
+  void diskItemTurn(() => openDiskDecisionFromText(botId, threadId, text, "a bot's reply")).catch((error) => console.error(`[disk] decision item: ${error instanceof Error ? error.message : String(error)}`));
+}
+
+/** A bot's own "Precisa de você" item about removing worktrees (the Chief's
+ * o28 on 06/10) is the server's disk item: the folders it names checked on
+ * the Mac — use, secrets, nested worktrees — and what the bot itself said
+ * keeps one ("em uso agora (lsof)", "manter"); its steps and decisions are
+ * the server's, and the owner's answer is checked again (R13-followup #2).
+ * Null when the item is not about removing worktrees; otherwise what the
+ * bot reads back. `replacing` is the bot's item it rewrote (update). */
+/** A mixed item's removal part (INSP-R13fol R2-3: o1 URGENTE of 05/10 had a
+ * `git worktree remove` next to a `rm -rf`): the server's disk item opened
+ * beside it for those folders, and the bot's steps without the removal
+ * commands. Null when the item is not mixed or names no worktree. */
+async function mixedRemovalBeside(bot: { id: string; name: string }, threadId: string, input: { title: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): Promise<{ steps: OwnerPendingStep[]; options?: OwnerPendingOption[]; moved?: string[]; message: string } | null> {
+  let names: string[];
+  try { names = readdirSync(NURIA_WORKTREES); } catch { names = []; }
+  const split = splitMixedRemoval(input, names);
+  if (!split) {
+    // a removal of a worktree the server does not check (another repository, .worktrees/): out of the item, whole (R5-2)
+    if (botItemAsk(input) === "other") return null;
+    const unchecked = stripUncheckedRemovals(input);
+    if (!unchecked) return null;
+    console.log(`[disk] ${bot.name}'s item: ${unchecked.count} removal(s) of a worktree the server does not check taken out`);
+    return { steps: unchecked.steps, ...(unchecked.options ? { options: unchecked.options } : {}), message: `Tirei do seu item ${unchecked.count === 1 ? "o comando" : `${unchecked.count} comandos`} de remoção de uma worktree que o servidor não confere (fora de nuria-platform/.claude/worktrees): não a remova por este item; peça ao dono que a remova no terminal.` };
+  }
+  const opened = await serverDiskItem(bot, threadId, input, undefined, split.folders);
+  // a command that mixed the removal with other steps left whole: the bot writes the other part on its own (INSP-R13fol R4-1)
+  const mixed = split.mixedCommands ? ` ${split.mixedCommands === 1 ? "Um comando seu misturava" : `${split.mixedCommands} comandos seus misturavam`} remoção de worktree com outros passos e saiu inteiro: se a outra parte ainda vale, reescreva-a num passo próprio, sem remoção de worktree.` : "";
+  return { steps: split.steps, ...(split.options ? { options: split.options } : {}), moved: split.folders.map((folder) => folder.name), message: `${opened?.message ?? "Tirei do seu item os comandos de remoção de worktree: a remoção vai pelo item de disco do servidor."}${mixed} As decisões deste item que removiam worktree agora apontam para o item do servidor.` };
+}
+
+async function serverDiskItem(bot: { id: string; name: string }, threadId: string, input: { title: string; why?: string; command?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }, replacing?: OwnerPending, beside?: LeftFolder[]): Promise<{ message: string; opened?: OwnerPending } | null> {
+  let names: string[];
+  try { names = readdirSync(NURIA_WORKTREES); } catch { return null; }
+  // `beside`: the removal part of a mixed item, the server's item opened next to the bot's (INSP-R13fol R2-3)
+  const folders = beside ?? botDiskItemFolders(input, names);
+  if (!folders.length) return null;
+  return diskItemTurn(async () => {
+    // the bot's request waits on this: du gets 3 s in all, the rest stays "?" (INSP-R13fol #10)
+    const facts = withBotKeeps(folders, await diskFactsFor(folders, 3_000));
+    const text = [input.title, input.why ?? "", ...(input.steps ?? []).map((step) => step.text)].join("\n");
+    const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text, { who: `${bot.name} não remove worktrees sem você; o servidor conferiu cada uma no Mac.` });
+    const dropped = replacing ? autonomy.resolveOwnerPending({ botId: bot.id, id: replacing.id, by: "server", note: "trocado pelo item de disco do servidor, conferido no Mac" }) : [];
+    const was = dropped.length ? ` Fechei o seu ${replacing!.id}.` : "";
+    if (!item) {
+      refreshBotRow(bot.id);
+      console.log(`[disk] ${bot.name}'s item about worktrees: none may go now (${folders.map((folder) => folder.name).join(", ")})`);
+      return { message: `O servidor conferiu essas pastas no Mac agora e nenhuma pode sair: ${busyNote(folders.map((folder) => folder.name), facts)}. Não abri o item.${was} Diga isso ao dono em uma linha, sem comandos de remoção.` };
+    }
+    const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(bot.id), autonomy.resolvedOwnerPendingOf(bot.id), Date.now());
+    if (!plan.add) {
+      refreshBotRow(bot.id);
+      return { message: `O servidor já tem um item de disco com essas pastas, ou o dono decidiu sobre elas há menos de 7 dias: não abri outro.${was} Veja owner_pending list.` };
+    }
+    for (const key of plan.replace) autonomy.resolveOwnerPending({ botId: bot.id, key, by: "server", note: "substituído pela lista nova conferida no Mac" });
+    const opened = autonomy.addOwnerPending(bot.id, threadId, item);
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}), conferido no Mac: ${item.title}`, 240), ok: true } });
+    refreshBotRow(bot.id);
+    const kept = item.diskKept.join("; ");
+    console.log(`[disk] ${bot.name}'s own item about worktrees is the server's now: ${opened.id} (${item.key})${kept ? `; kept out: ${kept}` : ""}`);
+    if (beside) return { opened, message: `A remoção de worktrees deste item vai pelo item de disco do servidor, conferido no Mac: ${opened.id}: ${item.title}. Tirei do seu item os comandos de remoção; o resto ficou como você escreveu.${kept ? ` Fora do item de disco, não mexer: ${kept}.` : ""} Não remova worktree por este item.` };
+    return { opened, message: `O servidor conferiu as pastas no Mac e abriu o item de disco dele no lugar do seu: ${opened.id}: ${item.title}.${was}${kept ? ` Fora do item, não mexer: ${kept}.` : ""} Os passos e as decisões são do servidor, que reconfere o item a cada passada da rotina de disco e na resposta do dono: não o reescreva. A resposta do dono chega com o que ela autoriza, e só isso pode sair.` };
+  });
 }
 
 /** Upsert one durable lifecycle card per run. Replaying the same transition,
@@ -22038,7 +22287,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (promotion && !reopening && questionAnswer(promotion)) {
             return json(res, 200, { message: "A pessoa já respondeu essa pergunta na conversa: não abri o item. Siga com a resposta dela." });
           }
-          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
+          // removing worktrees is the server's disk item, checked on the Mac, whoever opens it — a promoted
+          // question too ("Quer que eu remova as worktrees X e Y?"), linked to the server's item (R13-followup #2, INSP-R13fol #6)
+          const disk = await serverDiskItem(bot, threadId, { title, ...(typeof body.command === "string" ? { command: body.command } : {}), ...structured });
+          if (disk) {
+            if (promotion && disk.opened) {
+              autonomy.linkAskPromotion(promotion, disk.opened);
+              refreshBotRow(bot.id);
+            }
+            return json(res, 200, { message: `${disk.message}${promotion && disk.opened ? ` Ele substitui a sua pergunta em "Precisa de você".` : ""}` });
+          }
+          // a mixed item (push, rm -rf… and `worktree remove`): its removal part goes to the server's item beside it,
+          // its own removal commands leave it (INSP-R13fol R2-3)
+          const beside = await mixedRemovalBeside(bot, threadId, { title, ...structured });
+          const own = beside ? { ...structured, steps: beside.steps, ...(beside.options ? { options: beside.options } : {}) } : structured;
+          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...own });
+          // the folders taken to the server: an answer naming them authorizes nothing (R5-1)
+          if (beside?.moved?.length) autonomy.patchOwnerPending(bot.id, item.id, { diskMoved: beside.moved });
           if (promotion) {
             autonomy.linkAskPromotion(promotion, item);
             refreshBotRow(bot.id);
@@ -22050,7 +22315,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          const superseding = markSuperseded(bot, item);
+          const marked = superseding.length ? ` Marquei como superado, com decisões e comandos desligados: ${superseding.join(", ")}.` : "";
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced}${marked}${beside ? ` ${beside.message}` : ""} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }
         if (body.action === "update") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -22064,11 +22331,25 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!current) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           const incomplete = practicalMissing({ why: structured.why ?? current.why, steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
           if (incomplete) return json(res, 400, { error: incomplete });
-          const item = autonomy.updateOwnerPending(bot.id, id, patch);
+          // the server's disk item is not rewritten by a bot; a bot's item that turns out to be about removing worktrees becomes it (R13-followup #2)
+          if (current.key?.startsWith(DISK_DECISION_KEY_PREFIX)) {
+            if (patch.title !== undefined || structured.why !== undefined || structured.steps !== undefined || structured.options !== undefined) {
+              return json(res, 200, { message: `O ${current.id} é o item de disco do servidor, conferido no Mac: não o reescrevi. Ele é reconferido a cada passada da rotina de disco e na resposta do dono.` });
+            }
+          } else if (!current.key) {
+            const disk = await serverDiskItem(bot, current.threadId, { title: patch.title ?? current.title, why: structured.why ?? current.why, ...(current.command ? { command: current.command } : {}), steps: structured.steps ?? current.steps, options: structured.options ?? current.options }, current);
+            if (disk) return json(res, 200, { message: disk.message });
+          }
+          // the removal part of a mixed item: beside it, its commands out of it (INSP-R13fol R2-3)
+          const beside = current.key ? null : await mixedRemovalBeside(bot, current.threadId, { title: patch.title ?? current.title, ...(current.command ? { command: current.command } : {}), steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
+          const item = autonomy.updateOwnerPending(bot.id, id, beside ? { ...patch, steps: beside.steps, ...(beside.options ? { options: beside.options } : {}) } : patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
+          if (beside?.moved?.length) autonomy.patchOwnerPending(bot.id, id, { diskMoved: [...new Set([...(item.diskMoved ?? []), ...beside.moved])] });
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.` });
+          const superseding = markSuperseded(bot, item);
+          const marked = superseding.length ? ` Marquei como superado, com decisões e comandos desligados: ${superseding.join(", ")}.` : "";
+          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${marked}${beside ? ` ${beside.message}` : ""}` });
         }
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -22080,7 +22361,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         if (body.action === "list") {
           const open = autonomy.ownerPendingOf(bot.id);
-          const state = (item: OwnerPending) => `${item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)"}${item.recommendRequestedAt ? " (a pessoa pediu a sua recomendação: owner_pending update com recommended e why)" : (item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? " (sem recomendada)" : ""}`;
+          const state = (item: OwnerPending) => `${item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)"}${item.recommendRequestedAt ? " (a pessoa pediu a sua recomendação: owner_pending update com recommended e why)" : (item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? " (sem recomendada)" : ""}${item.supersededBy ? ` (SUPERADO pelo ${item.supersededBy.id} do ${item.supersededBy.botName}: resolva ou reescreva os comandos)` : ""}${fixedRowWarning(item, Date.now()) ? ` (${fixedRowWarning(item, Date.now())} Para linha nova, use append, não número fixo.)` : ""}`;
           return json(res, 200, { message: open.length ? open.map((item) => `${line(item)}${state(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}`).join("\n") : "Nada esperando a pessoa." });
         }
         return json(res, 400, { error: "action deve ser add, update, resolve ou list" });
@@ -25908,6 +26189,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       refreshBotRow(bot.id);
       return json(res, 200, { resolved: done.length });
     }
+    // "Os comandos ainda valem": the owner lifts a superseded mark — the bot that marked it may have been wrong (INSP-R13fol #13)
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/unsupersede$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const open = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!open) return json(res, 404, { error: "Este item não está mais aberto." });
+      const notYours = cloudGuestSendRefusal(auth, open.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      if (!open.supersededBy) return json(res, 200, { ok: true });
+      const was = open.supersededBy;
+      autonomy.patchOwnerPending(bot.id, open.id, { supersededBy: undefined });
+      if (store.taskByThread(bot.id, open.threadId)) store.appendMessage(open.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${open.id} — a pessoa disse que os comandos ainda valem (a marca do ${was.id} do ${was.botName} caiu)`, 240), ok: true } });
+      refreshBotRow(bot.id);
+      console.log(`[owner-pending] ${open.id} of ${bot.name}: the owner lifted the superseded mark of ${was.id} (${was.botName})`);
+      return json(res, 200, { ok: true });
+    }
     // "Lembrar <bot>": an answered item the bot let go silent for 2 h. The
     // reminder is a system report (never the person's words), sent once while
     // it waits to be read; the item waits on the bot again (INSP-J2 r2 N3).
@@ -26037,6 +26335,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         keepRoutineAsk(autonomy, bot.id, item.id, Date.now());
         refreshBotRow(bot.id);
         return json(res, 200, { ok: true, resolved: 0, kept: true, message: `"${item.title}" voltou para o topo de "Precisa de você".` });
+      } else if (body.option !== undefined && item.supersededBy) {
+        // another item said this one's commands must not run: its decisions are off (R13-intake #1)
+        return json(res, 409, { error: supersededLine(item.supersededBy), code: "item_superseded" });
       } else if (body.option !== undefined) {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another
@@ -26118,12 +26419,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // settled by what this handler answers, when it answers — never by the client going away (r6 D1)
         onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
       }
-      // "Manter" removes nothing: never checked, never refused (INSP-R12F r4)
+      // "Manter" removes nothing: never checked, never refused (INSP-R12F r4). Every other answer is checked on the
+      // Mac and carries the state found now — words that authorize no removal ("sim", "pode decidir por mim…") too,
+      // with the server saying so to the bot and to the owner (INSP-R13fol R2-1)
+      // free text never removes: the owner hears which buttons do (INSP-R13fol R4-2)
+      const diskNotice = item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind === "text" ? diskTextNotice(answer.text, keyFolders(item.key), (item.options ?? []).map((option) => option.label)) : undefined;
       if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
         // in turn with a routine's pass: the item read after it, gone if that pass replaced it
         const check = await diskItemTurn(async () => {
           const now = autonomy.ownerPendingById(bot.id, item.id);
-          if (now && now.key === item.key) return recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "");
+          if (now && now.key === item.key) return recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "", answer);
           // settled by the pass before: what that pass did to it, said as it is (INSP-R12F r5 #1)
           const settled = autonomy.resolvedOwnerPendingOf(bot.id).findLast((each) => each.id === item.id && each.key === item.key);
           return goneDiskItem(settled?.resolvedNote);
@@ -26131,6 +26436,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (check.outcome !== "keep") return json(res, 409, { error: diskChangedText(check), code: "disk_item_changed" });
         text = `${text}\n\n${check.line}`;
       }
+      // a superseded item's words and asks reach its bot saying so: its commands must not run (INSP-R13fol #16)
+      if (item.supersededBy) text = `${text}\n\n[Servidor: ${supersededLine(item.supersededBy)}]`;
+      // a bot's mixed item whose removal went to the server's item: an answer about those folders authorizes nothing (R5-1)
+      if (!item.key && item.diskMoved?.length && answer.kind !== "ask" && answerTouchesMoved(answer.text, item.diskMoved, item.diskMoved)) text = `${text}\n\n${DISK_NOT_AUTHORIZED}`;
+      // any bot's item about worktrees, mixed or not: a decision or words asking for a removal there
+      // authorizes no worktree removal; a report of what the owner did passes as it is (INSP-R13fol R6-1, R6-2)
+      else if (!item.key && answer.kind !== "ask" && asksBotItemRemoval(answer.text, item)) text = `${text}\n\n${DISK_BOT_ITEM_NOT_AUTHORIZED}`;
       try {
         assertWithinBudget(cfg, DATA_DIR);
       } catch (error) {
@@ -26171,7 +26483,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         else autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, threadId: target, resolved: 0 });
+        return json(res, 202, { ok: true, threadId: target, resolved: 0, ...(diskNotice ? { notice: diskNotice } : {}) });
       }
       if (!resolve) {
         // the item stays open and waits on the bot: what the bot must do next rides in
@@ -26187,7 +26499,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: false, queued: true, queueId: queued.id });
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0 });
+        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0, ...(diskNotice ? { notice: diskNotice } : {}) });
       }
       let receipt: Awaited<ReturnType<typeof startOrQueueDirectMessage>>;
       try {
@@ -26200,7 +26512,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id, by: "owner" }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation
-      return json(res, 202, { ...receipt, text, resolved: done.length });
+      return json(res, 202, { ...receipt, text, resolved: done.length, ...(diskNotice ? { notice: diskNotice } : {}) });
 
       function ownerAnswerFailed(botId: string, id: string, what: typeof answer, error: unknown) {
         const message = error instanceof Error ? error.message : String(error);

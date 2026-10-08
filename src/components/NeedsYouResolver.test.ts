@@ -640,6 +640,12 @@ describe("keys on the resolution screen", () => {
     expect(sent).toEqual({ resolved: 0 });
     expect(replyNotice(item, false, sent)).toContain("Chief of Staff");
     expect(replyNotice(item, false, sent)).not.toBe(message);
+    // INSP-R13fol R2-1: words the server did not read as an authorization — sent, and the owner told so
+    const notice = "O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas.";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, resolved: 0, notice }), { status: 202 })));
+    const unread = await replyToOwnerPending(item, { text: "sim", resolve: false }, dispatch);
+    expect(unread).toEqual({ resolved: 0, notice });
+    expect(replyNotice(item, false, unread)).toBe(`${replyNotice(item, false, sent)} ${notice}`);
     // the notice is the neutral one, like "ainda está na fila"
     const shown = view({ selectedKey: keyOf("o1"), notice: message, noticeTone: "info" });
     expect(shown.find("data-resolver-notice")!.props["data-tone"]).toBe("info");
@@ -783,5 +789,42 @@ describe("Talvez já resolvido", () => {
     expect(html).toContain('aria-label="1 itens precisam de você"');
     expect(html).toContain("Talvez já resolvido (1)");
     expect(html.match(/data-needs-you-row=/g)).toHaveLength(1);
+  });
+});
+
+describe("a superseded item and a fixed sheet row (R13-intake #1)", () => {
+  const superseded = [bot("chief", "Chief of Staff", [task("c9", "Planilha", { ownerPending: [
+    { id: "o2", title: "Aprovar a criação da linha 190 da planilha", since: now - 17 * 3_600_000, why: "Linha nova.",
+      steps: [{ text: "B190", command: "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'" }], options,
+      superseded: { by: "o1 do Monitor Chat", at: now - 3_600_000, text: "Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses." },
+      rowWarning: "A linha 190 pode ter mudado desde que estes comandos foram escritos: confira antes de rodar." },
+    { id: "o8", title: "Gravar a linha 191", since: now - 7 * 3_600_000, why: "Linha nova.", steps: [{ text: "B191", command: "gog sheets update ID 'Atendimento!B191' --values-json '[[\"x\"]]'" }],
+      rowWarning: "A linha 191 pode ter mudado desde que estes comandos foram escritos: confira antes de rodar." },
+  ] })])];
+  const all = needsYouItems(superseded);
+  const key = (id: string) => needsYouKey(all.find((item) => item.pendingId === id)!);
+
+  it("says by which item, and turns its decisions and commands off", () => {
+    const shown = view({ items: all, selectedKey: key("o2") });
+    expect(shown.html).toContain("Superado pelo item o1 do Monitor Chat: Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses. As decisões e os comandos deste item ficaram desligados.");
+    // the owner can lift the mark: "Os comandos ainda valem" (INSP-R13fol #13)
+    const unmark = view({ items: all, selectedKey: key("o2"), onUnsupersede: (item) => unmark.calls.push(`unsupersede:${item.pendingId}`) });
+    expect(unmark.html).toContain("Os comandos ainda valem");
+    unmark.press("data-resolver-unsupersede");
+    expect(unmark.calls).toEqual(["unsupersede:o2"]);
+    expect(shown.find("data-resolver-superseded", "o1 do Monitor Chat")).toBeTruthy();
+    // no decision to pick
+    expect(shown.html).not.toContain("Aprovar</");
+    expect(shown.calls).toEqual([]);
+    // the command shows, struck through, and its copy is off
+    expect(shown.find("data-resolver-copy", "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'")!.props.disabled).toBe(true);
+    // the row notice gives way to the stronger one
+    expect(shown.find("data-resolver-row-warning")).toBeUndefined();
+  });
+
+  it("warns that a fixed row may have changed, without touching the command", () => {
+    const shown = view({ items: all, selectedKey: key("o8") });
+    expect(shown.html).toContain("A linha 191 pode ter mudado desde que estes comandos foram escritos: confira antes de rodar.");
+    expect(shown.find("data-resolver-copy", "gog sheets update ID 'Atendimento!B191' --values-json '[[\"x\"]]'")!.props.disabled).toBe(false);
   });
 });

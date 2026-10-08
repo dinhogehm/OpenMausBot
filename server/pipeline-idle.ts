@@ -140,6 +140,8 @@ export interface PipelineIdleInput {
   releaseInFlight: boolean | null;
   candidates: readonly IdleCandidate[];
   now: number;
+  /** Why something is unknown ("gh pr list falhou: …"), said in the why. */
+  unknown?: string;
 }
 
 /** One look: whether to wake the Chief now, and the state to keep. Anything
@@ -148,7 +150,7 @@ export interface PipelineIdleInput {
  * issues (or fewer: some taken) come back only after 24 h, when nobody has
  * named them for a whole day since. */
 export function pipelineIdleStep(state: PipelineIdleState, input: PipelineIdleInput): { state: PipelineIdleState; wake: boolean; why: string } {
-  if (input.openPrs === null || input.releaseInFlight === null) return { state, wake: false, why: "estado desconhecido" };
+  if (input.openPrs === null || input.releaseInFlight === null) return { state, wake: false, why: `estado desconhecido${input.unknown ? ` (${input.unknown})` : ""}` };
   if (input.openPrs > 0) return { state, wake: false, why: `${input.openPrs} PR(s) na fila` };
   if (input.releaseInFlight) return { state, wake: false, why: "release em curso" };
   if (input.stopped) return { state, wake: false, why: "~/.nuria/stop" };
@@ -159,6 +161,13 @@ export function pipelineIdleStep(state: PipelineIdleState, input: PipelineIdleIn
   const last = new Set(state.lastNumbers ?? []);
   if (since < PIPELINE_IDLE_QUIET_MS && numbers.every((each) => last.has(each))) return { state, wake: false, why: "as mesmas issues já foram avisadas há menos de 24 h" };
   return { state: { lastAt: input.now, lastNumbers: numbers }, wake: true, why: "esteira parada" };
+}
+
+/** The log line of one look, only when its why changed since the last one
+ * (R13-followup #5: only a wake was logged, so a `gh` that failed every
+ * time and a queue that never emptied read the same — nothing). */
+export function pipelineIdleLogLine(last: string | undefined, why: string): string | null {
+  return why === last ? null : `[pipeline-idle] ${last === undefined ? "" : `${last} -> `}${why}`;
 }
 
 const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });

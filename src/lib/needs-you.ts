@@ -53,6 +53,10 @@ export interface NeedsYouItem {
   delegation?: NonNullable<WireOwnerPending["delegation"]>;
   /** Back from a delegation: on top, with what the agent did and what is left. */
   delegationBack?: NonNullable<WireOwnerPending["delegationBack"]>;
+  /** Another item said its commands must not run: decisions and commands off (R13-intake #1). */
+  superseded?: NonNullable<WireOwnerPending["superseded"]>;
+  /** Its commands write a fixed sheet row and are older than 6 h. */
+  rowWarning?: string;
 }
 
 /** A routine's item said once and let go (INSP-N22 r2 F2): shown apart, folded, never counted as waiting on the person. */
@@ -214,6 +218,7 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           // "Delegar a um agente" (lote del)
           ...(pending.delegable ? { delegable: true as const } : {}), ...(pending.onlyYou ? { onlyYou: pending.onlyYou } : {}),
           ...(pending.delegation ? { delegation: pending.delegation } : {}), ...(pending.delegationBack ? { delegationBack: pending.delegationBack } : {}),
+          ...(pending.superseded ? { superseded: pending.superseded } : {}), ...(pending.rowWarning ? { rowWarning: pending.rowWarning } : {}),
         });
       }
       // the conversation's own line (an approval, a question): never from a routine's run nor an archived one

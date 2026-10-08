@@ -83,7 +83,8 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
           const overdue = at !== null && at < clock;
           const label = [t("needsYou.item", { title: item.title, name: item.botName, age }), item.due ? t("needsYou.due", { due: item.due }) : ""].filter(Boolean).join(" · ");
           const Icon = item.approval ? ShieldQuestion : item.options?.length ? ListChecks : item.pendingId ? ListTodo : CircleAlert;
-          const copy = Boolean(item.pendingId && item.command && !item.steps?.length);
+          // a superseded item's command is off (R13-intake #1)
+          const copy = Boolean(item.pendingId && item.command && !item.steps?.length && !item.superseded);
           const link = Boolean(item.pendingId && item.link);
           const resolve = Boolean(item.pendingId && onResolve);
           const actions = Number(copy) + Number(link) + Number(resolve);

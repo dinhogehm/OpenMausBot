@@ -194,6 +194,10 @@ export interface WireOwnerPending {
   delegation?: { at: number; state: "queued" | "running"; option?: string; sessionId?: string; sessionTitle?: string; link?: string };
   /** Back from a delegation (partial, stopped by the hook, never opened): on top, with why. */
   delegationBack?: { at: number; outcome: "parcial" | "barrado" | "falhou"; text: string; command?: string };
+  /** Another item said this one's commands must not run (R13-intake #1): decisions and commands off, with by which ("o1 do Monitor"). */
+  superseded?: { by: string; at: number; text: string };
+  /** Its commands write a fixed sheet row and are older than 6 h: the row may have changed (what the server read, when it could). */
+  rowWarning?: string;
 }
 
 export interface WireTask {

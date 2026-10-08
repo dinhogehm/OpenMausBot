@@ -40,7 +40,7 @@ export function linkLabel(url: string): string {
   }
 }
 
-export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | "delegate" | `option:${number}`;
+export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | "delegate" | "unsupersede" | `option:${number}`;
 
 export interface NeedsYouResolverViewProps {
   items: NeedsYouItem[];
@@ -88,6 +88,8 @@ export interface NeedsYouResolverViewProps {
   onResolve: (item: NeedsYouItem) => void;
   /** "Delegar a um agente" (lote del): a Claude Code session opened by the server for the item. */
   onDelegate?: (item: NeedsYouItem) => void;
+  /** "Os comandos ainda valem": the owner lifts a superseded mark (INSP-R13fol #13). */
+  onUnsupersede?: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
   onDismissNotice?: () => void;
@@ -417,7 +419,9 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   const stuck = answerStuck(item, now);
   const notDelivered = notDeliveredLine(item, now);
   // answered and waiting on the bot: the decisions fold behind "Mudar resposta" (INSP-J2 #2)
-  const decisionsOpen = Boolean(item.options?.length) && !isDelegated && (!awaiting || props.changingAnswer === needsYouKey(item));
+  // superseded by another item (R13-intake #1): no decision to pick, no command to copy
+  const superseded = Boolean(item.superseded);
+  const decisionsOpen = Boolean(item.options?.length) && !isDelegated && !superseded && (!awaiting || props.changingAnswer === needsYouKey(item));
   return (
     <>
       <div className="flex items-center gap-1 border-b border-hairline/40 px-2 py-1.5 sm:px-3">
@@ -500,6 +504,29 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             )}
           </div>
         )}
+        {item.superseded && (
+          // another item said these commands must not run: they are off here (R13-intake #1)
+          <div data-resolver-superseded={item.superseded.by} className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="alert" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
+              <span>{t("needsYou.screen.superseded", { by: item.superseded.by, text: item.superseded.text })}</span>
+            </p>
+            {/* the bot that marked it may be wrong: the owner turns the item back on */}
+            {pending && props.onUnsupersede && (
+              <button type="button" data-resolver-unsupersede="" disabled={working} onClick={() => props.onUnsupersede!(item)} className={cn(quietButton, "py-1.5 text-[12.5px]")}>
+                {busy === "unsupersede" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Check size={14} aria-hidden="true" />}
+                {t("needsYou.screen.unsupersede")}
+              </button>
+            )}
+          </div>
+        )}
+        {item.rowWarning && !item.superseded && (
+          // a fixed sheet row written by commands older than 6 h: it may be someone else's by now (R13-intake #1)
+          <p role="status" data-resolver-row-warning="" className="mt-3 flex items-start gap-2 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
+            <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
+            <span>{item.rowWarning}</span>
+          </p>
+        )}
         {awaiting && (
           // the person answered: the ball is with the bot — said with what was answered (INSP-J2 #9)
           <p role="status" data-resolver-awaiting-detail="" className="mt-3 flex items-start gap-2 rounded-lg border border-accent/40 bg-panel px-3 py-2 text-[13px] text-ink">
@@ -563,14 +590,15 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
                   <div className="min-w-0 flex-1">
                     <p className="text-[14px] leading-relaxed text-ink"><span className="sr-only">{t("needsYou.screen.stepNumber", { number: n + 1 })} </span>{step.text}</p>
                     {step.command && (
-                      <div className="mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5">
-                        <code className="min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{step.command}</code>
+                      <div className={cn("mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5", superseded && "opacity-60")}>
+                        <code className={cn("min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]", superseded && "line-through")}>{step.command}</code>
                         <button
                           type="button"
+                          disabled={superseded}
                           data-resolver-copy={step.command}
                           aria-label={t("needsYou.screen.copyStep", { number: n + 1 })}
                           onClick={() => props.onCopy(step.command!)}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus"
+                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-50"
                         >
                           {props.copied === step.command ? <Check size={13} aria-hidden="true" className="text-success" /> : <Copy size={13} aria-hidden="true" />}
                           <span aria-hidden="true">{props.copied === step.command ? t("needsYou.screen.copied") : t("needsYou.screen.copy")}</span>
@@ -649,7 +677,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-1.5">
-          {awaiting && item.options?.length && !decisionsOpen ? (
+          {awaiting && item.options?.length && !decisionsOpen && !superseded ? (
             // answered: the decisions fold away; changing the answer is one click (INSP-J2 #2)
             <button type="button" data-resolver-change-answer="" onClick={() => props.onChangeAnswer(item)} className={cn(quietButton, "mr-auto")}>
               <ListChecks size={14} aria-hidden="true" />
@@ -720,9 +748,11 @@ export function decisionNotice(item: Pick<NeedsYouItem, "options" | "botName" | 
 /** What the screen says after the person's own words were sent — or, when the
  * same words had already gone, the server's notice (INSP-R12F r6 D2). */
 export function replyNotice(item: Pick<NeedsYouItem, "botName" | "title">, resolve: boolean, result: unknown): string {
-  const info = (result as { info?: unknown } | undefined)?.info;
+  const { info, notice } = (result ?? {}) as { info?: unknown; notice?: unknown };
   if (typeof info === "string" && info) return info;
-  return t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title });
+  const sent = t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title });
+  // what the server says of the answer, after it was sent (INSP-R13fol R2-1)
+  return typeof notice === "string" && notice ? `${sent} ${notice}` : sent;
 }
 
 /** What the screen says after "Lembrar": sent, already on its way, or — in
@@ -1020,7 +1050,7 @@ export const STEPS_ASK_AGAIN_AFTER_MS = 15 * 60_000;
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own
  * loading and error state. */
-export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve, onDelegate }: {
+export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve, onDelegate, onUnsupersede }: {
   open: boolean;
   items: NeedsYouItem[];
   initialKey?: string | null;
@@ -1039,6 +1069,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
   /** "Delegar a um agente" (lote del): the server opens a session for the item. */
   onDelegate?: (item: NeedsYouItem) => Promise<unknown>;
+  onUnsupersede?: (item: NeedsYouItem) => Promise<unknown>;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
   const [fallbackIndex, setFallbackIndex] = useState(0);
@@ -1247,6 +1278,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
           onDelegate={onDelegate ? (item) => void run("delegate", () => onDelegate(item), (result) => delegateNotice(item, result)) : undefined}
+          onUnsupersede={onUnsupersede ? (item) => void run("unsupersede", () => onUnsupersede(item), t("needsYou.screen.unsuperseded", { title: item.title })) : undefined}
           onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => remindNotice(item, result))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}

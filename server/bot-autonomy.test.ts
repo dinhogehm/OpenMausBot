@@ -1744,3 +1744,24 @@ describe("owner_pending ids are never reused", () => {
     expect(reloaded.askPromotionResolvedItem(again)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
   });
 });
+
+describe("a superseded item (R13-intake #1)", () => {
+  it("stays superseded, across a restart and when said again with the same commands, until its bot rewrites them", () => {
+    const autonomy = make();
+    const steps = [{ text: "B190", command: "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'" }];
+    const item = autonomy.addOwnerPending("chief", "t1", { title: "Aprovar a criação da linha 190", why: "Linha nova.", steps });
+    const by = { botId: "monitor", botName: "Monitor", id: "o1", at: now, text: "Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses." };
+    autonomy.patchOwnerPending("chief", item.id, { supersededBy: by });
+    const reloaded = make();
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // the same item said again, same commands: still superseded
+    reloaded.addOwnerPending("chief", "t1", { title: "Aprovar a criação da linha 190", why: "Linha nova.", steps });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // the why rewritten only: still superseded
+    reloaded.updateOwnerPending("chief", item.id, { why: "Ainda vale." });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // its commands rewritten: the bot's new answer
+    reloaded.updateOwnerPending("chief", item.id, { steps: [{ text: "Linha nova pelo append", command: "gog sheets append ID 'Atendimento!B:I' --values-json '[[\"Matheus\"]]'" }] });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toBeUndefined();
+  });
+});

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
+  releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersLogLine, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 import { liveRecordFolders } from "./claude-desktop.ts";
 
@@ -271,7 +271,7 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     const told = staleFoldersReport(sized)!;
     expect(told.chip).toBe("Disco: 6 pasta(s) parada(s) há mais de 72 h fora da tag, ~15,1 GB — informação para o dono, nada foi removido");
     expect(told.report).toContain("Só informação: o servidor não removeu nada");
-    expect(told.report).toContain("(e mais 1 pequena(s), abaixo de 200 MB, não listada(s))");
+    expect(told.report).toContain("(e mais 1 pequena, abaixo de 200 MB, não listada)");
     // the Trash gives the space back only when emptied (#7d)
     expect(told.report).toContain("o espaço só volta ao esvaziar a Lixeira");
     const listed = told.report.split("\n").filter((each) => each.startsWith("- "));
@@ -823,5 +823,32 @@ describe("a conversation's folders for the disk report (R11-resilience D2)", () 
     ]);
     // nothing is removed: each is a command a person runs
     expect(listed.every((each) => each.command.startsWith("mv ") && each.command.endsWith(" ~/.Trash/"))).toBe(true);
+  });
+});
+
+// R13-followup #5: on 06/10 23:10 the chip said "1 pasta(s) … ~271 MB" and the log listed ~190 task-workspaces, nearly all "(? KB)":
+// du gives 0 KB for an empty one, which read as unmeasured. The log tells what the chip tells.
+describe("the stale folders' log line (R13-followup #5)", () => {
+  it("counts the small and the unmeasured, and lists only what the chip counts", () => {
+    const tw = (id: string) => `/Users/osvaldo/.openmausbot/task-workspaces/82feff85-aab2-4cb7-9f70-8969ec976979/${id}`;
+    const stale = [
+      { path: tw("b427dc32"), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: 277_540 },
+      ...Array.from({ length: 188 }, (_, i) => ({ path: tw(`empty-${i}`), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: i % 3 ? 0 : 8 })),
+      { path: tw("timeout"), kind: "task-workspace" as const, idleSince: 0, command: "mv", sizeKb: null },
+    ];
+    const told = staleFoldersReport(stale)!;
+    expect(told.chip).toBe("Disco: 1 pasta(s) parada(s) há mais de 72 h fora da tag, ~271 MB — informação para o dono, nada foi removido");
+    // 63 of 8 KB, 125 empty (0 KB: measured, never "não consegui medir"), 1 unmeasured
+    expect(told.report).toContain("(e mais 63 pequenas, abaixo de 200 MB, e 125 vazias, e 1 que não consegui medir, não listadas)");
+    expect(staleFoldersReport([stale[0]!, stale.at(-1)!])!.report).toContain("(e mais 1 que não consegui medir, não listada)");
+    expect(staleFoldersReport([stale[0]!, stale[2]!])!.report).toContain("(e mais 1 vazia, não listada)");
+    // R13-resilience R13-3: the low-disk alert never counts an empty folder as unsized, and says the empty ones apart
+    const alert = diskAlertText({ freeGiB: 7, path: "/Users/osvaldo/Projetos", band: 8 }, { at: Date.parse("2026-10-07T02:10:15Z"), folders: stale.slice(1) });
+    expect(alert.report).toContain("Na última medição do servidor havia 1 pasta(s) parada(s) há mais de 72 h fora da tag cujo tamanho não consegui medir");
+    expect(alert.report).toContain("E mais 125 vazias (0 KB), que não liberam espaço.");
+    expect(diskAlertText({ freeGiB: 7, path: "/p", band: 8 }, { at: 0, folders: stale }).report).toContain("E mais 125 vazias (0 KB), que não liberam espaço.");
+    const line = staleFoldersLogLine(stale);
+    expect(line).toBe(`1 folder(s) of 200 MB or more, ~271 MB: ${tw("b427dc32")} (271 MB); 63 smaller, not listed; 125 empty (0 KB); 1 not measured: ${tw("timeout")}`);
+    expect(line).not.toContain("? KB");
   });
 });
