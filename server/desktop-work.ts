@@ -94,6 +94,8 @@ export interface DesktopWorkDeps {
   /** The branch git's HEAD of the repository root is on ("HEAD" when detached), and the repository's branches: an unreadable branch chip is judged by them, with the root session New Session opened from (R11-2, INSP-R12a-r2 R2-1). */
   rootHead?: (session: CcSession) => string | null;
   branches?: (session: CcSession) => string[];
+  /** "on": a new session the old way must have the worktree option on (the app makes its worktree), and the server switches it on (o73). */
+  worktreeWanted?: (session: CcSession) => "on" | undefined;
   /** The real paths of the worktrees git lists for the session's repository: a "trust this workspace" is clicked only for one of them. */
   registeredWorktrees?: (session: CcSession) => string[];
   /** The tail of the Claude app's own log (main.log), read only: what ties a "trust" prompt to a folder. */
@@ -855,7 +857,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
         ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}), trustClicks: pending.trustClicks ?? 0, branch: own.branch })
-        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
+        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), repoPath: next.repo, ...(deps.worktreeWanted?.(next) === "on" ? { worktree: "on" as const } : {}), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;

@@ -123,6 +123,20 @@ describe("backoff and the queue", () => {
     expect(pickDesktopPending(h.ledger.all(), h.now)?.id).toBe("a");
   });
 
+  it("tells a create the old way the repository's path, and asks the worktree option on only when worktreeWanted says so (o73)", async () => {
+    const h = harness();
+    const plain = h.appSession("a");
+    plain.desktop!.pending = { kind: "create", text: "brief", since: h.now, attempts: 0 };
+    await h.tick();
+    expect(h.steps.create).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ repoPath: "/Users/o/Projetos/nuria-platform" }));
+    expect(h.steps.create.mock.calls.at(-1)?.at(1)).not.toHaveProperty("worktree");
+    h.deps.worktreeWanted = () => "on";
+    const asked = h.appSession("b");
+    asked.desktop!.pending = { kind: "create", text: "brief", since: h.now, attempts: 0 };
+    await h.tick();
+    expect(h.steps.create).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ worktree: "on" }));
+  });
+
   it("backs off after a try that touched the screen, and not while it only waits for an idle Mac", async () => {
     const h = harness();
     const session = h.appSession("a");

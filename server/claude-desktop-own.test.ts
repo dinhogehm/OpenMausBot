@@ -40,6 +40,16 @@ afterEach(() => { vi.useRealTimers(); });
 const FOLDER = "9353-comprar-assentos";
 const LINK = `/Users/o/Projetos/.omb-worktree-links/nuria-platform/${FOLDER}`;
 
+/** How many clicks of `actions` landed on a line of `screen` (as fakeApp lays it out) matching `what`. */
+function clicksOn(actions: readonly string[], screen: readonly string[], what: RegExp): number {
+  return actions.filter((action) => {
+    const at = /^click ([\d.]+),([\d.]+)$/.exec(action);
+    if (!at) return false;
+    const [x, y] = [Number(at[1]), Number(at[2])];
+    return screen.some((text, i) => what.test(text) && x >= 600 && x <= 800 && y >= 700 + i * 30 && y <= 716 + i * 30);
+  }).length;
+}
+
 /** A fake app: each OCR shows the next screen (the last one stays). */
 function fakeApp(screens: string[][], opts: { idle?: number; front?: string } = {}) {
   const actions: string[] = [];
@@ -318,8 +328,11 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
       const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: () => { listed += 1; return [worktree]; } });
       expect(listed).toBe(0);
       expect(step).toMatchObject({ ok: false, miss: true });
-      expect(!step.ok && step.reason).toContain("nothing was clicked or typed");
-      expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+      // o73: the other folder's chip is tried in the folder picker (it opens nothing here); "Confiar" never
+      expect(!step.ok && step.reason).toContain(screenLines === other ? "nothing was typed; tried on screen first: clicked the folder chip" : "nothing was clicked or typed");
+      expect(clicksOn(app.actions, screenLines, /^Confiar/)).toBe(0);
+      expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(screenLines === other ? 1 : 0);
+      expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
     }
   });
 
@@ -438,8 +451,11 @@ describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous
     const app = fakeApp([screenFrom(seen)]);
     const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => listed, trustLog: () => log });
     expect(step).toMatchObject({ ok: false, miss: true, retry: true, previousFolder: true });
-    expect(!step.ok && step.reason).toContain("nothing was clicked or typed");
-    expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+    // o73: the folder picker is tried first — here the chip opens nothing — and "Confiar" is never clicked
+    expect(!step.ok && step.reason).toContain("nothing was typed; tried on screen first: clicked the folder chip");
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("type"))).toBe(false);
+    expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
+    expect(clicksOn(app.actions, screenFrom(seen), /^Confiar/)).toBe(0);
   });
 
   it("the real pair of 05/10: 035161dc's cut chip is ours only while no other worktree starts so (472b5524's there: ambiguous, no click, even with nothing in the log)", async () => {
@@ -454,7 +470,8 @@ describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous
     const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustLog: () => "" });
     expect(step).toMatchObject({ ok: false, previousFolder: true });
     expect(!step.ok && step.reason).toContain("cut short to a start that another worktree of the repository shares");
-    expect(app.actions.some((action) => action.startsWith("click"))).toBe(false);
+    expect(clicksOn(app.actions, screenFrom(seen), /^Confiar/)).toBe(0);
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
     // and 2f2ec068 at 18:41, asking for 9337, read the same chip: the folder before
     const [at2, , folder2, seen2] = REAL_TRUST_16[5]!;
     expect(seen2).toContain("9378-supervisor-do-ate");
@@ -609,15 +626,19 @@ describe("a new session in the server's own folder", () => {
   });
 
   it.each([
-    ["ON (the tick, as on R8-visual-claude-1: \"v worktree\")", "v worktree", "has the worktree option ON"],
-    ["unreadable", "? worktree", "could not read whether the new session's worktree option is on or off"],
-  ])("pastes nothing when the worktree option is %s: a miss, before the brief goes in (R11-1)", async (_name, chip, said) => {
+    // o73: ON is clicked off (twice at most); an unreadable box is only read again — the fake app never changes, so both stop
+    ["ON (the tick, as on R8-visual-claude-1: \"v worktree\")", "v worktree", "has the worktree option ON", 2, "clicked the worktree option (\"v\") to turn it off"],
+    ["unreadable", "? worktree", "could not read whether the new session's worktree option is on or off", 0, "read the screen again"],
+  ])("pastes nothing when the worktree option is %s: a miss, before the brief goes in (R11-1)", async (_name, chip, said, clicks, tried) => {
     const app = fakeApp([NEW_IN_FOLDER.map((line) => (line === "|O worktree" ? chip : line))]);
     const step = await openDesktopSessionIn(app.driver, { folder: LINK, folderName: FOLDER, text: "brief" });
     expect(step).toMatchObject({ ok: false, retry: true, miss: true, touched: true });
     expect(!step.ok && step.reason).toContain(said);
     expect(!step.ok && step.reason).toContain("nothing was typed");
-    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("click") || action.startsWith("type"))).toBe(false);
+    expect(!step.ok && step.reason).toContain(`tried on screen first: ${tried}`);
+    expect(step).toMatchObject({ worktreeOption: chip.startsWith("v") ? "on" : "unknown" });
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("type"))).toBe(false);
+    expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(clicks);
   });
 
   it("goes on when the new session shows no worktree option at all (nothing the app could make)", async () => {
