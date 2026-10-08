@@ -25,7 +25,10 @@ it("keeps ordinary work out of setup and carries explicit bot defaults and file 
   const receipt = () => {
     const dump = JSON.parse(readFileSync(fixture.fixtureDumpPath, "utf8"));
     // Never retain the launch environment/MCP config: it holds fixture tokens.
-    const result = { model: dump.argv[dump.argv.indexOf("--model") + 1], system: dump.systemPrompt as string, prompt: dump.prompt };
+    // `system` is every instruction this turn carried: the launch's system
+    // prompt plus the volatile half (setup, surface, memory…) that rides the
+    // turn's own message (system-prompt.ts).
+    const result = { model: dump.argv[dump.argv.indexOf("--model") + 1], system: `${dump.systemPrompt as string}\n${JSON.stringify(dump.prompt)}`, prompt: dump.prompt };
     evidence.push({ receipt: result });
     return result;
   };

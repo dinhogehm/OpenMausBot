@@ -260,7 +260,8 @@ describe("surface pin provenance against the real server", () => {
     resetTurn();
     await apiOk("POST", `/api/bots/${bot.id}/messages`, { text: "Work where you should.", threadId: task.threadId });
     const sent = await dump();
-    expect(sent.systemPrompt).toContain("Local VM");
+    // the surface paragraph is volatile: it rides the launch's first message
+    expect(`${sent.systemPrompt}\n${JSON.stringify(sent.prompt)}`).toContain("Local VM");
     expect(mountedComputer(sent).args.some((arg: string) => arg.includes("container-mcp"))).toBe(true);
     expect(sent.systemPrompt).not.toContain("You can act on the user's computer");
     writeFileSync(finishFile, "finish");

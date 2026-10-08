@@ -265,7 +265,8 @@ describe("a cloud computer starts only when the bot uses it", () => {
     const listed = await computerCall(sent, "tools/list");
     expect(listed.body.result.tools.map((tool: { name: string }) => tool.name)).toContain("screenshot");
     await finish(bot.id);
-    expect((await lastReply(bot.id))?.text).toContain("reply to: hi");
+    // a launch's first message may open with the turn's context note
+    expect((await lastReply(bot.id))?.text).toMatch(/reply to: (?:<system-reminder>[\s\S]*<\/system-reminder>\n\n)?hi/);
     expect(requests.slice(before)).toEqual([]);
     expect(starts(bot.id)).toEqual([]);
     await apiOk("DELETE", `/api/bots/${bot.id}`);

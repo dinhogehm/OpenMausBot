@@ -339,7 +339,17 @@ const readJsonFileWhenReady = async <T = unknown>(file: string, timeout = 5_000)
   return parsed as T;
 };
 
-const storedMessageCount = (threadId: string): number => {
+/** Every instruction a fake Claude turn carried: the launch's system prompt
+ * and the turn's message, which opens with the volatile half of the prompt
+ * (system-prompt.ts, VOLATILE_SECTIONS) whenever it changed. */
+const turnContext = (seen: { systemPrompt?: string; prompt?: { message?: { content?: unknown } } | unknown }): string => {
+  const content: unknown = (seen.prompt as { message?: { content?: unknown } } | undefined)?.message?.content;
+  const text = typeof content === "string" ? content
+    : Array.isArray(content) ? content.map((block: { text?: unknown }) => typeof block?.text === "string" ? block.text : "").join("") : "";
+  return `${seen.systemPrompt ?? ""}\n${text}`;
+};
+
+const storedMessageCount =(threadId: string): number => {
   const db = new DatabaseSync(join(home, ".openmausbot", "messages.db"), { readOnly: true });
   try {
     const row = z.object({ count: z.number() }).parse(
@@ -8353,9 +8363,11 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/bots/${bot.id}/messages`, {
         text: "/create-verification-skill for my notes app",
       })).status).toBe(202);
-      const seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump, 15_000);
-      const system = seen.systemPrompt ?? "";
-      // the skill's instructions ride the system prompt the agent receives
+      const seen = await readJsonFileWhenReady<{ systemPrompt?: string; prompt?: unknown }>(fakeClaudeDump, 15_000);
+      // the skill's instructions ride the turn the agent receives: they are
+      // turn-specific, so the volatile half carries them in its message
+      const system = turnContext(seen);
+      expect(seen.systemPrompt ?? "").not.toContain("<openmaus-skill");
       expect(system).toContain('<openmaus-skill id="create-verification-skill"');
       expect(system).toContain("skill_manage");
     } finally {
@@ -8447,7 +8459,7 @@ describe("harness HTTP API", () => {
       // and the same sentence reaches a real turn, not only the preview
       rmSync(fakeClaudeDump, { force: true });
       expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "open a browser and check my calendar" })).status).toBe(202);
-      const dispatched = (await readJsonFileWhenReady<{ systemPrompt: string }>(fakeClaudeDump, 15_000)).systemPrompt;
+      const dispatched = turnContext(await readJsonFileWhenReady<{ systemPrompt: string; prompt?: unknown }>(fakeClaudeDump, 15_000));
       expect(dispatched).toContain("\"Works on\" setting is Off");
       expect(dispatched).not.toContain("browser_navigate");
     } finally {
@@ -8503,10 +8515,11 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "/setup watch Discord too" })).status).toBe(202);
       const seen = await readJsonFileWhenReady<{ systemPrompt?: string; prompt?: { message?: { content?: unknown } } }>(fakeClaudeDump, 15_000);
       const system: string = seen.systemPrompt ?? "";
-      // soul first, setup block right after it
-      const soulEnd = system.indexOf("--- END STANDING INSTRUCTIONS ---") + "--- END STANDING INSTRUCTIONS ---".length;
-      expect(soulEnd).toBeGreaterThan(0);
-      expect(system.slice(soulEnd).startsWith("\n\nThe user explicitly asked you to set yourself up")).toBe(true);
+      // the soul stays in the system prompt; the setup block describes this
+      // turn, so it is in the volatile half and rides the turn's message
+      expect(system).toContain("--- END STANDING INSTRUCTIONS ---");
+      expect(system).not.toContain("The user explicitly asked you to set yourself up");
+      expect(turnContext(seen).split(system)[1]).toContain("The user explicitly asked you to set yourself up");
       // the literal /setup never reaches the model — extract the user text the
       // way promptText() in fake-claude-cli.ts does, joining text parts if the
       // content is an array of blocks rather than a plain string
@@ -8567,8 +8580,9 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
         text: "/create-verification-skill for my mobile app",
       })).status).toBe(202);
-      let seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
-      let system = seen.systemPrompt ?? "";
+      let seen = await readJsonFileWhenReady<{ systemPrompt?: string; prompt?: unknown }>(fakeClaudeDump);
+      // skill blocks are turn-specific: they ride the turn's message
+      let system = turnContext(seen);
       expect(system).toContain('<openmaus-skill id="create-verification-skill"');
       expect(system).toContain('<openmaus-skill id="phone-harness"');
       expect((await api("POST", `/api/groups/${room.id}/interrupt`, {})).status).toBe(200);
@@ -8581,8 +8595,8 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
         text: "now give me a short status update",
       })).status).toBe(202);
-      seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
-      system = seen.systemPrompt ?? "";
+      seen = await readJsonFileWhenReady<{ systemPrompt?: string; prompt?: unknown }>(fakeClaudeDump);
+      system = turnContext(seen);
       expect(system).not.toContain('<openmaus-skill id="create-verification-skill"');
       expect(system).toContain('<openmaus-skill id="phone-harness"');
     } finally {

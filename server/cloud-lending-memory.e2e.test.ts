@@ -98,7 +98,10 @@ async function completedTurn(start: () => Promise<void>) {
   await start();
   const dump = await dumped(dumpOf("done"));
   const text = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value ?? "");
-  return { prompt: text(dump.prompt), system: text(dump.systemPrompt) };
+  // `system` is every instruction the launch carried: the system prompt and
+  // the volatile half (memory, recent work, shared state) that rides the
+  // launch's first message instead (system-prompt.ts).
+  return { prompt: text(dump.prompt), system: `${text(dump.systemPrompt)}\n${text(dump.prompt)}` };
 }
 const newBot = async (name: string, instanceId: "held" | "done" | "brief") =>
   (await api("POST", "/api/bots", { token: owner, body: { name, modelSelection: { instanceId, model: "claude-sonnet-5" } } })).body.bot as { id: string; threadId: string };
@@ -444,7 +447,11 @@ it("a link planted in a bot's memory is a change, and what it points at never re
   rmSync(ws(bot, "MEMORY.md"));
   symlinkSync(notes, ws(bot, "MEMORY.md"));
   await stop(bot, guests);
-  const systemPrompt = () => JSON.stringify(JSON.parse(readFileSync(dumpOf("held"), "utf8")).systemPrompt ?? "");
+  // memory is volatile: a launch carries it in its first message, so read both
+  const systemPrompt = () => {
+    const launched = JSON.parse(readFileSync(dumpOf("held"), "utf8"));
+    return JSON.stringify(launched.systemPrompt ?? "") + JSON.stringify(launched.prompt ?? "");
+  };
   // Flagged, and neither link is read into the owner's turn.
   const flagged = await toolsFor(async () => say(owner, bot, "Read plan.md from my Mac.", await newThread(bot)));
   expect((await sees(flagged)).unavailable).toContain("This bot's memory was changed");

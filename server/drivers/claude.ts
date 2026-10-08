@@ -41,6 +41,7 @@ import { newEventId, newId } from "../contracts.ts";
 import { askInputSummary, commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
 import { sessionIdlePolicy } from "./session-idle.ts";
+import { deletePromptSplitReceipt, promptHalves, promptSplitFingerprints, readPromptSplitReceipt, writePromptSplitReceipt } from "./prompt-split.ts";
 import { parseVersionTriple, versionAtLeast } from "./acp/core.ts";
 import {
   applyClaudeInject,
@@ -1119,10 +1120,88 @@ type ClaudeUserMessage = {
  * append rather than a relaunch that re-uploads the whole prompt cache. */
 function withVolatileNote(text: string, volatile: string): string {
   const body = volatile.trim()
-    ? `This part of your instructions changed since this session started. It replaces the earlier copy:\n\n${volatile.trim()}`
+    ? `This part of your instructions changed since this session started. It replaces the earlier copy:\n\n${neutralizeReminderTags(volatile.trim())}`
     : "The notes that were in your instructions when this session started have been cleared.";
   const note = `<system-reminder>\n${body}\n</system-reminder>`;
   return text ? `${note}\n\n${text}` : note;
+}
+
+/** How a new process receives the volatile half: in its first message, in
+ * the same reminder shape a mid-session change uses, so a relaunch keeps a
+ * system prompt the provider has already cached (see the launch below). A
+ * resumed session may hold an earlier copy in its history; this one wins. */
+export function withLaunchVolatile(text: string, volatile: string): string {
+  const note = `<system-reminder>\nThis part of your instructions changes from turn to turn, so it arrives here instead of in the system prompt. It replaces any earlier copy:\n\n${neutralizeReminderTags(volatile.trim())}\n</system-reminder>`;
+  return text ? `${note}\n\n${text}` : note;
+}
+
+/** Receipts of the volatile half each Claude session last received
+ * (prompt-split.ts), keyed by the CLI's session id. */
+const RECEIPT_SCOPE = "claude";
+const EMPTY_VOLATILE = promptSplitFingerprints("", "").volatile;
+/** session.volatile after the CLI compacted the session: the reminder that
+ * carried the volatile half may now be summarized away, so this value
+ * equals no real volatile half and the next turn delivers it again. */
+const COMPACTED_VOLATILE = "\u0000compacted";
+
+/** The harness's reminder tag, escaped wherever it appears in text the
+ * harness did not write: a person's or teammate's message, a webhook
+ * payload, a recalled passage, memory. Only the harness's own notes open
+ * with a real `<system-reminder>`, so a payload cannot close the current
+ * note and open a forged one that "replaces" the instructions it carries.
+ * `<` becomes `<\`, the same escape the harness uses for its own tags. */
+export function neutralizeReminderTags(text: string): string {
+  return text.replace(/<(\/?\s*system-reminder)/gi, "<\\$1");
+}
+
+/** Which parts of a spawn contract differ, for the relaunch log: top-level
+ * fields, MCP servers by name with the env keys or fields that changed, and
+ * CLI flags by name. Names only — never a value, since the contract carries
+ * the system prompt and credentials. */
+export function argsKeyChanges(previous: string, next: string): string[] {
+  let before: Record<string, unknown>;
+  let after: Record<string, unknown>;
+  try {
+    before = JSON.parse(previous) as Record<string, unknown>;
+    after = JSON.parse(next) as Record<string, unknown>;
+  } catch {
+    return ["unreadable"];
+  }
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const record = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {});
+  const differing = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((key) => !same(a[key], b[key]));
+  const flags = (value: unknown) => {
+    const list = Array.isArray(value) ? value.map(String) : [];
+    const out: Record<string, string[]> = {};
+    list.forEach((token, index) => {
+      if (!token.startsWith("--")) return;
+      const following = list[index + 1];
+      (out[token] ??= []).push(following !== undefined && !following.startsWith("--") ? following : "");
+    });
+    return out;
+  };
+  const changes: string[] = [];
+  for (const key of differing(before, after)) {
+    if (key === "mcpServers") {
+      const a = record(before.mcpServers);
+      const b = record(after.mcpServers);
+      for (const name of differing(a, b)) {
+        if (!(name in a) || !(name in b)) {
+          changes.push(`mcpServers.${name}(${name in b ? "added" : "removed"})`);
+          continue;
+        }
+        const fields = differing(record(a[name]), record(b[name])).flatMap((field) =>
+          field === "env" ? differing(record(record(a[name]).env), record(record(b[name]).env)).map((env) => `env.${env}`) : [field]);
+        changes.push(`mcpServers.${name}(${fields.join(",")})`);
+      }
+    } else if (key === "args") {
+      changes.push(`args(${differing(flags(before.args), flags(after.args)).join(",")})`);
+    } else {
+      changes.push(key);
+    }
+  }
+  return changes;
 }
 
 function claudeUserMessage(
@@ -1271,6 +1350,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
        * with (see SendTurnInput.systemVolatile). A later turn whose volatile
        * text differs delivers the difference in-turn rather than relaunching. */
       volatile: string;
+      /** launched with a split prompt: the fingerprint of its stable half,
+       * for the receipt of the volatile half this session holds; null for
+       * a single-block prompt, which keeps no receipt */
+      stableDigest: string | null;
+      /** the volatile fingerprint the receipt last recorded for this session */
+      receiptVolatile: string | null;
       /** the CLI's session id from `init`, what --resume takes later */
       sessionId: string | null;
       /** the CLI emitted its `init` frame — it accepted the session and
@@ -1444,7 +1529,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       }
       // Materialize before creating a broker or process. A missing/corrupt
       // attachment must fail this call without leaving a live session behind.
-      const promptMsg = claudeUserMessage(turn.text, turn.images);
+      const turnText = neutralizeReminderTags(turn.text);
+      const promptMsg = claudeUserMessage(turnText, turn.images);
       // Internal relaunches are still the turn acknowledged to the harness.
       // A new user message gets a fresh id, but retry/recovery must not orphan
       // its capability, coordination result or queued continuation ownership.
@@ -1748,7 +1834,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         const volatile = turn.systemVolatile ?? "";
         const message = volatile === live.volatile && !turn.mentionTurn
           ? promptMsg
-          : claudeUserMessage(withVolatileNote(turn.text, volatile), turn.images);
+          : claudeUserMessage(withVolatileNote(turnText, volatile), turn.images);
         live.volatile = volatile;
         const running = live.turn;
         // A warm process can end between turns just as the next one is
@@ -1765,7 +1851,25 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         return { turnId };
       }
+      if (live && !turn.sessionReset && live.argsKey !== argsKey) {
+        console.warn(`[claude] ${threadId.slice(0, 8)} relaunch, spawn contract changed in: ${argsKeyChanges(live.argsKey, argsKey).join(", ")}`);
+      }
       if (live) closeSession(threadId, turn.sessionReset ? "context reset" : "spawn contract changed");
+      const launchHalves = promptHalves(turn);
+      // A resumed session may already hold this exact volatile half: the
+      // receipt says what it last received, across relaunches and server
+      // restarts, so an idle relaunch does not append another copy to the
+      // history it re-reads on every later call.
+      const launchReceipt = launchHalves.stable !== null && sessionId ? readPromptSplitReceipt(RECEIPT_SCOPE, sessionId) : null;
+      const launchCarried = launchReceipt !== null && !turn.mentionTurn &&
+        launchReceipt.volatile === promptSplitFingerprints("", launchHalves.volatile).volatile;
+      const launchMsg = launchHalves.stable === null || launchCarried
+        ? promptMsg
+        : launchHalves.volatile.trim()
+          ? claudeUserMessage(withLaunchVolatile(turnText, launchHalves.volatile), turn.images)
+          : launchReceipt && launchReceipt.volatile !== EMPTY_VOLATILE
+            ? claudeUserMessage(withVolatileNote(turnText, ""), turn.images)
+            : promptMsg;
 
       // Until sessions.set() below, this turn owns every launch resource.
       // Any bind, private-config or synchronous spawn failure must release
@@ -1789,9 +1893,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       try {
         // Create the prompt file only for a new process. A compatible live
         // session has already consumed the same system prompt at launch.
-        if (turn.system) {
+        // A split prompt launches with its stable half alone; the volatile
+        // half rides this launch's first message (launchMsg). Baking it into
+        // the system prompt made every relaunch — idle close, a changed
+        // spawn contract, a server restart — open with a system prompt the
+        // provider had never cached, so --resume re-priced the whole history
+        // at the cache-write rate even when nothing stable had changed.
+        const launchSystem = launchHalves.stable ?? turn.system;
+        if (launchSystem) {
           systemPromptPath = join(mkdtempSync(join(tmpdir(), "omb-system-")), "prompt.txt");
-          writeFileSync(systemPromptPath, turn.system, { mode: 0o600 });
+          writeFileSync(systemPromptPath, launchSystem, { mode: 0o600 });
           args.push("--append-system-prompt-file", systemPromptPath);
         }
         // Only create a broker for a new process. A compatible retained
@@ -1907,6 +2018,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         systemPromptPath,
         argsKey,
         volatile: turn.systemVolatile ?? "",
+        stableDigest: launchHalves.stable === null ? null : promptSplitFingerprints(launchHalves.stable, "").stable,
+        receiptVolatile: launchCarried ? launchReceipt.volatile : null,
         sessionId: sessionId ?? newSessionId,
         sawInit: false,
         nativePermissionMode: null,
@@ -2019,6 +2132,20 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
               if (session.turn) session.turn.awaitingInit = false;
               session.nativePermissionMode = typeof o.permissionMode === "string" ? o.permissionMode : null;
               if (typeof o.session_id === "string") session.sessionId = o.session_id;
+              // The CLI took this turn's message, and with it any volatile
+              // note: record what the session now holds, so a relaunch that
+              // resumes it does not deliver the same copy again.
+              if (session.stableDigest !== null && session.sessionId && session.volatile !== COMPACTED_VOLATILE) {
+                const held = promptSplitFingerprints("", session.volatile).volatile;
+                if (held !== session.receiptVolatile) {
+                  try {
+                    writePromptSplitReceipt(RECEIPT_SCOPE, session.sessionId, { stable: session.stableDigest, volatile: held });
+                    session.receiptVolatile = held;
+                  } catch (error) {
+                    console.warn(`[claude] could not record the prompt receipt: ${(error as Error).message}`);
+                  }
+                }
+              }
               // The turn the CLI starts for a steered message it could not
               // fold (see `result`): the held result now waits for this one's
               // — bounded, so a continuation that announces itself and then
@@ -2043,6 +2170,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
                 held.continuationSilence.unref?.();
               }
               emit({ ...base(threadId, currentTurnId()), type: "session.started", sessionId: o.session_id, model: o.model, ...(retry.rebuilt ? { rebuilt: true } : {}) });
+            } else if (o.subtype === "compact_boundary") {
+              // The CLI summarized the session's history, and the reminder
+              // that carried the volatile half (memory, shared state, this
+              // turn's surface) may be gone with it. Forget what it held, in
+              // memory and on disk, so the next turn — on this process or a
+              // relaunch — delivers the whole volatile half again.
+              session.volatile = COMPACTED_VOLATILE;
+              session.receiptVolatile = null;
+              if (session.sessionId) deletePromptSplitReceipt(RECEIPT_SCOPE, session.sessionId);
             } else if (o.subtype === "thinking_tokens") {
               emit({ ...base(threadId, currentTurnId()), type: "item.updated", itemType: "reasoning", tokens: o.estimated_tokens });
             }
@@ -2494,7 +2630,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // prompt over stdin as a stream-json message — never argv (ARG_MAX).
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
-      if (!(await writeUser(session, threadId, promptMsg))) {
+      if (!(await writeUser(session, threadId, launchMsg))) {
         if (!session.turn?.stopRequested) settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }
@@ -2516,7 +2652,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // The uuid is what the CLI's echo names when a model call takes it in.
       const id = randomUUID();
       turn.pendingSteers.add(id);
-      if (!(await writeUser(s, threadId, { ...claudeUserMessage(text, undefined), uuid: id }))) {
+      if (!(await writeUser(s, threadId, { ...claudeUserMessage(neutralizeReminderTags(text), undefined), uuid: id }))) {
         turn.pendingSteers.delete(id);
         return "refused";
       }

@@ -581,8 +581,10 @@ describe("Group Local VM ownership on the real isolated server", () => {
       writeFileSync(finishFile, "finish");
       const after: any = await dump();
       expect(computer(after)).toBeTruthy();
-      expect(after.systemPrompt).toContain("Local VM");
-      expect(after.systemPrompt).not.toContain("call select_computer");
+      // the surface paragraph is volatile: it rides the launch's first message
+      const afterContext = `${after.systemPrompt}\n${JSON.stringify(after.prompt)}`;
+      expect(afterContext).toContain("Local VM");
+      expect(afterContext).not.toContain("call select_computer");
       await idle(bot.id);
       const state = await api("GET", "/api/bots?messages=30");
       const saved = state.bots.find((b: any) => b.id === bot.id);
@@ -660,8 +662,8 @@ describe("Group Local VM ownership on the real isolated server", () => {
         await api("PATCH", `/api/bots/${bot.id}/tasks/${task.threadId}`, { surface: "vm" });
         rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true });
         await api("POST", `/api/bots/${bot.id}/messages`, { text, threadId: task.threadId });
-        const sent = await dump() as { systemPrompt: string };
-        expect(sent.systemPrompt).toContain("Local VM");
+        const sent = await dump() as { systemPrompt: string; prompt?: unknown };
+        expect(`${sent.systemPrompt}\n${JSON.stringify(sent.prompt)}`).toContain("Local VM");
         expect(sent.systemPrompt).not.toContain("You can act on the user's computer");
         const c = computer(sent);
         expect(c).toBeTruthy();
@@ -756,13 +758,13 @@ describe("Group Local VM ownership on the real isolated server", () => {
     try {
       await api("PATCH", `/api/bots/${bots[0].id}`, { computer: "local" });
       await send(group.id);
-      const sent = await dump() as { systemPrompt: string };
+      const sent = await dump() as { systemPrompt: string; prompt?: unknown };
       const c = computer(sent);
       expect(c).toBeTruthy();
       expect(c.env.OMB_CUA_COMMAND).toBe("/fixture/cua-driver");
       expect(c.args.some((arg: string) => arg.includes("container-mcp"))).toBe(false);
       expect(sent.systemPrompt).toContain("You can act on the user's computer");
-      expect(sent.systemPrompt).toContain("tell them it is on this computer");
+      expect(`${sent.systemPrompt}\n${JSON.stringify(sent.prompt)}`).toContain("tell them it is on this computer");
       expect((await gate(c)).status).toBe(200);
       writeFileSync(finishFile, "finish");
       await idle(bots[0].id);
