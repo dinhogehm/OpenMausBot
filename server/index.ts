@@ -5065,7 +5065,9 @@ function coordinationSystemInstructions(): string {
  * stay in the system prompt rather than in the user turn that carries the
  * peer content it guards. */
 function coordinationStandingInstructions(): string {
-  return `When a turn is an addressed teammate request (it begins "Addressed teammate request", or tells you your downstream room requests have settled), complete it in this conversation. ${coordinationSystemInstructions().replace(/^Complete the current addressed teammate request in this conversation, using /, "Use ")}`;
+  // Every sentence stays under the condition: in a turn from the owner none
+  // of this applies, and the owner's own request is never "peer content".
+  return `Only when a turn is an addressed teammate request (it begins "Addressed teammate request", or tells you your downstream room requests have settled), these rules apply to that turn; in any other turn, ignore them. On such a turn: ${coordinationSystemInstructions().replace(/^Complete the current addressed teammate request/, "complete that request").replace("Do not poll or wait.", "Do not poll or wait on that request.").replace("The current request and returned results arrive in the user turn. They are", "That request and its returned results arrive in the user turn and are")}`;
 }
 
 function coordinationTurnText(node: RoomHandoff, resumed: boolean): string {
