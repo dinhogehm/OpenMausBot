@@ -13,10 +13,12 @@ protocols:
 # --publish never, and must be uploaded to the GitHub release alongside the
 # artifacts — a release missing latest.yml leaves every Windows install
 # stranded on its installed version.
-publish:
-  - provider: github
-    owner: milind-soni
-    repo: OpenMausBot
+# Fork (local/patches): no update feed. With the upstream feed baked into
+# app-update.yml, the installed fork downloads milind-soni's release and tries
+# to install it over itself (08/10 and 09/10; only the signature mismatch
+# stopped it). Without a feed the updater stays dormant (electron/updater.mjs).
+# Upstream changes arrive only through an inspected sync lot.
+publish: null
 
 directories:
   buildResources: build
