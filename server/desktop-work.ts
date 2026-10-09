@@ -22,6 +22,7 @@ import {
   archiveDesktopSession,
   createDesktopSession,
   openDesktopSessionIn,
+  ownWorktreeFolder,
   renameDesktopSession,
   recordBlocked,
   recordInWorktree,
@@ -100,6 +101,8 @@ export interface DesktopWorkDeps {
   registeredWorktrees?: (session: CcSession) => string[];
   /** The tail of the Claude app's own log (main.log), read only: what ties a "trust" prompt to a folder. */
   trustLog?: () => string;
+  /** Trust these folders in the Claude app's config before its link is opened (the app ignores the link's folder otherwise, since 2.31226.0): the error, or null. */
+  trustFolders?: (folders: string[]) => string | null;
   /** A session of the app in the repository root to open before New Session (claude-desktop.ts rootAnchorSession). */
   rootAnchor?: (session: CcSession) => { localId: string; title?: string } | null;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
@@ -854,6 +857,13 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     if (pending.kind === "create") {
       pending.triedAt = deps.now();
       deps.ledger.save();
+      // the app applies the link's folder only when it already trusts it
+      // (2.31226.0, 08/10): our own worktree, git listing it, is trusted first
+      // — the alias the link names and the real path (INSP o92)
+      if (own && deps.trustFolders && ownWorktreeFolder(own.link ?? own.path, own.path, deps.registeredWorktrees?.(next) ?? [])) {
+        const failed = deps.trustFolders([...new Set([own.link ?? own.path, own.path])]);
+        if (failed) deps.log?.(`create: could not trust ${basename(own.path)} in the Claude app's config before the link (${failed.slice(0, 160)})`);
+      }
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
         ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}), trustClicks: pending.trustClicks ?? 0, branch: own.branch })

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import {
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
   cliDependencyLine, cliWorktreePlan, prepareCliWorktree, pruneDanglingLinks, SEEDED_START_MAX_MS, seededStartChain, type OwnPlan,
   addOwnWorktree, enqueueSeededStart, type SeededSession, groupExec, realCloneIo, interruptedCommand,
+  claudeConfigPath, trustFoldersInClaudeConfig, withTrustedFolders,
 } from "./own-worktrees.ts";
 import { ccTurnArgs } from "./cc-sessions.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -1001,3 +1002,53 @@ describe("the aliases whose worktree is gone (R13-2d)", () => {
     }
   });
 });
+
+describe("our worktree trusted in the Claude app's config before its link (o92)", () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  const ALIAS = "/Users/o/Projetos/.omb-worktree-links/nuria-platform/9463-faixa";
+  const REAL = "/Users/o/Projetos/nuria-platform/.claude/worktrees/9463-faixa";
+
+  it("the config's path: CLAUDE_CONFIG_DIR, else the home", () => {
+    expect(claudeConfigPath({}, "/Users/o")).toBe("/Users/o/.claude.json");
+    expect(claudeConfigPath({ CLAUDE_CONFIG_DIR: "/cfg" }, "/Users/o")).toBe("/cfg/.claude.json");
+  });
+
+  it("sets hasTrustDialogAccepted on both folders, keeps every other key and entry, and says when nothing changed", () => {
+    const config = { numStartups: 7, projects: { [ALIAS]: { allowedTools: ["x"] }, "/other": { hasTrustDialogAccepted: false } } };
+    const { config: next, changed } = withTrustedFolders(config, [ALIAS, REAL]);
+    expect(changed).toBe(true);
+    expect(next).toEqual({ numStartups: 7, projects: { [ALIAS]: { allowedTools: ["x"], hasTrustDialogAccepted: true }, [REAL]: { hasTrustDialogAccepted: true }, "/other": { hasTrustDialogAccepted: false } } });
+    // the input is not touched
+    expect(config.projects[ALIAS]).toEqual({ allowedTools: ["x"] });
+    expect(withTrustedFolders(next, [ALIAS, REAL]).changed).toBe(false);
+    expect(withTrustedFolders(null, [ALIAS])).toEqual({ config: { projects: { [ALIAS]: { hasTrustDialogAccepted: true } } }, changed: true });
+  });
+
+  it("writes the file only when something changed, keeps its mode, and never overwrites one that does not parse", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-claudecfg-"));
+    dirs.push(dir);
+    const file = join(dir, ".claude.json");
+    writeFileSync(file, JSON.stringify({ userID: "u", projects: {} }), { mode: 0o600 });
+    expect(trustFoldersInClaudeConfig(file, [ALIAS, REAL])).toBeNull();
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    expect(saved).toEqual({ userID: "u", projects: { [ALIAS]: { hasTrustDialogAccepted: true }, [REAL]: { hasTrustDialogAccepted: true } } });
+    expect(statMode(file)).toBe(0o600);
+    const before = readFileSync(file, "utf8");
+    expect(trustFoldersInClaudeConfig(file, [ALIAS])).toBeNull();
+    expect(readFileSync(file, "utf8")).toBe(before);
+    writeFileSync(file, "{ broken");
+    expect(trustFoldersInClaudeConfig(file, [ALIAS])).toContain("could not read");
+    expect(readFileSync(file, "utf8")).toBe("{ broken");
+    // no file yet: made, private
+    const fresh = join(dir, "new", ".claude.json");
+    mkdirSync(join(dir, "new"));
+    expect(trustFoldersInClaudeConfig(fresh, [REAL])).toBeNull();
+    expect(JSON.parse(readFileSync(fresh, "utf8"))).toEqual({ projects: { [REAL]: { hasTrustDialogAccepted: true } } });
+    expect(statMode(fresh)).toBe(0o600);
+  });
+});
+
+function statMode(path: string): number {
+  return statSync(path).mode & 0o777;
+}

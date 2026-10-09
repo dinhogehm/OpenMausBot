@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { CcSessionLedger, type CcSession } from "./cc-sessions.ts";
@@ -108,6 +111,41 @@ describe("a create with a worktree of the server's", () => {
     // with the worktree's own path, by which a "trust this workspace" prompt is judged ours
     expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: expect.any(Function), trustClicks: 0, branch: "omb/9353-comprar-assentos" });
     expect(session.desktop!.sentAt).toBe(h.now);
+  });
+
+  it("trusts our worktree (alias and real path) in the app's config before its link, only when git lists it (o92: the app ignores an untrusted folder)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "omb-pretrust-"));
+    try {
+      const worktree = join(root, "nuria-platform", ".claude", "worktrees", "9353-comprar-assentos");
+      mkdirSync(worktree, { recursive: true });
+      const alias = join(root, ".omb-worktree-links", "nuria-platform", "9353-comprar-assentos");
+      mkdirSync(join(alias, ".."), { recursive: true });
+      symlinkSync(worktree, alias);
+      const run = async (listed: string[], failure: string | null = null) => {
+        const h = harness(async () => ({ ok: true, head: "abc1234567", link: alias, caches: { mode: "cloned", dirs: ["node_modules"], savedKb: 1, savedMs: 1, ms: 1 } }));
+        const session = h.start();
+        session.desktop!.own!.path = worktree;
+        const trustFolders = vi.fn((_folders: string[]) => failure);
+        h.deps.trustFolders = trustFolders;
+        h.deps.registeredWorktrees = () => listed;
+        await prepareOwnWorktrees(h.deps, h.prepareState);
+        await runDesktopWork(h.deps, h.state);
+        return { h, trustFolders };
+      };
+      const ours = await run([worktree]);
+      expect(ours.trustFolders).toHaveBeenCalledWith([alias, worktree]);
+      expect(ours.trustFolders.mock.invocationCallOrder[0]!).toBeLessThan(ours.h.steps.openIn.mock.invocationCallOrder[0]!);
+      // git does not list it: never trusted by the server
+      const notGits = await run(["/elsewhere"]);
+      expect(notGits.trustFolders).not.toHaveBeenCalled();
+      expect(notGits.h.steps.openIn).toHaveBeenCalled();
+      // the config could not be written: said in the log, the link opened all the same
+      const failed = await run([worktree], "EACCES");
+      expect(failed.h.logs.some((line) => line.includes("could not trust 9353-comprar-assentos") && line.includes("EACCES"))).toBe(true);
+      expect(failed.h.steps.openIn).toHaveBeenCalled();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("adopts the session the app opened there (its record names the worktree) and nobody else's", async () => {
