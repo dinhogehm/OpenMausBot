@@ -1214,3 +1214,49 @@ export function pruneDanglingLinks(repo: string, keep: ReadonlySet<string>, fs: 
   }
   return removed;
 }
+
+/** The Claude app's config (`~/.claude.json`, or under CLAUDE_CONFIG_DIR):
+ * where it keeps which folders are trusted (`projects[path].hasTrustDialogAccepted`). */
+export function claudeConfigPath(env: NodeJS.ProcessEnv = process.env, home: string): string {
+  return join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+}
+
+/** The config with `folders` trusted, and whether anything changed. Every
+ * other key, and every other folder's entry, is kept as it was. */
+export function withTrustedFolders(config: unknown, folders: readonly string[]): { config: Record<string, unknown>; changed: boolean } {
+  const out: Record<string, unknown> = config && typeof config === "object" && !Array.isArray(config) ? { ...(config as Record<string, unknown>) } : {};
+  const projects: Record<string, unknown> = out.projects && typeof out.projects === "object" && !Array.isArray(out.projects) ? { ...(out.projects as Record<string, unknown>) } : {};
+  let changed = false;
+  for (const folder of folders) {
+    const entry = projects[folder];
+    const was: Record<string, unknown> = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
+    if (was.hasTrustDialogAccepted === true) continue;
+    projects[folder] = { ...was, hasTrustDialogAccepted: true };
+    changed = true;
+  }
+  out.projects = projects;
+  return { config: out, changed };
+}
+
+/** Trust the server's own worktree in the Claude app before its link is
+ * opened: since the app's 2.31226.0 (08/10 22:39 BRT) `claude://code/new?folder=`
+ * applies only a folder the app already trusts — a new one is ignored and the
+ * new session opens in the folder used before (9462, 9463, 08/10). Both the
+ * alias and the real path; the file is written only when something changed,
+ * read right before, and replaced at once. The error, or null. */
+export function trustFoldersInClaudeConfig(file: string, folders: readonly string[]): string | null {
+  try {
+    let config: unknown = {};
+    try { config = JSON.parse(readFileSync(file, "utf8")); } catch (error) {
+      // a config that exists and does not parse is never overwritten
+      if (existsSync(file)) return `could not read ${file}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    const next = withTrustedFolders(config, folders);
+    if (!next.changed) return null;
+    const mode = existsSync(file) ? statSync(file).mode & 0o777 : 0o600;
+    writeFileAtomic(file, `${JSON.stringify(next.config, null, 2)}\n`, { mode });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
