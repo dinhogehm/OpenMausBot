@@ -509,6 +509,14 @@ const TRUST_BUTTON = /^(?:Confiar|Trust)$/i;
 /** A scratch folder the app makes on its own ("scratch-2026-10-06-c55113"). */
 const SCRATCH_FOLDER = /\bscratch-\d{4}-\d{2}-\d{2}\b|scratch-workspaces/i;
 const TRUST_LINE = /^(?:[•·]\s*)?(?:Confiar (?:no|neste|nesse) (?:workspace|espaço de trabalho)|Trust (?:this |the )?(?:workspace|folder))(?:\s+[\w.…-]+)?$/i;
+/** The app's trust dialog (2.31226.0): the prompt's line with its
+ * "Cancelar"/"Cancel" button, or the security guide's sentence, as whole lines. */
+const TRUST_DIALOG_CANCEL = /^(?:Cancelar|Cancel)$/i;
+const TRUST_DIALOG_GUIDE = /guia de segurança|security guide/i;
+export function trustDialog(lines: OcrLine[]): boolean {
+  return trustPrompt(lines) !== null && lines.some((line) => TRUST_DIALOG_CANCEL.test(line.text.trim()) || TRUST_DIALOG_GUIDE.test(line.text));
+}
+
 /** Callers pass only the new session's own band (the composer's, y > 55%), never a conversation above it. */
 export function trustPrompt(lines: OcrLine[]): OcrLine | null {
   return lines.find((line) => TRUST_BUTTON.test(line.text.trim())) ?? lines.find((line) => TRUST_LINE.test(line.text.trim())) ?? null;
@@ -675,9 +683,15 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     const registered = () => (listed ??= input.registered?.() ?? []);
     const clicked = (input.trustClicks ?? 0) > 0;
     // First the screen must be the new session of OUR folder: its empty field and the folder's chip.
-    const ours = (lines: OcrLine[]): { field: OcrLine } | DesktopStop => {
-      const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
-      if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+    const ours = (lines: OcrLine[]): { field: OcrLine | null } | DesktopStop => {
+      const field = lines.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim())) ?? null;
+      // The app's trust dialog over the new session (2.31226.0, 09/10 9475,
+      // 9477: "Leia nosso guia de segurança… | Cancelar | Confiar no
+      // workspace" with the chips below it, no empty field): the chips are
+      // judged as ever, and with ours the dialog goes to the trust rules
+      // below (field null) — never pasted while it is up.
+      const dialog = !field && trustDialog(lines);
+      if (!field && !dialog) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
       // The chips on another folder — the one the app used before — or cut
       // short to a start another worktree shares: no click whatever the log
       // says (it follows the composer: 06/10 03:31:25 checkTrust of the folder
@@ -686,6 +700,7 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       const chip = folderChip(lines, input.folderName, () => registered().map((path) => path.split("/").filter(Boolean).pop() ?? path), input.branch);
       // no folder chip read at all: a miss to try again, never "another folder" — not the cli, not the breaker (R2-2)
       if (chip === "unread") return { ok: false, reason: `could not read the new session's folder chip (expected ${input.folderName}); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+      if (dialog && (chip === "none" || chip === "ambiguous")) return { ok: false, reason: `the app's trust dialog is up over another folder's chips, not ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
       if (chip === "none" || chip === "ambiguous") {
         return { ok: false, reason: chip === "none" ? `the new session shows another folder in its chips (the folder before), not ${input.folderName}; nothing was clicked or typed` : `the new session's folder chip is cut short to a start that another worktree of the repository shares, not only ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, previousFolder: true, seen: seenText(lines.slice(-8)) };
       }
@@ -707,7 +722,7 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
         if (/could not read the new session's folder chip/.test(seen.reason)) return { fix: "reread", stop: seen };
         return seen;
       }
-      if (trustPrompt(lines)) return null;
+      if (trustPrompt(lines) || !seen.field) return null;
       const option = worktreeOption(chipRow(lines));
       if (option === "on" || option === "unknown") {
         const stop: DesktopStop = { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)), worktreeOption: option };
@@ -743,7 +758,7 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     // tripped the breaker. With the app's own log saying it saved the trust
     // for our folder, nothing tying the line to another folder, and git
     // listing the folder, the line is a leftover: the brief goes in.
-    const leftover = Boolean(trust && clicked && input.expected && trustSavedFor(log(), input.expected)
+    const leftover = Boolean(trust && clicked && seen.field && input.expected && trustSavedFor(log(), input.expected)
       && trustPromptFor(bottom, log(), opened, input.expected).is !== "other"
       && ownWorktreeFolder(input.folder, input.expected, registered()));
     if (trust && !leftover) {
@@ -770,6 +785,8 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       return { ok: false, reason: `trusted the workspace ${input.folderName}; nothing was typed — the app's link is opened again and the folder checked before the brief goes in`, retry: true, touched: true, trusted: true, seen: seenText(bottom.slice(-8)) };
     }
     const { field } = seen;
+    // no field and no trust line left to answer: never pasted blind
+    if (!field) return { ok: false, reason: `the app's trust dialog left no empty task field for ${input.folderName}; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     // the folder IS the worktree: with the app's worktree option on, the app
     // would make one of its own inside or beside it (R11-dispatch R11-1) —
     // judged above (judge), on the reading the brief now goes on
