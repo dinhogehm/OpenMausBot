@@ -563,6 +563,13 @@ export function trustPromptFor(lines: OcrLine[], log: readonly TrustLogLine[], s
   return realOrSelf(folder) === real ? { is: "ours" } : { is: "other", folder };
 }
 
+/** Whether the app's log saved the trust for `expected` (by real path, so
+ * the alias the app was given counts), at any line of the tail read. */
+export function trustSavedFor(log: readonly TrustLogLine[], expected: string): boolean {
+  const real = realOrSelf(expected);
+  return log.some((each) => each.kind === "save" && realOrSelf(each.folder) === real);
+}
+
 /** The folder the app was given is the server's own worktree: its real path
  * is `expected`, which git lists among the repository's worktrees
  * (`registered`, real paths) — never only the server's record against itself
@@ -728,9 +735,19 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     // anywhere else only the person decides (INSP-R12a X3-2); never when the
     // folder the prompt names, or the app's log since the link, is another
     // one; and once per create: after a click the prompt again is the cli.
-    if (trust) {
+    const log = () => (input.trustLog ? parseTrustLog(input.trustLog()) : []);
+    // After the click the line can stay on screen with the folder already
+    // trusted: 08/10 (9455 17:08, 9457 17:30 BRT) the app's log saved the
+    // trust for our folder on every reopen of the link, our chip and the
+    // empty field read, and the line still there — both went to the cli and
+    // tripped the breaker. With the app's own log saying it saved the trust
+    // for our folder, nothing tying the line to another folder, and git
+    // listing the folder, the line is a leftover: the brief goes in.
+    const leftover = Boolean(trust && clicked && input.expected && trustSavedFor(log(), input.expected)
+      && trustPromptFor(bottom, log(), opened, input.expected).is !== "other"
+      && ownWorktreeFolder(input.folder, input.expected, registered()));
+    if (trust && !leftover) {
       if (clicked) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName} again after the server clicked it once in this create; no second click — the create goes on in the cli`, retry: true, miss: true, touched: true, cliNow: true, seen: seenText(bottom.slice(-8)) };
-      const log = () => (input.trustLog ? parseTrustLog(input.trustLog()) : []);
       const tie = input.expected ? trustPromptFor(bottom, log(), opened, input.expected) : { is: "none" as const };
       if (tie.is === "other") return { ok: false, reason: `the app asks to trust the workspace ${tie.folder}, not ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
       // git's list is read only now, when there is a prompt to answer (INSP-R12a-r2 R2-5)
@@ -761,7 +778,11 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
     await driver.sleep(300);
     const sent = await typeBrief(screen, input.text, size, input.folderName);
-    return sent.ok && setUp.tried.length ? { ...sent, note: `set on screen first: ${setUp.tried.join("; ")}` } : sent;
+    const notes = [
+      ...(setUp.tried.length ? [`set on screen first: ${setUp.tried.join("; ")}`] : []),
+      ...(leftover ? [`the line "Confiar no workspace" was still on screen, the app's log already saving the trust for ${input.folderName}`] : []),
+    ];
+    return sent.ok && notes.length ? { ...sent, note: notes.join("; ") } : sent;
   });
 }
 
