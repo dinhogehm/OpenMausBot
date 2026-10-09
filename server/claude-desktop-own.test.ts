@@ -22,6 +22,7 @@ import {
   trustPrompt,
   trustPromptFolder,
   trustPromptFor,
+  trustSavedFor,
   folderChip,
   parseTrustLog,
   createDesktopSession,
@@ -543,6 +544,52 @@ describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous
     const scratch = fakeApp([[...screenFrom(seen).slice(1, 3), "scratch-2026-10-06-c55113", ...screenFrom(seen).slice(3)]]);
     expect(await openDesktopSessionIn(scratch.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustClicks: 1 })).toMatchObject({ ok: false, cliNow: true });
     expect(scratch.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+  });
+
+  it("after the click, the line still on screen with the app's log saving the trust for our folder (08/10 9457, 17:30 BRT) is a leftover: the brief goes in", async () => {
+    const folder = "9457-webhook-intake-nao-grava-pessoas";
+    const seen = "Confiar no workspace | Local | • 9457-webhook-intake-n... | 99 - |O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5,5 | Médio";
+    const { ours, before, listed } = world(folder);
+    vi.setSystemTime(new Date(2026, 9, 8, 17, 30, 15).getTime());
+    // the app's saves of 08/10, all before this reopen of the link
+    const saves = [new Date(2026, 9, 8, 17, 15, 5).getTime(), new Date(2026, 9, 8, 17, 21, 52).getTime()]
+      .flatMap((at) => [logLine(at, `LocalSessions.saveTrust: cwd=${ours.alias}`), logLine(at, `Saved workspace trust for ${ours.alias}`)]).join("\n");
+    const open = (trustLog: string, registered = listed) => {
+      const app = fakeApp([screenFrom(seen)]);
+      // once the brief is pasted and sent, the app shows the session started
+      const read = app.driver.ocr;
+      const sent = fakeApp([["Vou começar pelo Passo 1.", "Responder…", "+ O v Automático"]]).driver.ocr;
+      app.driver.ocr = () => (app.actions.some((action) => action.startsWith("paste")) && app.actions.at(-1)?.startsWith("key") ? sent() : read());
+      return { app, step: openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => registered, trustLog: () => trustLog, trustClicks: 1 }) };
+    };
+    const left = open(saves);
+    const step = await left.step;
+    expect(step).toMatchObject({ ok: true });
+    expect(step.ok && step.note).toContain("Confiar no workspace");
+    expect(left.app.actions.some((action) => action.startsWith("paste"))).toBe(true);
+    // nothing in the log for our folder: the cli, as before
+    const none = open("");
+    expect(await none.step).toMatchObject({ ok: false, cliNow: true });
+    expect(none.app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+    // the trust saved only for another folder: the cli
+    const other = open(logLine(Date.now() - 60_000, `Saved workspace trust for ${before.alias}`));
+    expect(await other.step).toMatchObject({ ok: false, cliNow: true });
+    // our save, but the app checking another folder since the link: the line is tied to it — the cli
+    const tied = open(`${saves}\n${logLine(Date.now() + 1_000, `LocalSessions.checkTrust: cwd=${before.alias}`)}`);
+    expect(await tied.step).toMatchObject({ ok: false, cliNow: true });
+    expect(tied.app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+    // our save, but git does not list the folder: the cli
+    const notGits = open(saves, ["/elsewhere"]);
+    expect(await notGits.step).toMatchObject({ ok: false, cliNow: true });
+  });
+
+  it("trustSavedFor: a save for our folder by its alias or real path, never a check nor another folder", () => {
+    const { ours, before } = world("9457-webhook-intake-nao-grava-pessoas");
+    const at = new Date(2026, 9, 8, 17, 15, 5).getTime();
+    expect(trustSavedFor([{ at, kind: "save", folder: ours.alias }], ours.worktree)).toBe(true);
+    expect(trustSavedFor([{ at, kind: "save", folder: ours.worktree }], ours.worktree)).toBe(true);
+    expect(trustSavedFor([{ at, kind: "check", folder: ours.alias }], ours.worktree)).toBe(false);
+    expect(trustSavedFor([{ at, kind: "save", folder: before.alias }], ours.worktree)).toBe(false);
   });
 
   it("ties by the newest line, never one of up to 999 ms before the link, and two folders in the newest second tie to none", () => {
