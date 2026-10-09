@@ -23,6 +23,7 @@ import {
   trustPromptFolder,
   trustPromptFor,
   trustSavedFor,
+  trustDialog,
   folderChip,
   parseTrustLog,
   createDesktopSession,
@@ -590,6 +591,44 @@ describe("\"Confiar\" never with the chip on another folder, nor on an ambiguous
     expect(trustSavedFor([{ at, kind: "save", folder: ours.worktree }], ours.worktree)).toBe(true);
     expect(trustSavedFor([{ at, kind: "check", folder: ours.alias }], ours.worktree)).toBe(false);
     expect(trustSavedFor([{ at, kind: "save", folder: before.alias }], ours.worktree)).toBe(false);
+  });
+
+  it("the trust dialog over the new session (09/10 9477, 9475): ours is clicked once and the link opened again; over another folder's chips, nothing", async () => {
+    const folder = "9477-antispam-nao-bloqueia-remetente";
+    const dialog = "Leia nosso guia de segurança para mais informações. | Cancelar | Confiar no workspace | • 9477-antispam-nao-blo... | 99 - 1O worktree | Opus 5,5 | Médio";
+    const after = "• Local | • 9477-antispam-nao-blo... | 99 - |O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5,5 | Médio";
+    const { ours, listed } = world(folder);
+    vi.setSystemTime(new Date(2026, 9, 9, 12, 21, 40).getTime());
+    expect(trustDialog(ocr(dialog))).toBe(true);
+    expect(trustDialog(ocr(after))).toBe(false);
+    // the old prompt (a line above the composer, no dialog) is not the dialog
+    expect(trustDialog(ocr(REAL_TRUST_16[0]![3]))).toBe(false);
+    const app = fakeApp([screenFrom(dialog)]);
+    // the click answers the dialog: the new session shows, empty
+    const read = app.driver.ocr;
+    const answered = fakeApp([screenFrom(after)]).driver.ocr;
+    app.driver.ocr = () => (app.actions.some((action) => action.startsWith("click")) ? answered() : read());
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => listed, trustLog: () => "" });
+    expect(step).toMatchObject({ ok: false, trusted: true, retry: true });
+    expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+    // the dialog again after our click in this create: the cli, no second click
+    const again = fakeApp([screenFrom(dialog)]);
+    expect(await openDesktopSessionIn(again.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => listed, trustClicks: 1 })).toMatchObject({ ok: false, cliNow: true });
+    expect(again.actions.some((action) => action.startsWith("click"))).toBe(false);
+    // git does not list the folder: the person decides, nothing clicked
+    const notGits = fakeApp([screenFrom(dialog)]);
+    expect(await openDesktopSessionIn(notGits.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => ["/elsewhere"], trustLog: () => "" })).toMatchObject({ ok: false, trustNeeded: ours.alias });
+    expect(notGits.actions.some((action) => action.startsWith("click"))).toBe(false);
+    // 9475: the dialog over the chips of the folder before (9463) — never the picker under it, never a click
+    const other = world("9475-busca-central-de-ajuda-titulo-ex");
+    const before = "Leia nosso guia de segurança para mais informações. | Cancelar | Confiar no workspace | • 9463-faixa-do-aviso-do-... | 2º omb/9463-faixa-do-aviso-do-w... IO worktree | Opus 5.5 | Médio";
+    const stale = fakeApp([screenFrom(before)]);
+    const missed = await openDesktopSessionIn(stale.driver, { folder: other.ours.alias, folderName: "9475-busca-central-de-ajuda-titulo-ex", text: "b", expected: other.ours.worktree, registered: () => other.listed, trustLog: () => "" });
+    expect(missed).toMatchObject({ ok: false, miss: true });
+    expect(!missed.ok && missed.reason).toContain("trust dialog is up over another folder's chips");
+    expect(!missed.ok && "previousFolder" in missed && missed.previousFolder).toBeFalsy();
+    expect(stale.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
   });
 
   it("ties by the newest line, never one of up to 999 ms before the link, and two folders in the newest second tie to none", () => {
