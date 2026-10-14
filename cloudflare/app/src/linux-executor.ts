@@ -71,6 +71,9 @@ export class LinuxExecutor extends DurableObject<unknown> {
       await this.#destroy();
       await this.ctx.storage.put<AttemptRecord>("attempt", { fingerprint, status: "failed" });
       await this.ctx.storage.deleteAlarm();
+      // Native teardown can reject monitor/stdout before #run observes stop.
+      // Preserve the persisted cancellation after destruction is confirmed.
+      if (this.#stopped) throw new Error("executor_stopped");
       const message = error instanceof Error && ["executor_timeout", "executor_stopped", "executor_deadline_elapsed", "proof_output_limit", "proof_artifact_mismatch"].includes(error.message)
         ? error.message : "executor_failed";
       throw new Error(message);

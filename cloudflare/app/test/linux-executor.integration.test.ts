@@ -12,20 +12,25 @@ function fixtureContainer() {
   let running = false;
   let startOptions: ContainerStartupOptions | undefined;
   let resolveMonitor: (() => void) | undefined;
+  let rejectMonitor: ((error: Error) => void) | undefined;
   let complete: (() => void) | undefined;
   let releaseStartup: (() => void) | undefined;
   let defer = false;
   let slowStartup = false;
   let destroyFailsOnce = false;
+  let rejectDuringStop = false;
   const container = {
     get running() { return running; },
     start(options: ContainerStartupOptions) { starts++; running = true; startOptions = options; },
     async setInactivityTimeout() { if (slowStartup) await new Promise<void>((resolve) => { releaseStartup = resolve; }); },
-    monitor() { return new Promise<void>((resolve) => { resolveMonitor = resolve; }); },
+    monitor() { return new Promise<void>((resolve, reject) => { resolveMonitor = resolve; rejectMonitor = reject; }); },
     async destroy() {
       destroys++;
       if (destroyFailsOnce) { destroyFailsOnce = false; throw new Error("synthetic cleanup failure"); }
-      running = false; resolveMonitor?.(); complete?.(); releaseStartup?.();
+      running = false;
+      if (rejectDuringStop) rejectMonitor?.(new Error("native container terminated"));
+      else resolveMonitor?.();
+      complete?.(); releaseStartup?.();
     },
     async exec(argv: string[], options: ContainerExecOptions) {
       executions++;
@@ -35,13 +40,18 @@ function fixtureContainer() {
       const bytes = new Uint8Array(await new Response(options.stdin as ReadableStream).arrayBuffer());
       const gate = defer ? new Promise<void>((resolve) => { complete = resolve; }) : Promise.resolve();
       return {
-        stdout: new ReadableStream({ async start(controller) { await gate; controller.enqueue(bytes); controller.close(); } }),
+        stdout: new ReadableStream({ async start(controller) {
+          await gate;
+          if (rejectDuringStop && !running) controller.error(new Error("native stream closed"));
+          else { controller.enqueue(bytes); controller.close(); }
+        } }),
         exitCode: gate.then(() => 0),
       };
     },
   };
   return {
     container, defer: () => { defer = true; }, delayStartup: () => { slowStartup = true; }, failNextDestroy: () => { destroyFailsOnce = true; },
+    rejectOnStop: () => { rejectDuringStop = true; },
     get starts() { return starts; }, get executions() { return executions; }, get destroys() { return destroys; }, get startOptions() { return startOptions; },
   };
 }
@@ -135,6 +145,22 @@ describe("LinuxExecutor attempt isolation", () => {
       await executor.stop();
       expect(fixture.destroys).toBe(2);
       await expect(executor.execute(input)).rejects.toThrow("executor_stopped");
+    });
+  });
+
+  it("preserves cancellation when native monitor and output reject during confirmed teardown", async () => {
+    await inExecutor(async (executor, state) => {
+      const fixture = fixtureContainer();
+      fixture.defer();
+      fixture.rejectOnStop();
+      Object.defineProperty(state, "container", { configurable: true, value: fixture.container });
+      const execution = executor.execute(input);
+      const rejection = expect(execution).rejects.toThrow("executor_stopped");
+      while (fixture.executions === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+      await executor.stop();
+      await rejection;
+      expect(fixture.destroys).toBe(1);
+      expect(await state.storage.get("stopped")).toBe(true);
     });
   });
 });
