@@ -1,0 +1,153 @@
+{
+  "worker": "veltram-linux-smoke-20261014",
+  "version": "e55c1983-6bd3-4a44-9734-f1cdae87c143",
+  "sourceHash": "5b839ab16576653e7c634727d8729280b67a76722d5198c7dea52b4979b9d3b0",
+  "events": [
+    {
+      "phase": "unauthenticated-denied",
+      "status": 403
+    },
+    {
+      "phase": "cloud-health",
+      "status": 200,
+      "elapsedMs": 524,
+      "body": {
+        "fixture": "veltram-linux-smoke-20261014",
+        "sourceHash": "5b839ab16576653e7c634727d8729280b67a76722d5198c7dea52b4979b9d3b0",
+        "colo": "GRU"
+      }
+    },
+    {
+      "phase": "linux-execute",
+      "status": 200,
+      "elapsedMs": 1291,
+      "body": {
+        "stdout": "Veltram na Cloudflare: prova Linux isolada — 🚀\n$(touch /workspace/injected)\n",
+        "artifact": "Veltram na Cloudflare: prova Linux isolada — 🚀\n$(touch /workspace/injected)\n",
+        "exitCode": 0,
+        "runId": "success",
+        "colo": "CFC"
+      }
+    },
+    {
+      "phase": "artifact-verified",
+      "sha256": "e5663cd0e7546b027bc4b80ce4240b9be39ea8287d8092bef3611ffd8bfbb4d0",
+      "bytes": 81
+    },
+    {
+      "phase": "receipt-replay",
+      "status": 200,
+      "elapsedMs": 159,
+      "matched": true
+    },
+    {
+      "phase": "stop",
+      "status": 200,
+      "elapsedMs": 572,
+      "body": {
+        "stopped": true,
+        "runId": "cancel"
+      }
+    },
+    {
+      "phase": "cancelled-execution",
+      "status": 409,
+      "elapsedMs": 2499,
+      "body": {
+        "error": "executor_failed",
+        "runId": "cancel"
+      }
+    },
+    {
+      "phase": "failure",
+      "message": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'executor_failed'\n- 'executor_stopped'\n            ^\n"
+    },
+    {
+      "phase": "final-stop",
+      "runId": "success",
+      "status": 200
+    },
+    {
+      "phase": "final-stop",
+      "runId": "cancel",
+      "status": 200
+    },
+    {
+      "phase": "late-dispatch-denied",
+      "status": 409,
+      "body": {
+        "error": "executor_stopped",
+        "runId": "cancel"
+      }
+    },
+    {
+      "phase": "fixed-cloud-health",
+      "status": 200,
+      "elapsedMs": 191,
+      "body": {
+        "fixture": "veltram-linux-smoke-20261014",
+        "sourceHash": "98cb89504beb75bb7c2d02cc76f3371c7bf680cb1e7f4bd482758a28996b9086",
+        "colo": "CFC"
+      }
+    },
+    {
+      "phase": "fixed-stop",
+      "status": 200,
+      "elapsedMs": 313,
+      "body": {
+        "stopped": true,
+        "runId": "cancel-fixed"
+      }
+    },
+    {
+      "phase": "fixed-cancelled-execution",
+      "status": 409,
+      "elapsedMs": 2286,
+      "body": {
+        "error": "executor_stopped",
+        "runId": "cancel-fixed"
+      }
+    },
+    {
+      "phase": "fixed-late-dispatch-denied",
+      "status": 409,
+      "elapsedMs": 150,
+      "body": {
+        "error": "executor_stopped",
+        "runId": "cancel-fixed"
+      }
+    },
+    {
+      "phase": "fixed-final-stop",
+      "status": 200
+    }
+  ],
+  "nativeExecutionPassed": true,
+  "cancellationTeardownPassed": true,
+  "cancellationClassificationMismatch": true,
+  "lateDispatchDenied": true,
+  "correctedCancellationPassed": true,
+  "finalRuntimeValidationPassed": true,
+  "initialProbePassed": false,
+  "correctedVersion": "e34ab9c2-e138-4228-86c8-00094eb40ac2",
+  "correctedSourceHash": "98cb89504beb75bb7c2d02cc76f3371c7bf680cb1e7f4bd482758a28996b9086",
+  "proofHelperHash": "236d3c91c8abbfeef36635f25e0e93dad230f554ba35bba18086130f851c0136",
+  "executionCount": 3,
+  "regression": {
+    "red": "Expected executor_stopped; received executor_failed",
+    "greenTests": 8,
+    "typecheck": "passed",
+    "focusedLint": "passed"
+  },
+  "cleanup": {
+    "containerApplicationId": "93dd9b2e490749eeaa3e62a6bfcfd719",
+    "instancesBeforeDeletion": 0,
+    "containerApplicationDeleted": true,
+    "containerListAfterDeletionContainsFixture": false,
+    "workerDeleted": true,
+    "workerAPIErrorAfterDeletion": 10007,
+    "authenticatedHTTPStatusAfterDeletion": 404,
+    "localFixtureSecretRemoved": true,
+    "productionResourcesModifiedByFixture": false
+  }
+}

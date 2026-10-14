@@ -1,6 +1,6 @@
 # Veltram: empresas, credenciais e prova Linux
 
-Esta receita verifica `cloudflare/app`, não o servidor desktop. Usa workerd, D1 e Durable Objects locais, dados descartáveis e e-mail simulado. Nenhuma configuração do OpenMausBot local é importada. `veltram.com` foi registrado em 14/10/2026; o aplicativo não foi publicado.
+Esta receita verifica `cloudflare/app`, não o servidor desktop. As fixtures locais usam workerd, D1 e Durable Objects locais, dados descartáveis e e-mail simulado. Nenhuma configuração do OpenMausBot local é importada. A versão `veltram-2026-10-14.2` está publicada em `https://veltram.com`; as evidências abaixo separam testes locais, executor remoto isolado e autenticação real autorizada por API.
 
 ## Testes automatizados
 
@@ -62,14 +62,53 @@ Na fixture nativa, verificar execução e conteúdo exato; repetição idêntica
 
 ## Resultado local em 14/10/2026
 
-A rodada consolidada aprovou 91 testes: 53 unitários e 38 de integração. `pnpm --filter @openmausbot/cloud-app check`, build da interface, dry-run do Worker, oxlint com avisos tratados como erro e `git diff --check` também passaram. O responsável pela integração confirmou saída zero na sessão de verificação 59226. Essa evidência é local e não comprova publicação ou execução remota.
+A rodada final aprovou 92 testes: 53 unitários e 39 de integração. `pnpm --filter @openmausbot/cloud-app check`, build da interface, dry-run com `wrangler.production.jsonc`, oxlint com avisos tratados como erro e `git diff --check` também passaram. O responsável pela integração confirmou saída zero na sessão de verificação 61968. A rodada inclui a regressão de classificação do cancelamento encontrada na prova remota.
 
-A aceitação local nativa com Wrangler/Docker comprovou execução, recibo sem nova execução, cancelamento e prazo. No navegador da fixture foram observados login, criação da empresa A, prova concluída com artefato exato, cadastro de chave sintética em A e ausência dessa chave ao criar/trocar para B. Isso ainda não comprova todos os passos do percurso de navegador acima, nem a operação publicada. Registrar separadamente qualquer verificação adicional.
+A aceitação local nativa com Wrangler/Docker comprovou execução, recibo sem nova execução, cancelamento e prazo. No navegador da fixture foram observados login, criação da empresa A, prova concluída com artefato exato, cadastro de chave sintética em A e ausência dessa chave ao criar/trocar para B, além de cancelamento, logout e apresentação em largura de 390 px. Essas observações locais não substituem a navegação completa no ambiente publicado.
 
-## Preparação remota e limites da prova
+## Publicação atual em 14/10/2026
 
-A auditoria somente leitura confirmou acesso OAuth aos serviços necessários, nenhum Container configurado na conta e nenhum remetente Email Sending para `veltram.com`. Workers Paid foi confirmado como plano atual no dashboard em 14/10/2026. Nenhum recurso remoto do Veltram foi criado até este registro e nenhum e-mail real foi enviado. Preparar recursos exclusivos, migrações, segredos reais, origem HTTPS, domínio do Worker e domínio remetente antes de publicar; não reutilizar a configuração da fixture.
+O segundo deploy com `wrangler.production.jsonc` terminou com saída zero e inclui a correção de classificação do cancelamento. Identificadores da versão atual:
 
-Containers e envio para destinatários arbitrários exigem Workers Paid, já ativo nesta conta; não é necessária nova contratação. O mínimo divulgado é US$5/mês por conta; e-mail inclui 3.000 envios/mês por conta e cobra US$0,35/1.000 excedentes. Franquias e consumo são compartilhados com outros projetos, portanto não presumir custo incremental zero nem tratar os limites de execução como teto financeiro. A auditoria não contratou plano nem executou prova paga. [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Email Service](https://developers.cloudflare.com/email-service/platform/pricing/), [Containers](https://developers.cloudflare.com/containers/platform/pricing/).
+| Evidência | Valor |
+| --- | --- |
+| Código | Commit `42b962a5fbacecd75b7369c96b789e764c31d0d9` |
+| Release | `veltram-2026-10-14.2` |
+| Versão Cloudflare | `902dd974-dd94-4477-ac60-edc5567b0877` |
+| Dashboard | Mesma versão ativa, Ready e com 100% do tráfego |
+| URL | `https://veltram.com` |
+| D1 exclusivo | `8d86866b-bf87-4c2f-afcc-f8324fbea0ae`; duas migrações aplicadas |
+| Segredos | `AUTH_SECRET` e `CREDENTIAL_MASTER_KEY` novos e exclusivos, instalados sem registrar valores |
+| E-mail | Email Sending habilitado; SPF, DKIM, DMARC e MX confirmados por DNS; solicitante confirmou recebimento real do OTP |
+| Saúde | HTTPS 200: `{service: "veltram", status: "ok", release: "veltram-2026-10-14.2"}` |
+| Autenticação | Login autorizado por API: 200 e sucesso; sessão autenticada; cookie Secure e HttpOnly |
+| Logout | 200, seguido de `/api/session` com 401 |
+| JavaScript | `index-CWljiH3O.js`, SHA-256 `2086c2c317bf2867965b255b7b57f6554160af95b1e1aa0f333196bb957d8158`, idêntico ao build local |
 
-Não foram verificados entrega real de e-mail, validade de chave no provedor, modelos/agentes de IA, R2, recuperação de backup, migração do app existente ou publicação. A prova Linux executa um programa fixo, não um agente de IA. Guardar saída terminal, respostas, versão e URL de cada ambiente: testes locais, domínio registrado e dry-run não comprovam tarefa concluída na nuvem.
+O DNS autoritativo e os resolvedores 1.1.1.1 e 8.8.8.8 retornaram `104.21.44.75` e `172.67.197.74`. O resolvedor local do Mac ainda retornava NODATA em cache. Por isso, as verificações HTTPS acima fixaram a resolução ao IP autoritativo, mantendo validação TLS para `veltram.com`; elas comprovam a resposta do destino, não a resolução normal naquele host. Revalidar navegação normal após a atualização do cache, sem prometer um horário exato.
+
+O primeiro acesso real foi autorizado pelo solicitante após confirmar o recebimento do código. Login, consulta da sessão e logout foram feitos por HTTPS com a mesma resolução explícita e TLS válido. Nenhum endereço pessoal, código, valor de cookie ou identificador de sessão é registrado nesta documentação. Isso comprova autenticação pela API; não é prova da navegação completa em produção.
+
+## Executor remoto isolado
+
+O [recibo de execução e limpeza](evidence/2026-10-14-veltram-linux.json) contém o resultado inicial e a prova corrigida. A fixture respondeu 200, saída zero e artefato de 81 bytes exatamente correto; a repetição devolveu o recibo em 159 ms. A primeira execução de cancelamento parou o Container, mas classificou a resposta como `executor_failed`; essa asserção vermelha motivou a correção e o teste de regressão.
+
+Após a correção, `stop` respondeu 200 em 313 ms, a execução interrompida respondeu 409 com `executor_stopped` em 2.286 ms e uma chamada tardia foi recusada com 409 em 150 ms. O SHA-256 do executor verificado, `98cb89504beb75bb7c2d02cc76f3371c7bf680cb1e7f4bd482758a28996b9086`, corresponde ao código publicado. A fixture, sua aplicação de Container e seu segredo temporário foram removidos; havia zero instâncias antes da remoção e o endpoint removido respondeu 404. Essa prova isolada não substitui o fluxo completo de execução pela interface autenticada do aplicativo.
+
+## Publicações seguintes
+
+Usar explicitamente a configuração de produção, após testes e atualização revisada do identificador de release:
+
+```sh
+pnpm --filter @openmausbot/cloud-app build
+pnpm --filter @openmausbot/cloud-app exec wrangler deploy --dry-run --config wrangler.production.jsonc
+pnpm --filter @openmausbot/cloud-app exec wrangler deploy --config wrangler.production.jsonc
+```
+
+Somente quando existirem migrações novas revisadas, aplicar com `pnpm --filter @openmausbot/cloud-app exec wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc`. Não publicar os entrypoints de fixture nem regenerar segredos como rotina. Trocar a chave mestra sem recriptografar dados impede a leitura das credenciais; rotação exige procedimento próprio. Registrar a nova versão e repetir saúde, identidade do asset e provas funcionais pertinentes.
+
+## Limites e pendências
+
+Workers Paid foi confirmado como plano atual no dashboard; não houve nova contratação. O mínimo divulgado é US$5/mês por conta; e-mail inclui 3.000 envios/mês por conta e cobra US$0,35/1.000 excedentes. Franquias e consumo são compartilhados com outros projetos. Publicação e fixture remota consomem recursos da conta; a fatura incremental não foi aferida e os limites de execução não são teto financeiro. [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Email Service](https://developers.cloudflare.com/email-service/platform/pricing/), [Containers](https://developers.cloudflare.com/containers/platform/pricing/).
+
+Permanecem sem prova a navegação e o fluxo multiempresa completo em produção, condicionados à nova conferência após atualizar o cache DNS local, além de validade de chave no provedor, modelos/agentes de IA, R2, recuperação de backup e migração do app existente. A prova Linux executa um programa fixo, não um agente de IA. Guardar saída terminal, respostas, versão e URL de cada ambiente: deploy, autenticação por API, saúde e assets corretos não comprovam todos os fluxos publicados.

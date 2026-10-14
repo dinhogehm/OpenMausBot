@@ -1,6 +1,6 @@
 # Veltram
 
-Aplicativo web em desenvolvimento para várias empresas na Cloudflare. `veltram.com` foi registrado em 14/10/2026; o aplicativo continua somente local. O [desenho da reconstrução](../../docs/plans/2026-10-14-cloudflare-reconstruction-design.md) registra decisões e referências, e o [plano do primeiro fluxo](../../docs/plans/2026-10-14-veltram-first-workflow.md) delimita esta etapa.
+Aplicativo web em desenvolvimento para várias empresas na Cloudflare, publicado em [veltram.com](https://veltram.com), com Worker, interface e recursos próprios. Saúde HTTPS, arquivos publicados, recebimento real do código de e-mail, login e logout via API foram verificados. A navegação completa em produção ainda depende de nova conferência após atualizar o cache DNS local. O [desenho da reconstrução](../../docs/plans/2026-10-14-cloudflare-reconstruction-design.md) registra decisões e referências, e o [plano do primeiro fluxo](../../docs/plans/2026-10-14-veltram-first-workflow.md) delimita esta etapa.
 
 ## Estado atual
 
@@ -14,7 +14,7 @@ Aplicativo web em desenvolvimento para várias empresas na Cloudflare. `veltram.
 - Cada tentativa usa um `LinuxExecutor` próprio, com rede externa desligada e sem chaves de provedores. A concessão tem prazo absoluto de 60 segundos a partir da aprovação; o executor usa o menor prazo entre esse limite e 45 segundos após recebê-la, incluindo preparação e execução.
 - Cancelamento invalida a geração anterior. Uma vaga só é liberada após confirmação da parada do executor, inclusive quando sua concessão expirou. Recuperação após despacho incerto marca interrupção e não repete comandos; uma chamada idêntica já concluída pode devolver o recibo persistido sem executar novamente.
 
-Ainda não há convites/gestão de membros, bots, conversas com IA, broker de modelos, R2, rotinas ou publicação. Os testes inserem membros adicionais apenas em fixture. O pacote não importa dados, chaves ou código enterprise do aplicativo existente.
+Ainda não há convites/gestão de membros, bots, conversas com IA, broker de modelos, R2 ou rotinas. Os testes inserem membros adicionais apenas em fixture. O pacote não importa dados, chaves ou código enterprise do aplicativo existente.
 
 ## API
 
@@ -53,13 +53,23 @@ pnpm --filter @openmausbot/cloud-app dry-run
 
 Os testes lançam workerd com D1 temporário, remetente simulado e substitutos controlados do executor. A aceitação adicional com Wrangler e Docker locais exercita o executor nativo real. As credenciais são sintéticas. Não há envio real de e-mail, chamada paga de IA ou acesso aos dados do usuário. A [receita de verificação](../../docs/verification/cloud-app.md) inclui a fixture de navegador com armazenamento descartável e os limites de cada prova.
 
-A rodada consolidada em 14/10/2026 aprovou 91 testes (53 unitários e 38 de integração), verificação de tipos, build da interface, dry-run do Worker, oxlint sem avisos e `git diff --check`. Essa evidência valida a etapa local; não comprova publicação.
+A rodada final em 14/10/2026 aprovou 92 testes (53 unitários e 39 de integração), verificação de tipos, build da interface, dry-run com a configuração de produção, oxlint sem avisos e `git diff --check`. A prova remota confirmou execução Linux, recibo sem repetição, cancelamento corrigido e recusa de despacho tardio. Seu [recibo e limpeza](../../docs/verification/evidence/2026-10-14-veltram-linux.json) estão registrados; a fixture temporária foi removida. Consulte a receita de verificação para separar as evidências locais, da fixture remota e do aplicativo publicado.
 
-## Antes de publicar
+## Publicação e configuração
 
-`wrangler.jsonc` usa ID de banco inexistente, remetente reservado e origem localhost. Preparar D1 e Durable Objects exclusivos do Veltram, definir `APP_ORIGIN=https://veltram.com`, conectar o domínio ao Worker, configurar o domínio remetente, gerar `AUTH_SECRET` aleatório e `CREDENTIAL_MASTER_KEY` de 32 bytes em base64 como segredos exclusivos do Worker. Nunca colocar segredos reais em `vars`, no repositório ou na imagem do executor. Os valores fixos da fixture são públicos, sintéticos e proibidos em produção.
+`wrangler.jsonc` continua reservado ao desenvolvimento, com banco fictício, remetente reservado e origem localhost. A publicação usa explicitamente `wrangler.production.jsonc`, que aponta para recursos exclusivos do Veltram, `APP_ORIGIN=https://veltram.com`, remetente `noreply@veltram.com` e o domínio do Worker. O D1 recebeu as duas migrações iniciais; `AUTH_SECRET` e `CREDENTIAL_MASTER_KEY` exclusivos já foram instalados como segredos. Nunca colocar seus valores em `vars`, no repositório ou na imagem do executor. Os valores fixos das fixtures são sintéticos e proibidos em produção.
 
-A auditoria somente leitura de 14/10/2026 confirmou acesso OAuth aos serviços necessários, nenhum Container configurado na conta e nenhum remetente de Email Sending configurado para `veltram.com`. Não criou recursos nem enviou e-mails. O registro do domínio não publica o app nem habilita o remetente. O onboarding de envio pode ser feito com `wrangler email sending enable veltram.com`, seguido das consultas `settings` e `dns get`; não executar essa preparação como parte dos testes locais.
+Para uma publicação revisada, na raiz do worktree, após os testes e atualização do identificador de versão:
+
+```sh
+pnpm --filter @openmausbot/cloud-app build
+pnpm --filter @openmausbot/cloud-app exec wrangler deploy --dry-run --config wrangler.production.jsonc
+pnpm --filter @openmausbot/cloud-app exec wrangler deploy --config wrangler.production.jsonc
+```
+
+Aplicar migrações remotas somente quando houver mudanças revisadas de schema: `pnpm --filter @openmausbot/cloud-app exec wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc`. Não regenerar segredos em publicação de rotina. Rotacionar `AUTH_SECRET` afeta sessões; trocar a chave mestra sem recriptografar dados impede a leitura das credenciais existentes.
+
+A versão atual é `veltram-2026-10-14.2`, commit `42b962a5fbacecd75b7369c96b789e764c31d0d9`, versão Cloudflare `902dd974-dd94-4477-ac60-edc5567b0877`. O dashboard confirmou essa versão ativa, Ready e com 100% do tráfego. HTTPS, saúde e identidade do JavaScript foram conferidos usando o IP resolvido pelo DNS autoritativo, com TLS válido para o domínio. O resolvedor local ainda mantinha resposta negativa em cache; a navegação normal nesse host precisa de nova conferência depois de sua atualização. O solicitante confirmou o recebimento real do OTP; primeiro login, sessão autenticada, cookie Secure/HttpOnly, logout e retorno a 401 foram verificados via API autorizada, sem registrar dados pessoais ou segredos. A [receita de verificação](../../docs/verification/cloud-app.md) registra os identificadores e limitações da publicação.
 
 Workers Paid foi confirmado como plano atual no dashboard em 14/10/2026; não é necessária uma nova contratação. Containers e envio de e-mail para destinatários arbitrários usam esse plano, cujo mínimo divulgado é US$5/mês por conta. A inclusão de um novo projeto não cria outra mensalidade, mas o consumo e as franquias são compartilhados com outros projetos. Há 3.000 e-mails/mês incluídos por conta, depois US$0,35/1.000; Containers e armazenamento/consultas excedentes são cobrados por uso. Acompanhar consumo e orçamento da prova; os limites técnicos acima não são um teto financeiro. [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [Email Service](https://developers.cloudflare.com/email-service/platform/pricing/), [Containers](https://developers.cloudflare.com/containers/platform/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/).
 
