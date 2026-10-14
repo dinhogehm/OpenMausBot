@@ -1,0 +1,10 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "veltram-linux-runtime-fixture",
+  "main": "linux-runtime-worker.ts",
+  "compatibility_date": "2026-10-14",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "LINUX_EXECUTORS", "class_name": "LinuxExecutor" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LinuxExecutor"] }],
+  "containers": [{ "class_name": "LinuxExecutor", "scheduling_policy": "durable_object" }]
+}

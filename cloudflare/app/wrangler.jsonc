@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "veltram",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
+  "durable_objects": { "bindings": [
+    { "name": "RUNS", "class_name": "ExecutionRoom" },
+    { "name": "ADMISSION", "class_name": "Admission" },
+    { "name": "LINUX_EXECUTORS", "class_name": "LinuxExecutor" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ExecutionRoom", "Admission", "LinuxExecutor"] }],
+  "containers": [{ "class_name": "LinuxExecutor", "scheduling_policy": "durable_object" }],
+  // Local fixture only. Provision new resources before publishing.
+  "vars": {
+    "APP_ORIGIN": "http://localhost:8787",
+    "EMAIL_FROM": "noreply@example.invalid"
+  },
+  "secrets": { "required": ["AUTH_SECRET", "CREDENTIAL_MASTER_KEY"] },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "veltram",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "send_email": [{"name": "EMAIL"}]
+}
