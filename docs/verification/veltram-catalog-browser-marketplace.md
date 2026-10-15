@@ -66,3 +66,7 @@ Para repetir a prova, o operador precisa de autorização para criar recursos te
 - Ainda não houve tarefa real de IA criando PR no repositório do usuário como parte destas provas. A modalidade atual de credenciais é chave de API da empresa.
 - Limites de duração/tokens não são orçamento financeiro. O limite configurável de R$ 1.000/dia solicitado para Nuria, sua fonte de preços e conciliação ainda precisam de implementação e testes.
 - Autonomia 24/7, merge/publicação após os controles de cada repositório, Graft e assinaturas oficialmente suportadas têm critérios de aceite no plano. Nenhum desses recursos deve aparecer como ativo por causa desta validação.
+
+## Publicação posterior
+
+O [recibo de produção da versão .4](evidence/2026-10-14-veltram-catalog-production.json) confirma publicação do commit `0cee4508118283d29633300a6159d2ad689442d8` em https://veltram.com, com 100% do tráfego, saúde HTTP 200, hashes dos assets iguais ao build e nenhuma migration pendente. Os 12 perfis autorizados foram importados na Nuria e a exportação comparada campo a campo; nenhum conteúdo privado foi incluído no repositório. Equipe padrão: Chief of Staff, Eng PRODEV e QA PRODEV. Jev ainda sem chave; os próximos escopos e limitações acima permanecem pendentes.

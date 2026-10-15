@@ -1,0 +1,84 @@
+{
+  "kind": "veltram_catalog_browser_production_publication",
+  "release": "veltram-2026-10-14.4",
+  "runtimeCommit": "0cee4508118283d29633300a6159d2ad689442d8",
+  "worker": "veltram",
+  "origin": "https://veltram.com",
+  "deployment": {
+    "cloudflareVersionId": "951ddb2f-3b9e-4001-a8ee-0ad00800a441",
+    "deploymentId": "189f02c8-29c5-4b46-b61f-90814313dad4",
+    "createdAt": "2026-10-15T02:36:31.790389Z",
+    "trafficPercent": 100
+  },
+  "migrations": {
+    "appliedInThisRelease": [
+      "0005_agent_catalog.sql",
+      "0006_reports.sql",
+      "0007_browser.sql"
+    ],
+    "pendingAfterPublication": []
+  },
+  "publicChecks": {
+    "checkedAt": "2026-10-15T02:37:26.164Z",
+    "healthStatus": 200,
+    "health": {
+      "service": "veltram",
+      "status": "ok",
+      "release": "veltram-2026-10-14.4"
+    },
+    "htmlStatus": 200,
+    "assets": [
+      {
+        "path": "/assets/index-DHFYNQ3R.js",
+        "status": 200,
+        "sha256": "1c466be3ffaf0e3d0e9ab777db479cab1ea0b94cd898b48d3c47cf478612c2ed",
+        "match": true
+      },
+      {
+        "path": "/assets/index-C5RBInZg.css",
+        "status": 200,
+        "sha256": "487ed28074ee5cb2b5e21f0472bb9625eafb2421e975adae31fa1ceb674c6107",
+        "match": true
+      }
+    ]
+  },
+  "profileImport": {
+    "sourceCount": 12,
+    "exportCount": 12,
+    "allowedFieldsMatch": true,
+    "fields": [
+      "description",
+      "instructions",
+      "name",
+      "section",
+      "sourceEffort",
+      "sourceEngine",
+      "sourceId",
+      "sourceModel",
+      "title"
+    ],
+    "safeDigest": "649e2731466243deab9be7533f5d90b7d47e41ff85d22db7a9f1ef4dab759838"
+  },
+  "organization": "Nuria",
+  "defaultTeam": {
+    "coordinator": "Chief of Staff",
+    "programmer": "Eng PRODEV",
+    "reviewer": "QA PRODEV"
+  },
+  "isolatedValidation": {
+    "unitTestsPassed": 88,
+    "integrationTestsPassed": 149,
+    "nativeBrowserProof": "veltram-browser-proof-9ac4eb946ebb.json"
+  },
+  "remaining": {
+    "realPaidAiTaskExecuted": false,
+    "jevKeyConfigured": false,
+    "subscriptionsConnected": false,
+    "autonomy24x7Implemented": false,
+    "graftInProductImplemented": false,
+    "dailyBrlBudgetImplemented": false,
+    "pdfVisualAcceptance": false
+  },
+  "pullRequest": "https://github.com/dinhogehm/OpenMausBot/pull/20",
+  "redaction": "No private profiles, email addresses, cookies, credentials or screenshots are included."
+}
