@@ -34,6 +34,10 @@ A revisão transversal encontrou seis falhas de rascunho, concorrência e histó
 - Dry-run explícito de `wrangler.production.jsonc` aprovado, preservando as imagens de execução existentes e os bloqueios de produto.
 - Hooks de push e evidência de publicação são registrados separadamente no recibo da entrega; dry-run não publica.
 
+## Publicação comprovada
+
+Publicada `veltram-2026-10-15.2`, runtime `f4892e32b84206c77bb24d2284bb4c101e4fe6fc`, Cloudflare `1d76927c-6c61-4dec-ba14-01739399f941`, com 100% do tráfego em 15/10/2026 às 04:45:43 UTC. Saúde, HTML, hashes de JS/CSS e CSP públicos foram conferidos às 04:46:39 UTC. Hooks obrigatórios de lint, tipos e catálogo de idiomas passaram. O [recibo](evidence/2026-10-15-veltram-quality-production.json) vincula versão, commit, assets e limitações; o [PR #22](https://github.com/dinhogehm/OpenMausBot/pull/22) permanece em rascunho para a revisão interativa pendente. A sessão autenticada de produção não foi reinspecionada devido ao bloqueio descrito abaixo.
+
 ## Cobertura visual e pendências
 
 As inspeções independentes cobriram desktop e 390/320 px, com estados de erro, vazio e acesso reduzido quando aplicáveis. As [capturas selecionadas](evidence/2026-10-15-veltram-quality/) são de fixtures, não da empresa real. Os detalhes de foco modificados ao final não são comprovados por capturas anteriores.

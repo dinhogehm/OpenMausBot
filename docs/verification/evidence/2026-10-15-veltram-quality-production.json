@@ -1,0 +1,102 @@
+{
+  "kind": "veltram_quality_production_publication",
+  "release": "veltram-2026-10-15.2",
+  "runtimeCommit": "f4892e32b84206c77bb24d2284bb4c101e4fe6fc",
+  "worker": "veltram",
+  "origin": "https://veltram.com",
+  "deployment": {
+    "cloudflareVersionId": "1d76927c-6c61-4dec-ba14-01739399f941",
+    "deploymentId": "7db374cf-7093-4d58-a103-69eec4d353cb",
+    "createdAt": "2026-10-15T04:45:43.01334Z",
+    "trafficPercent": 100
+  },
+  "flags": {
+    "CLAUDE_CODE_ENABLED": false,
+    "AI_BUDGET_REQUIRED": true
+  },
+  "containerImageDigests": {
+    "claude": "sha256:3bb9dd12ab150d9911f30ad0d7960fb151fb4eb839871f7cc6b3cf9f37054011",
+    "coding": "sha256:d2da0f5ab49f1d78b4ed7b9a7754c2260d20bbe5983388a79616709f91dc1c63"
+  },
+  "migrations": {
+    "newD1Migrations": [],
+    "remoteD1MigrationCommandRun": false,
+    "durableObjectMigrationTag": "v4",
+    "codingRoomListingIndex": "incremental per-workspace v1; 25 records per transaction; resumes on alarm"
+  },
+  "publicChecks": {
+    "checkedAt": "2026-10-15T04:46:39.989679+00:00",
+    "client": "curl with TLS verification",
+    "healthStatus": 200,
+    "health": {
+      "service": "veltram",
+      "status": "ok",
+      "release": "veltram-2026-10-15.2"
+    },
+    "htmlStatus": 200,
+    "htmlMatchesLocalBuild": true,
+    "contentSecurityPolicy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "assets": [
+      {
+        "path": "/assets/index-Pf5iCzmU.js",
+        "status": 200,
+        "sha256": "257292f52576e6bf21f2d4ee0b3a051995d14bcb663900a4ece828c7e037ffe5",
+        "match": true
+      },
+      {
+        "path": "/assets/index-CUqmqoCJ.css",
+        "status": 200,
+        "sha256": "b48666d7f1798127fdad2e763599a50eb840d6afec141d7edd8a988e250357f3",
+        "match": true
+      }
+    ]
+  },
+  "isolatedValidation": {
+    "unitTestsPassed": 145,
+    "integrationTestsPassedBeforeCspPatch": 225,
+    "cspRegressionTestsPassedAfterPatch": 2,
+    "cspRegressionObservedFailBeforePatch": true,
+    "typeChecksPassed": true,
+    "packageLintPassed": true,
+    "buildPassed": true,
+    "productionDryRunPassed": true,
+    "prePushChecksPassed": true,
+    "independentCodeReviewConfirmedOpenP1P2": 0,
+    "desktopMobileVisualReview": "per area with synthetic fixtures; final focus changes awaiting interactive recheck",
+    "mutationTestsUsedProductionData": false
+  },
+  "authenticatedProductionUi": {
+    "recheckedThisRelease": false,
+    "reason": "Chrome automation blocked by open extension UI; manual dismissal requested"
+  },
+  "pendingInteractiveVerification": [
+    "budget focus after save",
+    "marketplace focus after detail retry and install failure",
+    "credential save/revoke and pending-operation protection",
+    "subscription code submit",
+    "change-email focus",
+    "global busy navigation dialog",
+    "complete independent final-build create/approve/cancel and editing flows listed in quality report",
+    "last mobile mission selection and delay selector adjustments"
+  ],
+  "preservedProductBlockers": {
+    "hostedClaudeIsolationQualified": false,
+    "openAiHostedPlanEnabled": false,
+    "paidApiBillingQualified": false,
+    "realPaidAiTaskExecuted": false,
+    "autonomousPlannerImplemented": false,
+    "projectMergeDeployAdapterImplemented": false,
+    "autonomy24x7Proven": false
+  },
+  "previousNativeClaudeEvidence": {
+    "receipt": "2026-10-15-veltram-continuous-production.json",
+    "passed": 2,
+    "failed": 3,
+    "repeatedInThisRelease": false,
+    "activationStillBlocked": true
+  },
+  "pullRequest": "https://github.com/dinhogehm/OpenMausBot/pull/22",
+  "pullRequestState": "draft",
+  "qualityReport": "docs/verification/veltram-quality.md",
+  "redaction": "No credentials, authorization codes, cookies, private profiles or account email included."
+}
