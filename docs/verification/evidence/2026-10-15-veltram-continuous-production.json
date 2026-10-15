@@ -1,0 +1,166 @@
+{
+  "kind": "veltram_continuous_llm_guarded_production_publication",
+  "release": "veltram-2026-10-15.1",
+  "runtimeCommit": "df2a2f32bdd04cd76843bc50eb9046a6a0e1bb48",
+  "worker": "veltram",
+  "origin": "https://veltram.com",
+  "deployment": {
+    "cloudflareVersionId": "0242b15f-a2ee-4da9-a8b2-f93575b1efdf",
+    "deploymentId": "87838c11-9f32-463a-8e0a-735784daa8c1",
+    "createdAt": "2026-10-15T03:28:24.887372Z",
+    "trafficPercent": 100
+  },
+  "flags": {
+    "CLAUDE_CODE_ENABLED": false,
+    "AI_BUDGET_REQUIRED": true
+  },
+  "containerImageDigests": {
+    "claude": "sha256:3bb9dd12ab150d9911f30ad0d7960fb151fb4eb839871f7cc6b3cf9f37054011",
+    "coding": "sha256:d2da0f5ab49f1d78b4ed7b9a7754c2260d20bbe5983388a79616709f91dc1c63"
+  },
+  "migrations": {
+    "newD1Migrations": [],
+    "pendingAfterPublication": [],
+    "durableObjectMigrationTag": "v4",
+    "newClasses": [
+      "BudgetRoom",
+      "ClaudeConnectionRoom",
+      "MissionRoom"
+    ]
+  },
+  "publicChecks": {
+    "checkedAt": "2026-10-15T03:28:53.315Z",
+    "healthStatus": 200,
+    "health": {
+      "service": "veltram",
+      "status": "ok",
+      "release": "veltram-2026-10-15.1"
+    },
+    "htmlStatus": 200,
+    "htmlMatchesLocalBuild": true,
+    "assets": [
+      {
+        "path": "/assets/index-DwVbaDiD.js",
+        "status": 200,
+        "sha256": "cebd3b48032590027d2a1aace805ee839e161d01ab039b4dbd996bac354c61bd",
+        "match": true
+      },
+      {
+        "path": "/assets/index-Bj96nAaV.css",
+        "status": 200,
+        "sha256": "2485c9ed78201e596caedc910e047df461c0a1b5e95c24f0d29226684b91c505",
+        "match": true
+      }
+    ]
+  },
+  "authenticatedUi": {
+    "organization": "Nuria",
+    "subscriptionSectionLoaded": true,
+    "claude": "activation_pending",
+    "chatgpt": "awaiting_provider_enablement",
+    "budgetLimitBrl": 1000,
+    "paidApiCallsPaused": true,
+    "missionsListLoaded": true,
+    "missionsCount": 0,
+    "productionMutationsTested": false
+  },
+  "isolatedValidation": {
+    "unitTestsPassed": 95,
+    "integrationTestsPassed": 221,
+    "graftDedicatedTestsPassed": 5,
+    "graftDockerTestsPassed": 1,
+    "typeChecksPassed": true,
+    "lintPassed": true,
+    "buildPassed": true,
+    "dryRunPassed": true,
+    "prePushChecksPassed": true,
+    "desktopMobileQaPassed": true,
+    "nativeClaudeAdversarial": {
+      "passed": 2,
+      "failed": 3,
+      "activationBlocked": true
+    }
+  },
+  "nativeSourceComparison": {
+    "veltram-coding-proof-7a28eea3073b.json": [
+      {
+        "path": "Dockerfile.coding",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "src/coding-executor.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "src/coding-program.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "src/coding-network.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "graft/query.mjs",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "graft/package-lock.json",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "test/coding-executor.native.test.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "test/fixtures/coding-remote-worker.ts",
+        "matchesTestedSource": true
+      }
+    ],
+    "veltram-claude-proof-60cdf9c513b7.json": [
+      {
+        "path": "Dockerfile.claude",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "src/claude-runtime.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "src/claude-program.ts",
+        "matchesTestedSource": false
+      },
+      {
+        "path": "src/claude-types.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "test/fixtures/claude-remote-worker.ts",
+        "matchesTestedSource": true
+      },
+      {
+        "path": "test/claude-runtime.remote.mjs",
+        "matchesTestedSource": true
+      }
+    ]
+  },
+  "nativeSourceDifference": "Claude login-code regex had one redundant hyphen escape removed after the native receipt; unit tests repeated. The managed-hook isolation blocker remains unresolved.",
+  "activeCapabilities": {
+    "graftToolsDeployed": true,
+    "personalConnectionsUi": true,
+    "configurableEstimatedApiBudget": true,
+    "persistentDeclaredMissions": true
+  },
+  "remaining": {
+    "realSubscriptionConnected": false,
+    "hostedClaudeIsolationQualified": false,
+    "openAiHostedPlanEnabled": false,
+    "paidApiBillingQualified": false,
+    "realPaidAiTaskExecuted": false,
+    "autonomousPlannerImplemented": false,
+    "projectMergeDeployAdapterImplemented": false,
+    "autonomy24x7Proven": false
+  },
+  "pullRequest": "https://github.com/dinhogehm/OpenMausBot/pull/21",
+  "pullRequestState": "draft",
+  "redaction": "No credentials, authorization codes, cookies, private profiles or account email are included."
+}

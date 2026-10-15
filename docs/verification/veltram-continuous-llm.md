@@ -40,4 +40,8 @@ pnpm --dir cloudflare/app exec wrangler deploy --config wrangler.production.json
 
 As provas remotas provisionam recursos temporários e exigem a conta de teste autorizada. Nunca executar mutações de teste na aplicação/dados reais. Para Claude, a prova adversarial deve ser repetida após mudar a fronteira de isolamento; só ativar quando passar e os demais requisitos de hospedagem estiverem resolvidos.
 
-A publicação desta versão deve ter recibo próprio com commit, deployment, saúde e hashes dos assets; testes e build locais não comprovam publicação nem operação autônoma efetiva.
+## Publicação verificada
+
+`veltram-2026-10-15.1`, runtime `df2a2f32bdd04cd76843bc50eb9046a6a0e1bb48`, está em produção desde 2026-10-15T03:28:24.887372Z, com 100% do tráfego. A versão Cloudflare é `0242b15f-a2ee-4da9-a8b2-f93575b1efdf`. Saúde, HTML e hashes de JavaScript/CSS coincidiram com o build local; a sessão autenticada da Nuria mostrou os estados bloqueados, orçamento de R$ 1.000 e lista de missões vazia carregada. Não há migrações D1 pendentes.
+
+O [recibo de produção](evidence/2026-10-15-veltram-continuous-production.json) distingue publicação da interface, controle de orçamento e ferramentas de contexto da ativação das assinaturas e da execução autônoma efetiva, que continuam pendentes. O [PR #21](https://github.com/dinhogehm/OpenMausBot/pull/21) permanece em rascunho com esses bloqueios explícitos.
