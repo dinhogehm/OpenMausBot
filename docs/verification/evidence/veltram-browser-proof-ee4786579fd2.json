@@ -1,0 +1,43 @@
+{
+  "name": "veltram-browser-proof-ee4786579fd2",
+  "startedAt": "2026-10-15T02:14:41.048Z",
+  "accountId": "768841fa976bce74242ce11c4e98bc9d",
+  "expiresAt": "2026-10-15T02:34:41.061Z",
+  "productionTouched": false,
+  "sourceHashes": {
+    "src/browser-runtime.ts": "c681cc176b34ca2481a0674fbab1f138a37a74ca24ddb6f28c27f2a84e2e182c",
+    "src/browser-network.ts": "da776f026ab14a158c0a7e2b235341fd715bd62ae2a72dfd1e42ad174d116c2c",
+    "src/browser-state.ts": "a4d35af024273af0b27ea4fefc3ae2db2fc0cb7fda6efff32b037e913013f0bf",
+    "src/browser-types.ts": "f3c6055b605453c991b1f08edaaf448daa5e5efa97cc2280201f33d20e6ba49b",
+    "test/fixtures/browser-remote-worker.ts": "57829459105c4cd00d9680015633f15c6158098f090c9cbaed23d38a4a8434b6"
+  },
+  "checks": {
+    "unauthorized": 403,
+    "wrongToken": 403,
+    "httpStatus": 500,
+    "runtime": {
+      "checks": {
+        "bindingMethods": {
+          "acquire": "function",
+          "getSession": "function",
+          "closeSession": "function"
+        },
+        "sessionId": "dffd18d8-d13d-4ce5-9e96-203d8e8c9ae7",
+        "sessionClosed": true,
+        "cleanupError": "Session not found (status=404)"
+      },
+      "failure": "net::ERR_BLOCKED_BY_CLIENT at https://veltram-browser-proof-ee4786579fd2.dinhogehm.workers.dev/site"
+    }
+  },
+  "cleanup": {
+    "workerDeleteExit": 0,
+    "finalHttpStatus": 404
+  },
+  "logs": {
+    "deploy": "\n ⛅️ wrangler 4.151.0\n────────────────────\nTotal Upload: 718.74 KiB / gzip: 140.16 KiB\nWorker Startup Time: 17 ms\nYour Worker has access to the following bindings:\nBinding                                                                  Resource                  \nenv.BROWSER                                                              Browser Run               \n[fixture verifier binding omitted]\nenv.FIXTURE_EXPIRES_AT (\"1792031681061\")                                 Environment Variable      \n\nUploaded veltram-browser-proof-ee4786579fd2 (5.67 sec)\nDeployed veltram-browser-proof-ee4786579fd2 triggers (2.46 sec)\n  https://veltram-browser-proof-ee4786579fd2.dinhogehm.workers.dev\nCurrent Version ID: 7d6c8de7-cf99-4de8-92d6-5c03aa1b655b\n",
+    "delete": "\n ⛅️ wrangler 4.151.0\n────────────────────\nSuccessfully deleted veltram-browser-proof-ee4786579fd2\n"
+  },
+  "origin": "https://veltram-browser-proof-ee4786579fd2.dinhogehm.workers.dev",
+  "failure": "{\"checks\":{\"bindingMethods\":{\"acquire\":\"function\",\"getSession\":\"function\",\"closeSession\":\"function\"},\"sessionId\":\"dffd18d8-d13d-4ce5-9e96-203d8e8c9ae7\",\"sessionClosed\":true,\"cleanupError\":\"Session not found (status=404)\"},\"failure\":\"net::ERR_BLOCKED_BY_CLIENT at https://veltram-browser-proof-ee4786579fd2.dinhogehm.workers.dev/site\"}\n\n500 !== 200\n",
+  "finishedAt": "2026-10-15T02:15:14.520Z"
+}

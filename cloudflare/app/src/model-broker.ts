@@ -137,7 +137,7 @@ export async function callModel(env: AppEnv, run: CodingRecord, items: ModelItem
   const request = buildModelRequest(provider, agent?.model ?? run.model, key, items, agent);
   if (encoder.encode(JSON.stringify(request.body)).length > CODING_LIMITS.contextBytes) throw new Error("coding_context_limit");
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(120_000, run.deadlineAt - Date.now())));
-  const response = await fetch(request.url, { method: "POST", headers: request.headers, body: JSON.stringify(request.body), redirect: "error", signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  const response = await fetch(request.url, { method: "POST", headers: request.headers, body: JSON.stringify(request.body), redirect: "manual", signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
   if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error("model_request_failed"); }
   const reader = response.body.getReader(); let size = 0; const chunks: Uint8Array[] = [];
   try {

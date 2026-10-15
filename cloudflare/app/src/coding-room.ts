@@ -8,12 +8,15 @@ import { appendToolResult, buildModelRequest, callModel, credentialVersion, type
 import { codingExecutorName, codingTerminal, codingView, parseCodingInput } from "./coding-state";
 import { confirmedCodingStop } from "./coding-admission";
 import { CODING_LIMITS, codingTreeDigest, type AgentRole, type CodingChange, type CodingRecord, type CodingTool, type CodingToolResult } from "./coding-types";
+import { recordReportSnapshot } from "./reports";
+import type { ReportFact } from "./report-types";
 
 type Phase = "source" | "setup" | "model" | "tools" | "test_before" | "test_command" | "test_after" | "review_diff" | "publish" | "cleanup";
 interface Entry {
   run: CodingRecord; phase: Phase; executorKey: string; dispatched: boolean;
   step: number; history: Partial<Record<AgentRole, ModelItem[]>>; calls: ModelCall[];
   beforeDigest?: string; fileCount?: number; repairAttempts: number; publicationPending?: boolean;
+  reporting?: { startedAt: number; outbox: ReportFact[] };
 }
 interface Command { organizationId: string; workspaceId: string; userId: string; action: string; runId?: string; body: Record<string, unknown> }
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -26,11 +29,12 @@ const safeError = (error: unknown) => {
 export class CodingRoom extends DurableObject<AppEnv> {
   #busy = false;
   #modelAbort?: AbortController;
+  #reportFlush?: Promise<boolean>;
 
   async fetch(request: Request): Promise<Response> {
     const command = await request.json() as Command;
     return this.ctx.blockConcurrencyWhile(async () => {
-      try { return await this.command(command); }
+      try { const response = await this.command(command); this.ctx.waitUntil(this.flushReports()); return response; }
       catch (error) { return json({ error: error instanceof HttpError ? error.code : safeError(error) }, error instanceof HttpError ? error.status : 503); }
     });
   }
@@ -41,6 +45,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
     const scope = await this.ctx.storage.get<string>("organization");
     if (scope && scope !== c.organizationId) throw new HttpError(404, "not_found");
     if (!scope) await this.ctx.storage.put("organization", c.organizationId);
+    if (c.action === "report-sync") return json({ synced: await this.flushReports() });
     if (c.action === "list") {
       const entries = await this.ctx.storage.list<Entry>({ prefix: "run:", limit: 100 });
       return json({ runs: [...entries.values()].filter((entry) => entry.run.workspaceId === c.workspaceId).map((entry) => codingView(entry.run, c.userId, role)).sort((a, b) => b.createdAt - a.createdAt) });
@@ -49,7 +54,9 @@ export class CodingRoom extends DurableObject<AppEnv> {
       const input = parseCodingInput(c.body);
       const old = await this.ctx.storage.get<Entry>(`run:${input.requestId}`);
       if (old) {
-        if (old.run.createdBy !== c.userId || old.run.workspaceId !== c.workspaceId || Object.entries(input).some(([key, value]) => old.run[key as keyof CodingRecord] !== value)) throw new HttpError(409, "request_id_reused");
+        if (old.run.createdBy !== c.userId || old.run.workspaceId !== c.workspaceId
+          || JSON.stringify(old.run.agentSelections ?? null) !== JSON.stringify(input.agentSelections ?? null)
+          || Object.entries(input).some(([key, value]) => key !== "agentSelections" && old.run[key as keyof CodingRecord] !== value)) throw new HttpError(409, "request_id_reused");
         return json({ run: codingView(old.run, c.userId, role) });
       }
       const count = await this.ctx.storage.get<number>("count") ?? 0;
@@ -61,8 +68,8 @@ export class CodingRoom extends DurableObject<AppEnv> {
         runId: input.requestId, generation: 1, deadlineAt: 0, createdBy: c.userId, createdAt: now, updatedAt: now,
         status: "pending_approval", repositoryName: connection.fullName, credentialVersion: agents.find((agent) => agent.role === "programmer")!.credentialVersion,
         modelCalls: 0, tokens: 0, events: [], agents, agentStage: "coordinator" };
-      const entry: Entry = { run, phase: "source", executorKey: codingExecutorName(run), dispatched: false, step: 0, history: {}, calls: [], repairAttempts: 0 };
-      await this.ctx.storage.put({ [`run:${run.runId}`]: entry, count: count + 1 });
+      const entry: Entry = { run, phase: "source", executorKey: codingExecutorName(run), dispatched: false, step: 0, history: {}, calls: [], repairAttempts: 0, reporting: { startedAt: now, outbox: [] } };
+      await this.ctx.storage.put({ [`run:${run.runId}`]: entry, ...this.reportPending(entry), count: count + 1 });
       return json({ run: codingView(run, c.userId, role) }, 201);
     }
     const entry = await this.ctx.storage.get<Entry>(`run:${c.runId}`);
@@ -77,8 +84,9 @@ export class CodingRoom extends DurableObject<AppEnv> {
       await this.authorize(entry.run);
       if (!await this.env.CODING_ADMISSION.getByName("global").acquire(entry.executorKey, c.organizationId, entry.run.deadlineAt)) throw new HttpError(429, "coding_capacity");
       entry.run.status = "queued";
+      entry.run.approvedAt = Date.now();
       this.event(entry, "status", "Equipe aprovada. Preparando uma cópia isolada do repositório.");
-      await this.ctx.storage.transaction(async (txn) => { await txn.put({ [`run:${entry.run.runId}`]: entry, active: entry.run.runId }); await txn.setAlarm(Date.now() + 100); });
+      await this.ctx.storage.transaction(async (txn) => { await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry), active: entry.run.runId }); await txn.setAlarm(Date.now() + 100); });
       return json({ run: codingView(entry.run, c.userId, role) });
     }
     if (c.action === "cancel") {
@@ -86,14 +94,55 @@ export class CodingRoom extends DurableObject<AppEnv> {
       if (codingTerminal(entry.run.status)) throw new HttpError(409, "coding_state_changed");
       entry.publicationPending = entry.phase === "publish" && entry.dispatched;
       entry.run.generation++; entry.run.status = "canceled"; entry.phase = "cleanup";
+      entry.run.finishedAt ??= Date.now();
       this.event(entry, "status", "Cancelamento solicitado. Encerrando o ambiente de execução.");
-      await this.ctx.storage.put(`run:${entry.run.runId}`, entry);
+      await this.ctx.storage.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry) });
       const active = await this.ctx.storage.get<string>("active");
       if (active === entry.run.runId) { this.#modelAbort?.abort(); await this.ctx.storage.setAlarm(Date.now() + 100); }
       this.ctx.waitUntil(this.env.CODING_EXECUTORS.getByName(entry.executorKey).stop().catch(() => undefined));
       return json({ run: codingView(entry.run, c.userId, role) });
     }
     throw new HttpError(404, "not_found");
+  }
+
+  private reportPending(entry: Entry): Record<string, boolean> { return entry.reporting ? { [`report-pending:${entry.run.runId}`]: true } : {}; }
+  private mergeReportOutbox(entry: Entry, current: Entry) {
+    if (entry.reporting && current.reporting) entry.reporting.outbox = [...new Map([...current.reporting.outbox, ...entry.reporting.outbox].map((fact) => [fact.id, fact])).values()];
+  }
+  /** Facts observed after cancellation remain facts; they never advance the canceled execution. */
+  private async observeReportFact(entry: Entry, fact: ReportFact) {
+    if (!entry.reporting) return;
+    entry.reporting.outbox.push(fact);
+    await this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<Entry>(`run:${entry.run.runId}`);
+      if (!current?.reporting) return;
+      current.reporting.outbox = [...new Map([...current.reporting.outbox, fact].map((item) => [item.id, item])).values()];
+      await txn.put({ [`run:${entry.run.runId}`]: current, ...this.reportPending(current) });
+    });
+  }
+  private flushReports(): Promise<boolean> {
+    return this.#reportFlush ??= this.flushReportBatch().finally(() => { this.#reportFlush = undefined; });
+  }
+  private async flushReportBatch(): Promise<boolean> {
+    const pending = await this.ctx.storage.list<boolean>({ prefix: "report-pending:", limit: 100 });
+    for (const key of pending.keys()) {
+      const runId = key.slice("report-pending:".length), entry = await this.ctx.storage.get<Entry>(`run:${runId}`);
+      if (!entry?.reporting) { await this.ctx.storage.delete(key); continue; }
+      try {
+        const consumed = new Set(entry.reporting.outbox.map((fact) => fact.id));
+        await recordReportSnapshot(this.env, entry.run, entry.reporting.outbox, entry.reporting.startedAt);
+        await this.ctx.storage.transaction(async (txn) => {
+          const latest = await txn.get<Entry>(`run:${runId}`);
+          if (!latest?.reporting) { await txn.delete(key); return; }
+          latest.reporting.outbox = latest.reporting.outbox.filter((fact) => !consumed.has(fact.id));
+          await txn.put(`run:${runId}`, latest);
+          if (latest.run.updatedAt === entry.run.updatedAt && latest.run.generation === entry.run.generation && !latest.reporting.outbox.length) await txn.delete(key);
+        });
+      } catch { /* Durable outbox remains pending. Reporting failure never replays an execution effect. */ }
+    }
+    const remains = (await this.ctx.storage.list({ prefix: "report-pending:", limit: 1 })).size > 0;
+    if (remains) { const alarm = await this.ctx.storage.getAlarm(); if (alarm === null || alarm > Date.now() + 5000) await this.ctx.storage.setAlarm(Date.now() + 5000); }
+    return !remains;
   }
 
   private event(entry: Entry, kind: CodingRecord["events"][number]["kind"], text: string, result?: CodingToolResult) {
@@ -120,7 +169,8 @@ export class CodingRoom extends DurableObject<AppEnv> {
       const current = await txn.get<Entry>(`run:${entry.run.runId}`);
       if (!current || current.run.generation !== entry.run.generation || codingTerminal(current.run.status)) throw new Error("coding_canceled");
       entry.run.updatedAt = Math.max(Date.now(), current.run.updatedAt + 1);
-      await txn.put(`run:${entry.run.runId}`, entry);
+      this.mergeReportOutbox(entry, current);
+      await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry) });
       await txn.setAlarm(entry.dispatched ? entry.run.deadlineAt : Date.now() + 100);
     });
   }
@@ -144,6 +194,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
     this.#busy = true;
     let entry: Entry | undefined;
     try {
+      await this.flushReports();
       const active = await this.ctx.storage.get<string>("active");
       if (!active) return;
       entry = await this.ctx.storage.get<Entry>(`run:${active}`);
@@ -157,6 +208,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
         await this.finish(entry, "interrupted", "coding_step_uncertain"); return;
       }
       await this.assertActive(entry);
+      if (entry.phase === "source") entry.run.startedAt ??= Date.now();
       entry.dispatched = true; entry.step++;
       await this.saveActive(entry); // Persist before any model, command or GitHub effect.
       await this.advance(entry);
@@ -171,7 +223,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
         if (current && current.run.generation === entry.run.generation && !codingTerminal(current.run.status)) await this.finish(entry, "failed", safeError(error));
         else if (current) await this.cleanup(current);
       }
-    } finally { this.#busy = false; }
+    } finally { this.#busy = false; await this.flushReports(); }
   }
 
   /** Reconcile writes already dispatched, including when cancellation raced their response. */
@@ -188,6 +240,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
     if (!current) return;
     if (current.run.generation === entry.run.generation && !codingTerminal(current.run.status)) {
       entry.run.result = result;
+      if (result) entry.run.publishedAt ??= Date.now();
       if (result) this.event(entry, "status", "Publicação recuperada por leitura: o PR e o commit testado foram confirmados no GitHub.");
       await this.finish(entry, result ? "completed" : "interrupted", result ? undefined : "coding_publication_uncertain");
     } else {
@@ -197,9 +250,10 @@ export class CodingRoom extends DurableObject<AppEnv> {
         if (!latest) return;
         latest.publicationPending = false;
         latest.run.result = result ?? latest.run.result;
+        if (result) latest.run.publishedAt ??= entry.run.publishedAt ?? Date.now();
         latest.run.error = result ? undefined : "coding_publication_uncertain";
         this.event(latest, "status", result ? "O cancelamento foi mantido. Um PR criado antes da confirmação da parada foi encontrado no GitHub." : "O cancelamento foi mantido, mas não foi possível confirmar o resultado da publicação no GitHub.");
-        await txn.put(`run:${entry.run.runId}`, latest);
+        await txn.put({ [`run:${entry.run.runId}`]: latest, ...this.reportPending(latest) });
       });
       await this.cleanup(current);
     }
@@ -230,10 +284,14 @@ export class CodingRoom extends DurableObject<AppEnv> {
       if (run.modelCalls >= CODING_LIMITS.modelCalls || run.tokens + reserve > CODING_LIMITS.totalTokens) throw new Error("coding_model_budget");
       if (requestBytes > CODING_LIMITS.contextBytes) throw new Error("coding_context_limit");
       run.modelCalls++; run.tokens += reserve;
+      const callId = `s${entry.step}`, modelStartedAt = Date.now();
+      const agentFact = { agentId: agent?.profileId ?? `role:${run.agentStage ?? "programmer"}`, agentRole: run.agentStage ?? "programmer", agentName: agent?.name ?? "Programador", callId };
+      entry.reporting?.outbox.push({ id: `model-start:${callId}`, kind: "model_started", at: modelStartedAt, ...agentFact });
       await this.saveActive(entry); // Unknown provider response is charged conservatively and never retried.
       this.#modelAbort = new AbortController();
       const turn = await callModel(this.env, run, history, this.#modelAbort.signal);
       this.#modelAbort = undefined;
+      await this.observeReportFact(entry, { id: `model-usage:${callId}`, kind: "model_observed", at: Date.now(), ...agentFact, tokens: turn.tokens, durationMs: Math.max(0, Date.now() - modelStartedAt) });
       run.tokens += Math.max(0, turn.tokens) - reserve;
       history.push(...turn.items); entry.calls = turn.calls;
       if (turn.text) this.event(entry, "model", `${run.agents?.find((agent) => agent.role === run.agentStage)?.name ?? "Agente"}: ${turn.text}`);
@@ -279,6 +337,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
       this.event(entry, "status", "Executando o comando de teste aprovado sobre as alterações finais.");
     } else if (entry.phase === "test_command") {
       const result = await this.tool(entry, { kind: "run_command", command: run.testCommand, cwd: ".", timeoutMs: 600_000 });
+      await this.observeReportFact(entry, { id: `test:s${entry.step}`, kind: "test", at: result.finishedAt, exitCode: result.exitCode, durationMs: Math.max(0, result.finishedAt - result.startedAt) });
       this.event(entry, "test", `$ ${run.testCommand}\n${result.output}`, result);
       run.verification = { command: run.testCommand, exitCode: result.exitCode, treeDigest: entry.beforeDigest!, output: result.output, truncated: result.truncated, finishedAt: result.finishedAt };
       if (result.exitCode !== 0) {
@@ -325,6 +384,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
         files, verification: run.verification, assertActive: async () => { await this.assertActive(entry); } });
       // A validated GitHub receipt remains evidence if cancellation raced the response.
       run.result = { ...result, changedFiles: files.length };
+      run.publishedAt ??= Date.now();
       await this.assertActive(entry);
       this.event(entry, "status", `PR em rascunho criado: ${result.prUrl}`);
       await this.finish(entry, "completed");
@@ -336,8 +396,11 @@ export class CodingRoom extends DurableObject<AppEnv> {
       const current = await txn.get<Entry>(`run:${entry.run.runId}`);
       if (!current || current.run.generation !== entry.run.generation || codingTerminal(current.run.status)) return;
       entry.run.status = status; entry.run.error = error; entry.phase = "cleanup"; entry.dispatched = false;
+      entry.run.finishedAt ??= Date.now();
+      entry.run.updatedAt = Math.max(Date.now(), current.run.updatedAt + 1);
+      this.mergeReportOutbox(entry, current);
       if (error) this.event(entry, "error", error);
-      await txn.put(`run:${entry.run.runId}`, entry); await txn.setAlarm(Date.now() + 100);
+      await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry) }); await txn.setAlarm(Date.now() + 100);
     });
     const current = await this.ctx.storage.get<Entry>(`run:${entry.run.runId}`);
     if (current) await this.cleanup(current);
@@ -346,8 +409,9 @@ export class CodingRoom extends DurableObject<AppEnv> {
     try {
       await confirmedCodingStop(this.env, entry.executorKey);
       await this.env.CODING_ADMISSION.getByName("global").release(entry.executorKey);
+      const reportsSynced = await this.flushReports();
       await this.ctx.storage.transaction(async (txn) => {
-        if (await txn.get("active") === entry.run.runId) { await txn.delete("active"); await txn.deleteAlarm(); }
+        if (await txn.get("active") === entry.run.runId) { await txn.delete("active"); if (reportsSynced) await txn.deleteAlarm(); }
       });
     } catch { await this.ctx.storage.setAlarm(Date.now() + 5000); }
   }

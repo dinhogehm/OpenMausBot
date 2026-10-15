@@ -6,8 +6,11 @@ import { Runs } from "./runs";
 import { Coding } from "./coding";
 import { Repositories } from "./repositories";
 import { Agents } from "./agents";
+import { Reports } from "./reports";
+import { BrowserTasks } from "./browser";
+import { Marketplace } from "./marketplace";
 
-export type Section = "coding" | "repositories" | "agents" | "runs" | "credentials" | "company";
+export type Section = "browser" | "marketplace" | "reports" | "coding" | "repositories" | "agents" | "runs" | "credentials" | "company";
 const roleNames = { owner: "Responsável", admin: "Administrador", member: "Membro" };
 
 export function OrganizationSpace({ organization, section, onNavigate }: { organization: Organization; section: Section; onNavigate: (section: Section) => void }) {
@@ -30,6 +33,9 @@ export function OrganizationSpace({ organization, section, onNavigate }: { organ
     return () => controller.abort();
   }, [organization.id, attempt]);
 
+  if (section === "reports") return <Reports organization={organization} />;
+  if (section === "browser") return <BrowserTasks organization={organization} />;
+  if (section === "marketplace") return <Marketplace key={organization.id} organization={organization} />;
   if (section === "credentials") return <Credentials organization={organization} />;
   if (section === "repositories") return <Repositories organization={organization} />;
   if (section === "agents") return <Agents organization={organization} />;

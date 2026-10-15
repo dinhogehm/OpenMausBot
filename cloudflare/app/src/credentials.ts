@@ -2,7 +2,7 @@ export type CredentialProvider = "openai" | "anthropic" | "openrouter";
 
 export interface CredentialScope {
   organizationId: string;
-  provider: CredentialProvider;
+  provider: CredentialProvider | "jev";
   credentialId: string;
   keyVersion: number;
 }
@@ -67,7 +67,7 @@ function authenticatedScope(scope: CredentialScope): Uint8Array<ArrayBuffer> {
   if (!scope
     || !validId(scope.organizationId)
     || !validId(scope.credentialId)
-    || !["openai", "anthropic", "openrouter"].includes(scope.provider)
+    || !["openai", "anthropic", "openrouter", "jev"].includes(scope.provider)
     || !Number.isSafeInteger(scope.keyVersion)
     || scope.keyVersion < 1) {
     throw new Error("Invalid scope");

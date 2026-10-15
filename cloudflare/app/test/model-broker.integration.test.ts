@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { appendToolResult, buildModelRequest, parseModelResponse, validateCodingTool } from "../src/model-broker";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vitest";
+import { appendToolResult, buildModelRequest, callModel, parseModelResponse, validateCodingTool } from "../src/model-broker";
+import { changeCredential } from "../src/credential-store";
+import type { CodingRecord } from "../src/coding-types";
 
 describe("model protocols and untrusted tool boundaries", () => {
   it("uses Responses, Messages and Chat Completions without leaking keys into prompts", () => {
@@ -9,6 +12,33 @@ describe("model protocols and untrusted tool boundaries", () => {
       expect(JSON.stringify(request.body)).not.toContain(secret);
       expect(request.url).toBe(provider === "openai" ? "https://api.openai.com/v1/responses" : provider === "anthropic" ? "https://api.anthropic.com/v1/messages" : "https://openrouter.ai/api/v1/chat/completions");
     }
+  });
+  it.each(["openai", "anthropic", "openrouter"] as const)("rejects a %s redirect after one fixed-origin call without forwarding its key", async (provider) => {
+    const organizationId = crypto.randomUUID(), userId = crypto.randomUUID(), now = Date.now();
+    const secret = "fixture-redirect-key-never-a-real-key";
+    await env.DB.batch([
+      env.DB.prepare('INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt") VALUES (?,?,?,1,?,?)').bind(userId, "Fixture", `${userId}@example.test`, now, now),
+      env.DB.prepare("INSERT INTO organizations VALUES (?,?,?)").bind(organizationId, "Model redirect fixture", now),
+      env.DB.prepare("INSERT INTO memberships VALUES (?,?,'owner')").bind(organizationId, userId),
+    ]);
+    await changeCredential(env, organizationId, userId, provider, "PUT", { expectedVersion: null, key: secret });
+    const run: CodingRecord = { organizationId, workspaceId: crypto.randomUUID(), runId: crypto.randomUUID(), requestId: crypto.randomUUID(), generation: 1,
+      createdBy: userId, approvedBy: userId, createdAt: now, updatedAt: now, deadlineAt: now + 60000, status: "running",
+      provider, model: "fixture-model", credentialVersion: 1, repositoryConnectionId: crypto.randomUUID(), repositoryName: "fixture/repository",
+      baseRef: "main", task: "Inspect the synthetic repository", setupCommand: "", testCommand: "node --test", modelCalls: 0, tokens: 0, events: [] };
+    const redirected = new Response("Provider redirect body", { status: 307, headers: { location: "https://untrusted.example/collect-key" } });
+    const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(redirected);
+    try {
+      await expect(callModel(env, run, [{ role: "user", content: run.task }])).rejects.toThrow("model_request_failed");
+      expect(request).toHaveBeenCalledTimes(1);
+      const [url, options] = request.mock.calls[0];
+      expect(String(url)).toBe(buildModelRequest(provider, run.model, secret, []).url);
+      expect(options?.redirect).toBe("manual");
+      const headers = new Headers(options?.headers);
+      expect(headers.get(provider === "anthropic" ? "x-api-key" : "authorization")).toBe(provider === "anthropic" ? secret : `Bearer ${secret}`);
+      expect(String(options?.body)).not.toContain(secret);
+      expect(redirected.bodyUsed).toBe(true);
+    } finally { request.mockRestore(); }
   });
   it("retains OpenAI reasoning items and correlates tool results by call_id", () => {
     const output = [{ type: "reasoning", id: "r", encrypted_content: "encrypted" }, { type: "function_call", call_id: "call", name: "read_file", arguments: '{"path":"a.ts","offset":0,"limit":100}' }];

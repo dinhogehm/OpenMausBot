@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import type { AgentCatalogState, AgentSelections } from "../../src/agent-catalog-types";
+import { CodingTeamPicker } from "./coding-team";
 import type { CodingRunInput, CodingStatus } from "../../src/coding-types";
 import type { CredentialProvider } from "../../src/credentials";
 import { api, ApiError, errorMessage, formatDate, isAbort, organizationPath, type Credential } from "./api";
@@ -7,6 +9,8 @@ import { isCodingActive, mergeCodingRuns, needsCodingRefresh, safePullRequestUrl
 import type { Section } from "./organization";
 import type { GithubState, RepositoryConnection } from "./repositories";
 import { agentRoleNames } from "./agents";
+import { boardColumn, boardColumns, filterBoardRuns } from "./kanban-state";
+import "./kanban.css";
 
 const providers: Record<CredentialProvider, string> = { openai: "OpenAI", anthropic: "Anthropic", openrouter: "OpenRouter" };
 const statusNames: Record<CodingStatus, string> = {
@@ -23,6 +27,10 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
   const path = `${organization}/workspaces/${encodeURIComponent(workspaceId)}/coding-runs`;
   const [runs, setRuns] = useState<VisibleCodingRun[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [query, setQuery] = useState("");
+  const [repositoryFilter, setRepositoryFilter] = useState("");
+  const [agentFilter, setAgentFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pollError, setPollError] = useState("");
@@ -44,7 +52,7 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
         if (controller.signal.aborted) return;
         const scoped = validateScope(data.runs);
         setRuns((current) => mergeCodingRuns(current, scoped));
-        setSelectedId((current) => current || scoped[0]?.runId || "");
+
       })
       .catch((failure: unknown) => {
         if (!isAbort(failure)) {
@@ -79,21 +87,36 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
 
   function changed(run: VisibleCodingRun) {
     validateScope([run]);
-    setActionError(""); setRuns((current) => mergeCodingRuns(current, [run])); setSelectedId(run.runId);
+    setActionError(""); setRuns((current) => mergeCodingRuns(current, [run])); setSelectedId(run.runId); setCreating(false);
   }
 
+  const visible = filterBoardRuns(runs, { query, repository: repositoryFilter, agent: agentFilter });
+  const repositories = [...new Set(runs.map((run) => run.repositoryName))].sort();
+  const agents = [...new Set(runs.flatMap((run) => run.agents?.map((agent) => agent.name) ?? []))].sort();
+
   return <>
-    <PageHeading eyebrow="TRABALHO NO REPOSITÓRIO" title="Tarefas">Descreva a alteração. O agente prepara o código, executa os testes e entrega um PR para revisão.</PageHeading>
-    <CodingSetup organizationPath={organization} path={path} onCreated={changed} onNavigate={onNavigate} />
-    <section className="run-history" aria-labelledby="coding-history-title"><div className="section-heading"><div><h2 id="coding-history-title">Histórico de tarefas</h2><p>Alterações, testes e resultados registrados.</p></div><button className="text-button" disabled={loading} onClick={() => setAttempt((value) => value + 1)}><Icon name="refresh" size={15} />Atualizar</button></div>
-      {error && <Notice>{error}</Notice>}{actionError && <Notice>{actionError}</Notice>}{pollError && <Notice kind="info">{pollError}</Notice>}
-      {loading ? <Loading label="Carregando tarefas" /> : !error && (runs.length === 0 ? <div className="empty-state"><div className="empty-symbol"><Icon name="code" size={24} /></div><h3>Comece com uma alteração bem definida.</h3><p>Informe o resultado esperado e o comando de testes. Um administrador aprova a tarefa antes de ela usar a chave de IA.</p></div> : <div className="run-history-layout coding-history-layout"><div className="run-list" aria-label="Tarefas">{runs.map((run) => <button className={`run-row${run.runId === selectedId ? " selected" : ""}`} key={run.runId} onClick={() => setSelectedId(run.runId)} aria-pressed={run.runId === selectedId}><span className="run-title">{run.task}</span><span className="run-repository">{run.repositoryName}</span><Status value={run.status} /><time dateTime={new Date(run.createdAt).toISOString()}>{formatDate(run.createdAt)}</time></button>)}</div>{selected && <CodingDetail key={selected.runId} path={path} run={selected} onChanged={changed} onConflict={(message) => { setActionError(message); setAttempt((value) => value + 1); }} />}</div>)}
-    </section>
+    <div className="kanban-heading"><PageHeading eyebrow="DO PEDIDO AO PULL REQUEST" title="Tarefas">Acompanhe o trabalho da equipe, da aprovação ao código revisado.</PageHeading><button className="button primary" onClick={() => setCreating(true)}><Icon name="plus" size={17} />Nova tarefa</button></div>
+    {error && <Notice>{error}</Notice>}{actionError && <Notice>{actionError}</Notice>}{pollError && <Notice kind="info">{pollError}</Notice>}
+    <div className="kanban-controls"><div className="field board-search"><label htmlFor="board-search">Buscar tarefas</label><input id="board-search" type="search" placeholder="Tarefa, repositório ou agente" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="field"><label htmlFor="board-repository">Repositório</label><select id="board-repository" value={repositoryFilter} onChange={(event) => setRepositoryFilter(event.target.value)}><option value="">Todos os repositórios</option>{repositories.map((name) => <option key={name} value={name}>{name}</option>)}</select></div><div className="field"><label htmlFor="board-agent">Agente</label><select id="board-agent" value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">Toda a equipe</option>{agents.map((name) => <option key={name} value={name}>{name}</option>)}</select></div><button className="button secondary" disabled={loading} onClick={() => setAttempt((value) => value + 1)}><Icon name="refresh" size={16} />Atualizar</button></div>
+    <div className="kanban-summary"><p aria-live="polite">{visible.length} {visible.length === 1 ? "tarefa" : "tarefas"}{visible.length !== runs.length ? ` de ${runs.length}` : ""}</p><p>Os cartões avançam conforme a execução dos agentes.</p></div>
+    {loading ? <Loading label="Carregando tarefas" /> : <div className="kanban-scroll" tabIndex={0} role="region" aria-label="Quadro Kanban de tarefas, role horizontalmente para ver todas as colunas"><div className="kanban-board">{boardColumns.map((column) => {
+      const cards = visible.filter((run) => boardColumn(run) === column.id);
+      return <section className={`kanban-column ${column.id}`} key={column.id} aria-labelledby={`board-${column.id}`}><header><span className="board-dot" aria-hidden="true" /><h2 id={`board-${column.id}`}>{column.name}</h2><span aria-label={`${cards.length} tarefas`}>{cards.length}</span></header><div className="kanban-cards">{cards.length ? cards.map((run) => <button className="kanban-card" key={run.runId} onClick={() => setSelectedId(run.runId)} aria-label={`${run.task}, ${statusNames[run.status]}`}><span className="run-repository">{run.repositoryName}</span><strong>{run.task}</strong><Status value={run.status} />{run.result && safePullRequestUrl(run.result.prUrl, run.repositoryName) && <span className="board-receipt">PR #{run.result.prNumber} registrado</span>}<span className="kanban-card-footer"><span className="kanban-card-agent">{run.agents?.find((agent) => agent.role === run.agentStage)?.name ?? run.agents?.find((agent) => agent.role === "programmer")?.name ?? "Equipe da tarefa"}</span><time dateTime={new Date(run.createdAt).toISOString()}>{new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(run.createdAt)}</time></span></button>) : <p className="kanban-empty">{query || repositoryFilter || agentFilter ? "Nenhuma tarefa neste filtro." : column.hint}</p>}</div></section>;
+    })}</div></div>}
+    {creating && <TaskDialog title="Nova tarefa" onClose={() => setCreating(false)}><CodingSetup organizationPath={organization} path={path} onCreated={changed} onNavigate={(section) => { setCreating(false); onNavigate(section); }} /></TaskDialog>}
+    {selected && !creating && <TaskDialog title="Detalhes da tarefa" onClose={() => setSelectedId("")}><CodingDetail key={selected.runId} path={path} run={selected} onChanged={changed} onConflict={(message) => { setActionError(message); setAttempt((value) => value + 1); }} /></TaskDialog>}
   </>;
+}
+
+function TaskDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { const element = dialog.current; element?.showModal(); return () => element?.close(); }, []);
+  return <dialog ref={dialog} className="task-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose(); }}><header className="task-dialog-header"><h2>{title}</h2><button className="text-button" onClick={onClose} aria-label={`Fechar ${title.toLocaleLowerCase("pt-BR")}`}>Fechar <span aria-hidden="true">×</span></button></header><div className="task-dialog-content">{children}</div></dialog>;
 }
 
 function CodingSetup({ organizationPath: organization, path, onCreated, onNavigate }: { organizationPath: string; path: string; onCreated: (run: VisibleCodingRun) => void; onNavigate: (section: Section) => void }) {
   const [github, setGithub] = useState<GithubState | null>(null);
+  const [catalog, setCatalog] = useState<AgentCatalogState | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -107,8 +130,9 @@ function CodingSetup({ organizationPath: organization, path, onCreated, onNaviga
     void Promise.all([
       api<GithubState>(`${organization}/github`, { signal: controller.signal }),
       api<{ credentials: Credential[] }>(`${organization}/credentials`, { signal: controller.signal }),
-    ]).then(([nextGithub, nextCredentials]) => {
-      if (!controller.signal.aborted) { setGithub(nextGithub); setCredentials(nextCredentials.credentials); }
+      api<AgentCatalogState>(`${organization}/agent-catalog`, { signal: controller.signal }),
+    ]).then(([nextGithub, nextCredentials, nextCatalog]) => {
+      if (!controller.signal.aborted) { setGithub(nextGithub); setCredentials(nextCredentials.credentials); setCatalog(nextCatalog); }
     }).catch((failure: unknown) => { if (!isAbort(failure)) setError(errorMessage(failure)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -120,10 +144,10 @@ function CodingSetup({ organizationPath: organization, path, onCreated, onNaviga
     <div className="setup-step"><span className="setup-step-number" aria-hidden="true">1</span><div><h3>{repositories.length ? "Repositório conectado" : "Conecte um repositório"}</h3><p>{repositories.length ? `${repositories.length} ${repositories.length === 1 ? "repositório disponível" : "repositórios disponíveis"} para esta empresa.` : github?.configured ? "Escolha no GitHub o código em que o agente vai trabalhar." : "A conexão com o GitHub ainda precisa ser configurada pelo responsável pela Veltram."}</p></div><button className="button secondary small" onClick={() => onNavigate("repositories")}>{repositories.length ? "Ver repositórios" : "Repositórios"}</button></div>
     <div className="setup-step"><span className="setup-step-number" aria-hidden="true">2</span><div><h3>{availableProviders.length ? "Chave de IA armazenada" : "Adicione uma chave de IA"}</h3><p>{availableProviders.length ? "O modelo e o acesso ao provedor serão verificados durante a execução." : "A tarefa usa a chave e os limites da conta de IA da empresa."}</p></div><button className="button secondary small" onClick={() => onNavigate("credentials")}>{availableProviders.length ? "Ver chaves" : "Chaves de IA"}</button></div>
   </section>;
-  return <CodingComposer path={path} repositories={repositories} availableProviders={availableProviders} onCreated={onCreated} />;
+  return catalog && <CodingComposer organizationPath={organization} catalog={catalog} path={path} repositories={repositories} availableProviders={availableProviders} onCreated={onCreated} />;
 }
 
-function CodingComposer({ path, repositories, availableProviders, onCreated }: { path: string; repositories: RepositoryConnection[]; availableProviders: CredentialProvider[]; onCreated: (run: VisibleCodingRun) => void }) {
+function CodingComposer({ organizationPath, catalog, path, repositories, availableProviders, onCreated }: { organizationPath: string; catalog: AgentCatalogState; path: string; repositories: RepositoryConnection[]; availableProviders: CredentialProvider[]; onCreated: (run: VisibleCodingRun) => void }) {
   const [repositoryId, setRepositoryId] = useState(repositories[0].id);
   const [baseRef, setBaseRef] = useState(repositories[0].defaultBranch);
   const [task, setTask] = useState("");
@@ -131,6 +155,9 @@ function CodingComposer({ path, repositories, availableProviders, onCreated }: {
   const [model, setModel] = useState("");
   const [setupCommand, setSetupCommand] = useState("");
   const [testCommand, setTestCommand] = useState("");
+  const [agentSelections, setAgentSelections] = useState<AgentSelections | undefined>(catalog.selections ? { catalogVersion: catalog.version, ...catalog.selections } : undefined);
+  const [teamReady, setTeamReady] = useState(true);
+  const [jevBusy, setJevBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -141,10 +168,12 @@ function CodingComposer({ path, repositories, availableProviders, onCreated }: {
   async function create(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
+    if (jevBusy) return;
+    if (!teamReady) { setError("Escolha os três agentes para esta tarefa."); return; }
     if (!task.trim() || !baseRef.trim() || !model.trim() || !testCommand.trim()) {
       setError("Descreva a tarefa e preencha a branch, o modelo e o comando de testes."); setSettingsOpen(true); return;
     }
-    const fields = { repositoryConnectionId: repositoryId, baseRef: baseRef.trim(), task: task.trim(), provider, model: model.trim(), setupCommand: setupCommand.trim(), testCommand: testCommand.trim() };
+    const fields = { repositoryConnectionId: repositoryId, baseRef: baseRef.trim(), task: task.trim(), provider, model: model.trim(), setupCommand: setupCommand.trim(), testCommand: testCommand.trim(), ...(agentSelections ? { agentSelections } : {}) };
     const fingerprint = JSON.stringify(fields);
     if (request.current?.fingerprint !== fingerprint) request.current = { fingerprint, id: crypto.randomUUID() };
     const body: CodingRunInput = { ...fields, requestId: request.current.id };
@@ -162,6 +191,7 @@ function CodingComposer({ path, repositories, availableProviders, onCreated }: {
     {error && <Notice>{error}</Notice>}
     <div className="field"><label htmlFor="coding-repository">Repositório</label><select id="coding-repository" disabled={busy} value={repositoryId} onChange={(event) => { setRepositoryId(event.target.value); setBaseRef(repositories.find((repository) => repository.id === event.target.value)?.defaultBranch ?? ""); }}>{repositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.fullName}</option>)}</select></div>
     <div className="field"><label htmlFor="coding-task">O que precisa mudar?</label><textarea id="coding-task" rows={4} required maxLength={4000} disabled={busy} value={task} onChange={(event) => setTask(event.target.value)} placeholder="Descreva o problema, o resultado esperado e como verificar a alteração." aria-describedby="coding-task-help" /><div className="textarea-footer" id="coding-task-help"><span>Inclua o contexto necessário para uma alteração específica.</span><span>{task.length}/4.000</span></div></div>
+    <CodingTeamPicker catalog={catalog} organizationPath={organizationPath} task={task} disabled={busy} onBusyChange={setJevBusy} onChange={(selection, valid) => { setAgentSelections(selection); setTeamReady(valid); }} />
     <details className="execution-settings" open={settingsOpen} onToggle={(event) => setSettingsOpen(event.currentTarget.open)}><summary>Modelo e execução <span>{model && testCommand ? `${providers[provider]} · ${model}` : "Configuração necessária"}</span></summary><div className="execution-settings-fields form-stack">
       <div className="form-pair"><div className="field"><label htmlFor="coding-provider">Provedor de IA</label><select id="coding-provider" value={provider} disabled={busy} onChange={(event) => { setProvider(event.target.value as CredentialProvider); setModel(""); }}>{availableProviders.map((value) => <option key={value} value={value}>{providers[value]}</option>)}</select></div><div className="field"><label htmlFor="coding-model">Modelo</label><input id="coding-model" required maxLength={120} autoComplete="off" disabled={busy} value={model} onChange={(event) => setModel(event.target.value)} placeholder="ID do modelo na sua conta" /></div></div>
       <p className="field-hint">Use um modelo com suporte a ferramentas. A disponibilidade e o custo dependem da conta da empresa no provedor.</p>
@@ -169,7 +199,7 @@ function CodingComposer({ path, repositories, availableProviders, onCreated }: {
       <div className="field"><label htmlFor="coding-setup">Preparação do projeto <span className="optional-label">opcional</span></label><input id="coding-setup" maxLength={2000} autoComplete="off" spellCheck={false} disabled={busy} value={setupCommand} onChange={(event) => setSetupCommand(event.target.value)} placeholder="Ex.: npm ci" /><p className="field-hint">Comando para instalar dependências ou preparar o ambiente.</p></div>
       <div className="field"><label htmlFor="coding-test">Comando de testes</label><input id="coding-test" required maxLength={2000} autoComplete="off" spellCheck={false} disabled={busy} value={testCommand} onChange={(event) => setTestCommand(event.target.value)} placeholder="Ex.: npm test" /><p className="field-hint">Informe os testes que comprovam a tarefa. O comando será executado sobre o código final.</p></div>
     </div></details>
-    <div className="coding-composer-footer"><p>Um administrador revisa e aprova o uso da chave de IA antes da execução.</p><button className="button primary" disabled={busy || !task.trim()}>{busy ? "Criando tarefa…" : "Criar tarefa"}<Icon name="arrow" /></button></div>
+    <div className="coding-composer-footer"><p>Um administrador revisa e aprova o uso da chave de IA antes da execução.</p><button className="button primary" disabled={busy || jevBusy || !task.trim() || !teamReady}>{busy ? "Criando tarefa…" : "Criar tarefa"}<Icon name="arrow" /></button></div>
   </form>;
 }
 

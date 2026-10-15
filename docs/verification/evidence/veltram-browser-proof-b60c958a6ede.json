@@ -1,0 +1,32 @@
+{
+  "name": "veltram-browser-proof-b60c958a6ede",
+  "startedAt": "2026-10-15T02:12:07.306Z",
+  "accountId": "768841fa976bce74242ce11c4e98bc9d",
+  "expiresAt": "2026-10-15T02:32:07.307Z",
+  "productionTouched": false,
+  "sourceHashes": {
+    "src/browser-runtime.ts": "f314528c4f5b65ed92a251f8af2cb03ed91f0bd4611feb9fe8c478f8cbcb430b",
+    "src/browser-network.ts": "da776f026ab14a158c0a7e2b235341fd715bd62ae2a72dfd1e42ad174d116c2c",
+    "src/browser-state.ts": "a4d35af024273af0b27ea4fefc3ae2db2fc0cb7fda6efff32b037e913013f0bf",
+    "src/browser-types.ts": "f3c6055b605453c991b1f08edaaf448daa5e5efa97cc2280201f33d20e6ba49b",
+    "test/fixtures/browser-remote-worker.ts": "256b7060c548a74922ecb7d0dcb5ac7411f631fe78fa7116a1192482dc2383ce"
+  },
+  "checks": {
+    "unauthorized": 403,
+    "wrongToken": 403,
+    "httpStatus": 500
+  },
+  "cleanup": {
+    "workerDeleteExit": 0,
+    "finalHttpStatus": 200,
+    "recheckedAt": "2026-10-15T02:25:31.124Z",
+    "recheckedHttpStatus": 404
+  },
+  "logs": {
+    "deploy": "\n ⛅️ wrangler 4.151.0\n────────────────────\n\nCloudflare collects anonymous telemetry about your usage of Wrangler. Learn more at https://github.com/cloudflare/workers-sdk/tree/main/packages/wrangler/telemetry.md\nTotal Upload: 718.25 KiB / gzip: 140.09 KiB\nWorker Startup Time: 17 ms\nYour Worker has access to the following bindings:\nBinding                                                                  Resource                  \nenv.BROWSER                                                              Browser Run               \n[fixture verifier binding omitted]\nenv.FIXTURE_EXPIRES_AT (\"1792031527307\")                                 Environment Variable      \n\nUploaded veltram-browser-proof-b60c958a6ede (5.35 sec)\nDeployed veltram-browser-proof-b60c958a6ede triggers (2.37 sec)\n  https://veltram-browser-proof-b60c958a6ede.dinhogehm.workers.dev\nCurrent Version ID: d3190a21-90d3-4dd0-a1f0-3fbb533438ee\n",
+    "delete": "\n ⛅️ wrangler 4.151.0\n────────────────────\nSuccessfully deleted veltram-browser-proof-b60c958a6ede\n"
+  },
+  "origin": "https://veltram-browser-proof-b60c958a6ede.dinhogehm.workers.dev",
+  "failure": "Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON",
+  "finishedAt": "2026-10-15T02:13:03.299Z"
+}

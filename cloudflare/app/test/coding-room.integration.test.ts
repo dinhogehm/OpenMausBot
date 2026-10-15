@@ -7,6 +7,8 @@ import { codingTreeDigest } from "../src/coding-types";
 import { changeCredential } from "../src/credential-store";
 import { CodingRoom } from "../src/coding-room";
 import type { ModelCall, ModelTurn } from "../src/model-broker";
+import { agentCatalogRoute } from "../src/agent-catalog";
+import type { AgentCatalogResponse } from "../src/agent-catalog-types";
 
 // Real D1 and Durable Object steps compete with other integration files in the full suite.
 
@@ -216,6 +218,64 @@ it("runs coordinator, programmer and reviewer in a durable workflow before publi
   expect(leases).toEqual([]);
 });
 
+it("records report facts from the durable workflow with real timestamps and observed tokens by agent", async () => {
+  const f = await fixture(); await fakeExecutor(f);
+  const run = await create(f); await approve(f, run);
+  const completed = await drain(f, run.runId);
+  expect(completed.status).toBe("completed");
+  const synced = await f.command("report-sync");
+  expect(synced.status).toBe(200);
+  const stored = await env.DB.prepare("SELECT snapshot FROM report_runs WHERE organization_id=? AND workspace_id=? AND run_id=?").bind(f.organizationId, f.workspaceId, run.runId).first<{ snapshot: string }>();
+  const snapshot = JSON.parse(stored!.snapshot);
+  expect(snapshot.approvedAt).toBeGreaterThanOrEqual(snapshot.createdAt);
+  expect(snapshot.startedAt).toBeGreaterThanOrEqual(snapshot.approvedAt);
+  expect(snapshot.finishedAt).toBeGreaterThanOrEqual(snapshot.startedAt);
+  const facts = (await env.DB.prepare("SELECT fact FROM report_facts WHERE organization_id=? AND run_id=?").bind(f.organizationId, run.runId).all<{ fact: string }>()).results.map((row) => JSON.parse(row.fact));
+  expect(facts.filter((fact) => fact.kind === "model_started")).toHaveLength(4);
+  expect(facts.filter((fact) => fact.kind === "model_observed").reduce((sum, fact) => sum + fact.tokens, 0)).toBe(400);
+  expect(new Set(facts.filter((fact) => fact.kind === "model_observed").map((fact) => fact.agentRole))).toEqual(new Set(["coordinator", "programmer", "reviewer"]));
+  expect(facts.filter((fact) => fact.kind === "test")).toHaveLength(1);
+  await f.command("report-sync");
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM report_facts WHERE organization_id=? AND run_id=?").bind(f.organizationId, run.runId).first<{ n: number }>())?.n).toBe(facts.length);
+});
+
+it("replays canonical agent selections but rejects dropping them from an existing request", async () => {
+  const f = await fixture();
+  const catalog = await (await agentCatalogRoute(env, f.organizationId, f.userId, "POST", { expectedVersion: 0, requestId: crypto.randomUUID(), agents: [{ sourceId: "fixture-persona", name: "Fixture", title: "Team", description: "Fixture only", instructions: "Check the task", section: "Team", sourceEngine: "codex", sourceModel: "fixture-model", sourceEffort: "medium" }] }, true)).json() as AgentCatalogResponse;
+  const id = catalog.agents[0].id;
+  const body = input({ repositoryConnectionId: f.connectionId, agentSelections: { catalogVersion: catalog.version, coordinator: id, programmer: id, reviewer: id } });
+  const created = await create(f, body);
+  const replay = await f.command("create", { ...body, agentSelections: { reviewer: id, programmer: id, coordinator: id, catalogVersion: catalog.version } });
+  expect(replay.status).toBe(200);
+  expect((await replay.json() as { run: CodingRecord }).run.runId).toBe(created.runId);
+  const omitted = { ...body }; delete omitted.agentSelections;
+  const response = await f.command("create", omitted);
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: "request_id_reused" });
+});
+
+it("retries the durable reporting outbox after D1 recovery without starting a coding task", async () => {
+  const f = await fixture();
+  const database = env.DB;
+  await runInDurableObject(f.stub, (instance) => {
+    const bound = (instance as unknown as { env: AppEnv }).env; const real = bound.DB;
+    bound.DB = new Proxy(real, { get(target, property) {
+      if (property === "prepare") return (sql: string) => { if (sql.includes("report_")) throw new Error("Fixture reporting database unavailable"); return target.prepare(sql); };
+      const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+    } });
+  });
+  const run = await create(f);
+  expect(await (await f.command("report-sync")).json()).toEqual({ synced: false });
+  expect(await runInDurableObject(f.stub, (_instance, state) => state.storage.get(`report-pending:${run.runId}`))).toBe(true);
+  await runInDurableObject(f.stub, (instance) => { (instance as unknown as { env: AppEnv }).env.DB = database; });
+  await f.alarm();
+  expect(await runInDurableObject(f.stub, (_instance, state) => state.storage.get(`report-pending:${run.runId}`))).toBeUndefined();
+  const row = await env.DB.prepare("SELECT snapshot FROM report_runs WHERE organization_id=? AND run_id=?").bind(f.organizationId, run.runId).first<{ snapshot: string }>();
+  expect(JSON.parse(row!.snapshot).status).toBe("pending_approval");
+  expect(modelReply).not.toHaveBeenCalled();
+  expect(mutations).toHaveLength(0);
+});
+
 it("recovers an accepted PR through read-only reconciliation after its response and first lookup are lost", async () => {
   const f = await fixture(); await fakeExecutor(f);
   publicationFault = { loseResponse: true, failedReads: 1 };
@@ -373,6 +433,12 @@ it("does not accept a late model result after cancellation or perform subsequent
   expect(executor.step).not.toHaveBeenCalled();
   expect(executor.stop).toHaveBeenCalled();
   expect(mutations).toHaveLength(0);
+  await f.command("report-sync");
+  const observed = await env.DB.prepare("SELECT fact FROM report_facts WHERE organization_id=? AND run_id=? AND fact_id LIKE 'model-usage:%'").bind(f.organizationId, run.runId).all<{ fact: string }>();
+  expect(observed.results).toHaveLength(1);
+  expect(JSON.parse(observed.results[0].fact).tokens).toBe(100);
+  const snapshot = await env.DB.prepare("SELECT snapshot FROM report_runs WHERE organization_id=? AND run_id=?").bind(f.organizationId, run.runId).first<{ snapshot: string }>();
+  expect(JSON.parse(snapshot!.snapshot).status).toBe("canceled");
 });
 
 it("canceling a pending task does not abort a different active task's model call", async () => {

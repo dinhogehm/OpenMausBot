@@ -6,6 +6,10 @@ import { createOrganization, listOrganizations, listWorkspaces, requireMembershi
 import { limitOTPDelivery } from "./otp-limits";
 import { handleGitHubRoute } from "./github";
 import { agentProfilesRoute } from "./agent-profiles";
+import { agentCatalogRoute } from "./agent-catalog";
+import { handleReportsRoute } from "./reports";
+import { decisionModelRoute, recommendAgents } from "./decision-model";
+import { handleMarketplaceRoute } from "./marketplace-routes";
 export { ExecutionRoom } from "./run-room";
 export { Admission } from "./admission";
 export { LinuxExecutor } from "./linux-executor";
@@ -13,6 +17,7 @@ export { CodingRoom } from "./coding-room";
 export { CodingAdmission } from "./coding-admission";
 export { CodingExecutor } from "./coding-executor";
 export { CodingDependencyNetwork } from "./coding-network";
+export { BrowserRoom } from "./browser-room";
 
 const authPaths = new Set(["/api/auth/email-otp/send-verification-otp", "/api/auth/sign-in/email-otp", "/api/auth/sign-out"]);
 
@@ -41,7 +46,7 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
   let body: Record<string, unknown> | undefined;
   if (mutating) {
     if (request.headers.get("origin") !== env.APP_ORIGIN) throw new HttpError(403, "origin_forbidden");
-    const limit = url.pathname.endsWith("/agents") ? 65536 : /\/coding-runs(?:\/|$)/.test(url.pathname) ? 32768 : 8192;
+    const limit = /\/agent-catalog(?:\/import)?$/.test(url.pathname) ? 262144 : url.pathname.endsWith("/agents") ? 131072 : /\/coding-runs(?:\/|$)/.test(url.pathname) ? 32768 : 8192;
     body = await readJson(request, limit);
   }
   const auth = createAuth(env, ctx);
@@ -68,6 +73,28 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
   const userId = session.user.id;
   const githubResponse = await handleGitHubRoute(request, env, { userId, sessionId: session.session.id }, body);
   if (githubResponse) return githubResponse;
+  const marketplaceResponse = await handleMarketplaceRoute(request, env, userId, body);
+  if (marketplaceResponse) return marketplaceResponse;
+  const decisionMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/decision-model$/);
+  if (decisionMatch) return decisionModelRoute(env, decisionMatch[1], userId, request.method, body ?? {});
+  const recommendMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/agent-catalog\/recommend$/);
+  if (recommendMatch && request.method === "POST") return recommendAgents(env, recommendMatch[1], userId, body ?? {});
+  const catalogMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/agent-catalog(\/import)?$/);
+  if (catalogMatch) return agentCatalogRoute(env, catalogMatch[1], userId, request.method, body ?? {}, Boolean(catalogMatch[2]));
+  const reportResponse = await handleReportsRoute(request, env, userId, body);
+  if (reportResponse) return reportResponse;
+  const browserMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/workspaces\/([A-Za-z0-9_-]{1,80})\/browser-runs(?:\/([A-Za-z0-9_-]{1,80})(?:\/(approve|cancel|screenshot))?)?$/);
+  if (browserMatch) {
+    const [, organizationId, workspaceId, runId, operation] = browserMatch;
+    const action = request.method === "GET" ? (operation === "screenshot" ? "screenshot" : !operation ? (runId ? "get" : "list") : undefined)
+      : request.method === "POST" && operation !== "screenshot" ? (!runId ? "create" : operation) : undefined;
+    if (!action) throw new HttpError(404, "not_found");
+    await requireMembership(env.DB, organizationId, userId, action === "approve");
+    if (!env.BROWSER_RUNS) throw new HttpError(503, "browser_unavailable");
+    return env.BROWSER_RUNS.getByName(organizationId).fetch(new Request("https://browser.internal/command", {
+      method: "POST", body: JSON.stringify({ organizationId, workspaceId, runId, userId, action, body: body ?? {} }),
+    }));
+  }
   const agentsMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/agents$/);
   if (agentsMatch) return agentProfilesRoute(env, agentsMatch[1], userId, request.method, body ?? {});
   const codingMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/workspaces\/([A-Za-z0-9_-]{1,80})\/coding-runs(?:\/([A-Za-z0-9_-]{1,80})(?:\/(approve|cancel))?)?$/);

@@ -3,7 +3,8 @@
   "name": "veltram",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-14",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "browser": { "binding": "BROWSER" },
   "workers_dev": false,
   "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
   "durable_objects": { "bindings": [
@@ -12,11 +13,13 @@
     { "name": "LINUX_EXECUTORS", "class_name": "LinuxExecutor" },
     { "name": "CODING_RUNS", "class_name": "CodingRoom" },
     { "name": "CODING_ADMISSION", "class_name": "CodingAdmission" },
-    { "name": "CODING_EXECUTORS", "class_name": "CodingExecutor" }
+    { "name": "CODING_EXECUTORS", "class_name": "CodingExecutor" },
+    { "name": "BROWSER_RUNS", "class_name": "BrowserRoom" }
   ] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ExecutionRoom", "Admission", "LinuxExecutor"] },
-    { "tag": "v2", "new_sqlite_classes": ["CodingRoom", "CodingAdmission", "CodingExecutor"] }
+    { "tag": "v2", "new_sqlite_classes": ["CodingRoom", "CodingAdmission", "CodingExecutor"] },
+    { "tag": "v3", "new_sqlite_classes": ["BrowserRoom"] }
   ],
   "containers": [
     { "class_name": "LinuxExecutor", "scheduling_policy": "durable_object" },

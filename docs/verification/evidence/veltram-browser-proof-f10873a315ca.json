@@ -1,0 +1,42 @@
+{
+  "name": "veltram-browser-proof-f10873a315ca",
+  "startedAt": "2026-10-15T02:17:44.479Z",
+  "accountId": "768841fa976bce74242ce11c4e98bc9d",
+  "expiresAt": "2026-10-15T02:37:44.480Z",
+  "productionTouched": false,
+  "sourceHashes": {
+    "src/browser-runtime.ts": "b4fe30908d2b1f4cf6a91aacc7b44d8db69cbb8ee0d6fb5c2d91e3b975a458ab",
+    "src/browser-network.ts": "0ffd8612a5417f378fbacd7a4e399e6831fa41f2584f1c1110bd2a76586b7086",
+    "src/browser-state.ts": "a4d35af024273af0b27ea4fefc3ae2db2fc0cb7fda6efff32b037e913013f0bf",
+    "src/browser-types.ts": "f3c6055b605453c991b1f08edaaf448daa5e5efa97cc2280201f33d20e6ba49b",
+    "test/fixtures/browser-remote-worker.ts": "8a2125f440a6a54382adb411f635146b8fc02b41b0ccd7ec928680cafcac1bfe"
+  },
+  "checks": {
+    "unauthorized": 403,
+    "wrongToken": 403,
+    "httpStatus": 500,
+    "runtime": {
+      "checks": {
+        "bindingMethods": {
+          "acquire": "function",
+          "getSession": "function",
+          "closeSession": "function"
+        },
+        "sessionId": null,
+        "sessionClosed": true
+      },
+      "failure": "Invalid redirect value, must be one of \"follow\" or \"manual\" (\"error\" won't be implemented since it does not make sense at the edge; use \"manual\" and check the response status code)."
+    }
+  },
+  "cleanup": {
+    "workerDeleteExit": 0,
+    "finalHttpStatus": 404
+  },
+  "logs": {
+    "deploy": "\n ⛅️ wrangler 4.151.0\n────────────────────\nTotal Upload: 719.58 KiB / gzip: 140.31 KiB\nWorker Startup Time: 19 ms\nYour Worker has access to the following bindings:\nBinding                                                                  Resource                  \nenv.BROWSER                                                              Browser Run               \n[fixture verifier binding omitted]\nenv.FIXTURE_EXPIRES_AT (\"1792031864480\")                                 Environment Variable      \n\nUploaded veltram-browser-proof-f10873a315ca (5.70 sec)\nDeployed veltram-browser-proof-f10873a315ca triggers (2.33 sec)\n  https://veltram-browser-proof-f10873a315ca.dinhogehm.workers.dev\nCurrent Version ID: 30b109a8-00c5-4aeb-8235-403d5e2ab3ba\n",
+    "delete": "\n ⛅️ wrangler 4.151.0\n────────────────────\nSuccessfully deleted veltram-browser-proof-f10873a315ca\n"
+  },
+  "origin": "https://veltram-browser-proof-f10873a315ca.dinhogehm.workers.dev",
+  "failure": "{\"checks\":{\"bindingMethods\":{\"acquire\":\"function\",\"getSession\":\"function\",\"closeSession\":\"function\"},\"sessionId\":null,\"sessionClosed\":true},\"failure\":\"Invalid redirect value, must be one of \\\"follow\\\" or \\\"manual\\\" (\\\"error\\\" won't be implemented since it does not make sense at the edge; use \\\"manual\\\" and check the response status code).\"}\n\n500 !== 200\n",
+  "finishedAt": "2026-10-15T02:18:31.904Z"
+}

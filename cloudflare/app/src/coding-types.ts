@@ -46,6 +46,7 @@ export interface CodingRunInput {
   requestId: string; repositoryConnectionId: string; baseRef: string;
   task: string; provider: CredentialProvider; model: string;
   setupCommand: string; testCommand: string;
+  agentSelections?: { catalogVersion: number; coordinator: string; programmer: string; reviewer: string };
 }
 export type AgentRole = "coordinator" | "programmer" | "reviewer";
 export interface AgentProfile {
@@ -54,6 +55,7 @@ export interface AgentProfile {
 }
 export interface ResolvedAgent extends Omit<AgentProfile, "provider"> {
   provider: CredentialProvider; credentialVersion: number;
+  profileId?: string; profileRevision?: number; catalogVersion?: number;
 }
 export interface CodingEvent {
   id: number; at: number; kind: "status" | "model" | "tool" | "test" | "error";
@@ -61,6 +63,7 @@ export interface CodingEvent {
 }
 export interface CodingRecord extends CodingRunInput, CodingIdentity {
   createdBy: string; approvedBy?: string; createdAt: number; updatedAt: number;
+  approvedAt?: number; startedAt?: number; finishedAt?: number; publishedAt?: number;
   status: CodingStatus; repositoryName: string; credentialVersion: number;
   baseSha?: string; baseTreeSha?: string; modelCalls: number; tokens: number;
   error?: string; summary?: string; events: CodingEvent[];

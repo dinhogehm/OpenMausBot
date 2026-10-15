@@ -79,6 +79,7 @@ Use only mapped, tested commands:
 - [Hosted workspace sign-in and revocation](hosted-workspaces.md)
 - [Cloud app: organizations and BYOK credentials](cloud-app.md)
 - [Veltram: coding agents, GitHub and isolated runtime](veltram-coding.md)
+- [Veltram: agent catalog, reports, browser and marketplace](veltram-catalog-browser-marketplace.md)
 - [Shared-workspace trust: loopback, card answerers, decision log](shared-workspace-trust.md)
 - [Shared-workspace governance: bot visibility and admin activity](shared-workspace-governance.md)
 - [Usage ledger](usage-ledger.md)

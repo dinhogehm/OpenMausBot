@@ -1,0 +1,29 @@
+{
+  "name": "veltram-browser-proof-2b205870f673",
+  "startedAt": "2026-10-15T02:16:42.898Z",
+  "accountId": "768841fa976bce74242ce11c4e98bc9d",
+  "expiresAt": "2026-10-15T02:36:42.899Z",
+  "productionTouched": false,
+  "sourceHashes": {
+    "src/browser-runtime.ts": "c681cc176b34ca2481a0674fbab1f138a37a74ca24ddb6f28c27f2a84e2e182c",
+    "src/browser-network.ts": "0ffd8612a5417f378fbacd7a4e399e6831fa41f2584f1c1110bd2a76586b7086",
+    "src/browser-state.ts": "a4d35af024273af0b27ea4fefc3ae2db2fc0cb7fda6efff32b037e913013f0bf",
+    "src/browser-types.ts": "f3c6055b605453c991b1f08edaaf448daa5e5efa97cc2280201f33d20e6ba49b",
+    "test/fixtures/browser-remote-worker.ts": "8a2125f440a6a54382adb411f635146b8fc02b41b0ccd7ec928680cafcac1bfe"
+  },
+  "checks": {
+    "unauthorized": 403,
+    "wrongToken": 404
+  },
+  "cleanup": {
+    "workerDeleteExit": 0,
+    "finalHttpStatus": 404
+  },
+  "logs": {
+    "deploy": "\n ⛅️ wrangler 4.151.0\n────────────────────\nTotal Upload: 719.42 KiB / gzip: 140.30 KiB\nWorker Startup Time: 15 ms\nYour Worker has access to the following bindings:\nBinding                                                                  Resource                  \nenv.BROWSER                                                              Browser Run               \n[fixture verifier binding omitted]\nenv.FIXTURE_EXPIRES_AT (\"1792031802899\")                                 Environment Variable      \n\nUploaded veltram-browser-proof-2b205870f673 (5.30 sec)\nDeployed veltram-browser-proof-2b205870f673 triggers (2.51 sec)\n  https://veltram-browser-proof-2b205870f673.dinhogehm.workers.dev\nCurrent Version ID: d8bcecfb-0f7e-4e9b-85e2-072efe425830\n",
+    "delete": "\n ⛅️ wrangler 4.151.0\n────────────────────\nSuccessfully deleted veltram-browser-proof-2b205870f673\n"
+  },
+  "origin": "https://veltram-browser-proof-2b205870f673.dinhogehm.workers.dev",
+  "failure": "Expected values to be strictly equal:\n\n404 !== 403\n",
+  "finishedAt": "2026-10-15T02:17:03.227Z"
+}

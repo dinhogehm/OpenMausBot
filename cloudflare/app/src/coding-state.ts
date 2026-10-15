@@ -1,6 +1,7 @@
 import type { CodingRunInput, CodingRecord, CodingStatus } from "./coding-types";
 import type { MemberRole } from "./organizations";
 import { HttpError } from "./http";
+import { parseAgentSelections } from "./agent-catalog";
 
 export function parseCodingInput(body: Record<string, unknown>): CodingRunInput {
   const string = (name: string, max: number, empty = false) => {
@@ -17,7 +18,8 @@ export function parseCodingInput(body: Record<string, unknown>): CodingRunInput 
     || baseRef.includes("..") || baseRef.includes("//") || baseRef.endsWith("/") || !/^[A-Za-z0-9_][A-Za-z0-9_./:@-]*$/.test(model)
     || !["openai", "anthropic", "openrouter"].includes(String(body.provider))) throw new HttpError(400, "invalid_coding_task");
   return { requestId, repositoryConnectionId, baseRef, model, provider: body.provider as CodingRunInput["provider"],
-    task: string("task", 4000), setupCommand: string("setupCommand", 2000, true), testCommand: string("testCommand", 2000) };
+    task: string("task", 4000), setupCommand: string("setupCommand", 2000, true), testCommand: string("testCommand", 2000),
+    ...(body.agentSelections === undefined ? {} : { agentSelections: parseAgentSelections(body.agentSelections) }) };
 }
 export function codingTerminal(status: CodingStatus): boolean {
   return ["completed", "failed", "canceled", "interrupted"].includes(status);

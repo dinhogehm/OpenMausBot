@@ -1,8 +1,11 @@
 import type { ReactNode } from "react";
 
-export type IconName = "arrow" | "building" | "check" | "chevron" | "code" | "key" | "logout" | "play" | "plus" | "refresh" | "repository" | "shield" | "stop" | "team";
+export type IconName = "browser" | "store" | "chart" | "arrow" | "building" | "check" | "chevron" | "code" | "key" | "logout" | "play" | "plus" | "refresh" | "repository" | "shield" | "stop" | "team";
 
 const paths: Record<IconName, ReactNode> = {
+  browser: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" /></>,
+  store: <><path d="M3 9h18l-2-6H5L3 9ZM5 13v8h14v-8M9 21v-6h6v6M3 9v1a3 3 0 0 0 6 0V9m0 1a3 3 0 0 0 6 0V9m0 1a3 3 0 0 0 6 0V9" /></>,
+  chart: <><path d="M4 3v18h17M8 16v-4M13 16V7M18 16v-7" /></>,
   arrow: <><path d="M5 12h14M13 6l6 6-6 6" /></>,
   building: <><path d="M4 21h16M7 21V3h10v18M10 7h4M10 11h4M10 15h4M11 21v-3h2v3" /></>,
   check: <path d="m5 12 4 4L19 6" />,
