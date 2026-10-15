@@ -5,7 +5,7 @@ export const boardColumns = [
   { id: "queued", name: "Na fila", hint: "Tarefas aprovadas, prontas para começar." },
   { id: "working", name: "Em execução", hint: "Planejamento, código e testes em andamento." },
   { id: "review", name: "Em revisão", hint: "Revisão das alterações e criação do PR." },
-  { id: "completed", name: "Concluídas", hint: "Tarefas com execução concluída." },
+  { id: "completed", name: "Concluídas", hint: "Confira os testes e o PR. Merge e publicação seguem as regras do projeto." },
   { id: "attention", name: "Precisam de atenção", hint: "Falhas, interrupções e cancelamentos." },
 ] as const;
 export type BoardColumn = typeof boardColumns[number]["id"];

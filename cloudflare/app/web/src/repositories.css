@@ -1,0 +1,56 @@
+.repositories-page { min-width: 0; }
+.repositories-page:focus { outline: none; }
+.repositories-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.repositories-toolbar > span { display: flex; align-items: center; gap: 9px; font-weight: 650; }
+.repositories-toolbar .text-button { min-height: 44px; }
+.repositories-page .connected-repositories { margin: 28px 0 32px; }
+.repository-section-heading { margin-bottom: 18px; }
+.repository-section-heading h2 { overflow-wrap: anywhere; }
+.repository-section-heading > p { color: var(--muted); font-size: .87rem; margin-top: 8px; }
+.repositories-page .repository-row { gap: 16px; }
+.repositories-page .repository-row h3,
+.repositories-page .repository-row h4 { line-height: 1.5; }
+.repositories-page .repository-row .status-pill { flex-shrink: 0; }
+.repositories-page .repository-entry:has(.repository-confirm) { padding: 0 16px; margin-inline: -16px; background: var(--paper); border-radius: 7px; outline: 1px solid var(--line-strong); }
+.repositories-page .repository-confirm { padding-top: 2px; }
+.repositories-page .repository-confirm h4 { font-size: 1rem; overflow-wrap: anywhere; }
+.repositories-page .repository-confirm p { max-width: 68ch; }
+.repositories-page .repository-confirm .button-row { gap: 12px; }
+.repositories-page .repository-row .button,
+.repositories-page .repository-row .text-button { min-height: 44px; }
+.repository-authorization { margin-top: 30px; }
+.repository-authorization .github-connect { gap: 24px; padding-top: 0; border-top: 0; }
+.repository-authorization .github-connect > div { min-width: 0; }
+.repository-authorization .github-connect p { max-width: 65ch; }
+.repository-authorization .github-connect > button { white-space: nowrap; }
+.repositories-page .repository-selection > p,
+.repository-empty-choices,
+.repository-access-help p { color: var(--muted); font-size: .87rem; line-height: 1.6; }
+.repository-empty-choices { margin-top: 14px; }
+.repositories-page .installation-account { font-size: .87rem; overflow-wrap: anywhere; }
+.repository-access-help { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 20px; }
+.repository-access-help > a { min-height: 44px; margin-top: 8px; }
+.repository-feedback { margin-top: 20px; border-radius: 7px; }
+.repository-feedback:focus { outline: 3px solid var(--accent); outline-offset: 4px; }
+.repository-feedback .notice { margin: 0; overflow-wrap: anywhere; }
+.repository-feedback .notice > p { margin-top: 8px; }
+.repository-feedback .notice > button { margin-top: 16px; }
+.repository-updating { color: var(--muted); font-size: .87rem; margin-top: 16px; }
+
+@media (max-width: 640px) {
+  .repositories-page .connected-repositories { margin-top: 24px; }
+  .repositories-page .repository-row { flex-wrap: wrap; gap: 10px 16px; }
+  .repositories-page .repository-row > div:first-child { flex-basis: 100%; }
+  .repositories-page .repository-row > .text-button { margin-left: auto; }
+  .repositories-page .repository-entry:has(.repository-confirm) { padding-inline: 12px; margin-inline: -12px; }
+  .repository-authorization .github-connect { flex-direction: column; align-items: stretch; gap: 18px; }
+  .repository-authorization .github-connect > button { align-self: flex-start; }
+  .repository-authorization .repository-selection { padding: 20px 16px; }
+  .repository-access-help > a { display: inline-flex; align-items: center; white-space: normal; }
+}
+
+@media (max-width: 380px) {
+  .repositories-page .repository-confirm .button-row { display: grid; }
+  .repositories-page .repository-confirm .button { width: 100%; }
+  .repository-authorization .github-connect > button { width: 100%; }
+}

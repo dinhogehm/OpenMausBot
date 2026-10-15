@@ -1,0 +1,84 @@
+.connections-page { max-width: 1040px; }
+.connections-page .page-heading { margin-bottom: 24px; }
+.connections-readiness { display: flex; gap: 14px; padding: 20px 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.connections-readiness > svg { color: var(--accent); margin-top: 2px; }
+.connections-readiness h2 { font-size: 1rem; line-height: 1.5; }
+.connections-readiness p { margin-top: 5px; color: var(--muted); font-size: .9rem; max-width: 74ch; }
+.connections-readiness.paused { background: var(--warning-soft); }
+.connections-readiness.paused > svg { color: var(--warning); }
+.connections-nav { display: flex; flex-wrap: wrap; gap: 6px 24px; border-bottom: 1px solid var(--line); margin: 20px 0 36px; }
+.connections-nav a { display: inline-flex; align-items: center; min-height: 46px; text-decoration: none; font-size: .87rem; font-weight: 600; padding: 7px 2px; border-bottom: 2px solid transparent; }
+.connections-nav a:hover { border-bottom-color: var(--accent); }
+.connections-section { margin-top: 40px; scroll-margin-top: 24px; }
+.connections-section > .section-heading { margin-bottom: 18px; }
+.connections-page .section-heading { align-items: flex-start; gap: 16px; }
+.connections-page .section-heading > div { min-width: 0; }
+.connections-page .section-heading > .text-button { flex-shrink: 0; margin-top: -6px; }
+.connections-page .text-button, .connections-page .button.small { min-height: 44px; }
+.connections-page .text-button { padding-block: 10px; }
+.connections-page .field-hint, .connections-page .provider-updated, .connections-page .provider-info p, .connections-page .section-heading p { font-size: .87rem; line-height: 1.55; }
+.connections-page .provider-summary { display: grid; grid-template-columns: 42px minmax(150px, 1fr) auto auto; gap: 12px 16px; }
+.connections-page .provider-info { grid-column: 2; }
+.connections-page .provider-summary .status-pill { grid-column: 3; font-size: .8rem; }
+.connections-page .provider-summary > .button { grid-column: 4; }
+.connections-page .provider-updated { margin-top: 12px; margin-left: 58px; }
+.connections-page .credential-editor { margin-left: 58px; max-width: 660px; }
+.connections-page .credential-editor .field { max-width: none; }
+.connections-page .credential-explainer { margin-top: 22px; }
+.connections-page .credential-explainer p { font-size: .87rem; }
+.connections-page .subscription-section { border-top: 1px solid var(--line); padding-top: 32px; }
+.connections-page .subscription-summary { grid-template-columns: minmax(0, 1fr) auto; }
+.connections-page .subscription-summary .provider-info { grid-column: 1; }
+.connections-page .subscription-summary .status-pill { grid-column: 2; }
+.connections-page .subscription-section .provider-updated, .connections-page .subscription-section .credential-editor { margin-left: 0; }
+.subscription-status-note { font-size: .9rem; margin-top: 16px; max-width: 72ch; }
+.subscription-billing-note { margin-top: 10px; }
+.subscription-section > .field-hint { margin-top: 16px; }
+.budget-section { border-top: 1px solid var(--line); padding-top: 32px; }
+.budget-pause-note { font-size: .87rem; color: var(--muted); margin: 0 0 24px; }
+.budget-pause-note strong { color: var(--text); }
+.budget-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(260px, 1fr); gap: 40px; }
+.budget-ledger > .field-hint { margin-top: 5px; }
+.budget-ledger dl { margin: 18px 0 0; }
+.budget-ledger dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--line); font-size: .9rem; }
+.budget-ledger dt { color: var(--muted); }
+.budget-ledger dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.budget-ledger .budget-available { border-bottom: 0; }
+.budget-ledger .budget-available dt { color: var(--text); }
+.budget-limit { border: 1px solid var(--line); border-radius: 10px; padding: 22px; align-self: start; }
+.budget-form { margin-top: 18px; }
+.budget-form .button-row { flex-wrap: wrap; }
+.budget-form .button { min-height: 44px; }
+.budget-form input { font-variant-numeric: tabular-nums; }
+.budget-current-limit { font-weight: 600; margin: 14px 0 8px; }
+.connection-details { margin-top: 24px; border-top: 1px solid var(--line); font-size: .87rem; color: var(--muted); }
+.connection-details summary { min-height: 44px; cursor: pointer; padding: 14px 0; color: var(--text); font-weight: 600; }
+.connection-details p { margin-bottom: 14px; max-width: 74ch; }
+@media (max-width: 1050px) {
+  .connections-page .provider-summary { grid-template-columns: 42px minmax(0, 1fr) auto; }
+  .connections-page .provider-summary .status-pill { grid-column: 2; justify-self: start; }
+  .connections-page .provider-summary > .button { grid-column: 3; grid-row: 1 / 3; }
+  .connections-page .subscription-summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .connections-page .subscription-summary .status-pill { grid-column: 2; }
+  .budget-layout { grid-template-columns: 1fr; gap: 24px; }
+}
+@media (max-width: 650px) {
+  .connections-readiness { padding: 16px; gap: 10px; }
+  .connections-nav { gap: 0 16px; margin-bottom: 28px; }
+  .connections-page .section-heading { flex-wrap: wrap; gap: 5px; }
+  .connections-page .section-heading > .text-button { margin-top: 0; }
+  .connections-page .provider-summary { grid-template-columns: 36px minmax(0, 1fr); }
+  .connections-page .provider-summary .status-pill { grid-column: 2; max-width: 100%; white-space: normal; }
+  .connections-page .provider-summary > .button { grid-column: 2; grid-row: auto; justify-self: start; }
+  .connections-page .provider-info { grid-column: 2; }
+  .connections-page .provider-updated { margin-left: 52px; }
+  .connections-page .credential-editor { margin-left: 0; }
+  .connections-page .subscription-summary { grid-template-columns: minmax(0, 1fr); }
+  .connections-page .subscription-summary .provider-info, .connections-page .subscription-summary .status-pill { grid-column: 1; }
+  .connections-page .subscription-section .provider-updated { margin-left: 0; }
+  .connections-section { margin-top: 30px; }
+  .connections-page .subscription-section, .budget-section { padding-top: 28px; }
+  .budget-limit { padding: 18px; }
+  .budget-ledger dl > div { gap: 16px; }
+  .budget-ledger dt { max-width: 60%; }
+}

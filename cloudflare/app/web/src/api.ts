@@ -46,6 +46,7 @@ const messages: Record<string, string> = {
   github_installation_claimed: "Esta instalação do GitHub já está vinculada a outra empresa.",
   github_owner_required: "A conexão precisa ser confirmada pelo responsável pela conta ou organização no GitHub.",
   github_selection_expired: "A seleção de repositórios expirou. Atualize o acesso ao GitHub e tente novamente.",
+  coding_history_preparing: "Estamos preparando o histórico de tarefas desta empresa. Tente novamente em instantes.",
   coding_capacity: "Já há uma tarefa em execução ou toda a capacidade está ocupada. Aguarde e tente novamente.",
   coding_conflict: "O estado da tarefa mudou. Atualize o histórico antes de tentar novamente.",
   coding_limit: "Esta empresa atingiu o limite de tarefas disponível.",

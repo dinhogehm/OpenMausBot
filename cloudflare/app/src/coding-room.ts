@@ -21,6 +21,11 @@ interface Entry {
   reporting?: { startedAt: number; outbox: ReportFact[] };
 }
 interface Command { organizationId: string; workspaceId: string; userId: string; action: string; runId?: string; body: Record<string, unknown> }
+interface ListingMigration { cursor?: string; complete: boolean }
+interface ListingItem { runId: string }
+const listingMigrationKey = "listing:v1:migration";
+const listingBatchSize = 25;
+const listingPrefix = (workspaceId: string, terminal: boolean) => `listing:v1:${terminal ? "terminal" : "active"}:${encodeURIComponent(workspaceId)}:`;
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 const safeError = (error: unknown) => {
   const code = error instanceof HttpError ? error.code : error instanceof Error ? error.message : "";
@@ -101,9 +106,12 @@ export class CodingRoom extends DurableObject<AppEnv> {
     if (!scope) await this.ctx.storage.put("organization", c.organizationId);
     if (c.action === "report-sync") return json({ synced: await this.flushReports() });
     if (c.action === "list") {
-      const recent = await this.ctx.storage.get<string[]>(`recent:${c.workspaceId}`);
-      const entries = recent ? await this.ctx.storage.get<Entry>(recent.map(id => `run:${id}`)) : await this.ctx.storage.list<Entry>({ prefix: "run:", limit: 100 });
-      return json({ runs: [...entries.values()].filter((entry) => entry.run.workspaceId === c.workspaceId).map((entry) => codingView(entry.run, c.userId, role)).sort((a, b) => b.createdAt - a.createdAt) });
+      if (!await this.migrateListingBatch()) {
+        await this.scheduleListingMigration();
+        throw new HttpError(503, "coding_history_preparing");
+      }
+      const entries = await this.listEntries(c.workspaceId);
+      return json({ runs: entries.filter((entry) => entry.run.organizationId === c.organizationId && entry.run.workspaceId === c.workspaceId).map((entry) => codingView(entry.run, c.userId, role)).sort((a, b) => b.createdAt - a.createdAt) });
     }
     if (c.action === "create") {
       const input = parseCodingInput(c.body);
@@ -123,10 +131,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
         status: "pending_approval", repositoryName: connection.fullName, credentialVersion: agents.find((agent) => agent.role === "programmer")!.credentialVersion,
         modelCalls: 0, tokens: 0, events: [], agents, agentStage: "coordinator" };
       const entry: Entry = { run, phase: "source", executorKey: codingExecutorName(run), dispatched: false, step: 0, history: {}, calls: [], repairAttempts: 0, reporting: { startedAt: now, outbox: [] } };
-      const recentKey = `recent:${c.workspaceId}`;
-      let recent = await this.ctx.storage.get<string[]>(recentKey);
-      if (!recent) recent = [...(await this.ctx.storage.list<Entry>({ prefix: "run:", limit: 100 })).values()].filter(value => value.run.workspaceId === c.workspaceId).sort((a,b) => b.run.createdAt - a.run.createdAt).map(value => value.run.runId);
-      await this.ctx.storage.put({ [`run:${run.runId}`]: entry, ...this.reportPending(entry), [recentKey]: [run.runId, ...recent].slice(0, 100) });
+      await this.ctx.storage.transaction(async (txn) => { await this.writeEntry(txn, entry); });
       return json({ run: codingView(run, c.userId, role) }, 201);
     }
     const entry = await this.ctx.storage.get<Entry>(`run:${c.runId}`);
@@ -143,7 +148,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
       entry.run.status = "queued";
       entry.run.approvedAt = Date.now();
       this.event(entry, "status", "Equipe aprovada. Preparando uma cópia isolada do repositório.");
-      await this.ctx.storage.transaction(async (txn) => { await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry), active: entry.run.runId }); await txn.setAlarm(Date.now() + 100); });
+      await this.ctx.storage.transaction(async (txn) => { await this.writeEntry(txn, entry, { active: entry.run.runId }); await txn.setAlarm(Date.now() + 100); });
       return json({ run: codingView(entry.run, c.userId, role) });
     }
     if (c.action === "cancel") {
@@ -153,13 +158,63 @@ export class CodingRoom extends DurableObject<AppEnv> {
       entry.run.generation++; entry.run.status = "canceled"; entry.phase = "cleanup";
       entry.run.finishedAt ??= Date.now();
       this.event(entry, "status", "Cancelamento solicitado. Encerrando o ambiente de execução.");
-      await this.ctx.storage.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry) });
+      await this.ctx.storage.transaction(async (txn) => { await this.writeEntry(txn, entry); });
       const active = await this.ctx.storage.get<string>("active");
       if (active === entry.run.runId) { this.#modelAbort?.abort(); await this.ctx.storage.setAlarm(Date.now() + 100); }
       this.ctx.waitUntil(this.env.CODING_EXECUTORS.getByName(entry.executorKey).stop().catch(() => undefined));
       return json({ run: codingView(entry.run, c.userId, role) });
     }
     throw new HttpError(404, "not_found");
+  }
+
+  /** Small index values keep model histories out of migration-complete polling. */
+  private async indexRun(txn: DurableObjectTransaction, run: CodingRecord) {
+    const activeKey = `${listingPrefix(run.workspaceId, false)}${run.runId}`;
+    if (codingTerminal(run.status)) {
+      const terminalKey = `${listingPrefix(run.workspaceId, true)}${String(run.createdAt).padStart(16, "0")}:${run.runId}`;
+      await txn.put(terminalKey, { runId: run.runId } satisfies ListingItem);
+      await txn.delete(activeKey);
+    } else await txn.put(activeKey, { runId: run.runId } satisfies ListingItem);
+  }
+  private async writeEntry(txn: DurableObjectTransaction, entry: Entry, additional: Record<string, unknown> = {}) {
+    await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry), ...additional });
+    await this.indexRun(txn, entry.run);
+  }
+  /** One bounded, restart-safe pass over old records; concurrent transitions share this transaction lock. */
+  private async migrateListingBatch(): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const migration = await txn.get<ListingMigration>(listingMigrationKey);
+      if (migration?.complete) return true;
+      const organizationId = await txn.get<string>("organization");
+      const page = await txn.list<Entry>({ prefix: "run:", limit: listingBatchSize, ...(migration?.cursor ? { startAfter: migration.cursor } : {}) });
+      for (const entry of page.values()) if (entry.run.organizationId === organizationId) await this.indexRun(txn, entry.run);
+      const complete = page.size < listingBatchSize;
+      await txn.put(listingMigrationKey, { cursor: [...page.keys()].at(-1) ?? migration?.cursor, complete } satisfies ListingMigration);
+      return complete;
+    });
+  }
+  private async scheduleListingMigration() {
+    const migration = await this.ctx.storage.get<ListingMigration>(listingMigrationKey);
+    if (!migration || migration.complete) return;
+    const next = Date.now() + 100;
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > next) await this.ctx.storage.setAlarm(next);
+  }
+  private async listEntries(workspaceId: string): Promise<Entry[]> {
+    const ids = new Set<string>();
+    let cursor: string | undefined;
+    // Pending approvals have no executor lease and must be included as well.
+    for (;;) {
+      const page = await this.ctx.storage.list<ListingItem>({ prefix: listingPrefix(workspaceId, false), limit: 128, ...(cursor ? { startAfter: cursor } : {}) });
+      for (const item of page.values()) ids.add(item.runId);
+      if (page.size < 128) break;
+      cursor = [...page.keys()].at(-1);
+    }
+    const terminal = await this.ctx.storage.list<ListingItem>({ prefix: listingPrefix(workspaceId, true), reverse: true, limit: 100 });
+    for (const item of terminal.values()) ids.add(item.runId);
+    const keys = [...ids].map(id => `run:${id}`), entries: Entry[] = [];
+    for (let offset = 0; offset < keys.length; offset += 128) entries.push(...(await this.ctx.storage.get<Entry>(keys.slice(offset, offset + 128))).values());
+    return entries;
   }
 
   private reportPending(entry: Entry): Record<string, boolean> { return entry.reporting ? { [`report-pending:${entry.run.runId}`]: true } : {}; }
@@ -234,7 +289,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
       if (!current || current.run.generation !== entry.run.generation || codingTerminal(current.run.status)) throw new Error("coding_canceled");
       entry.run.updatedAt = Math.max(Date.now(), current.run.updatedAt + 1);
       this.mergeReportOutbox(entry, current);
-      await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry) });
+      await this.writeEntry(txn, entry);
       await txn.setAlarm(entry.dispatched ? entry.run.deadlineAt : Date.now() + 100);
     });
   }
@@ -258,6 +313,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
     this.#busy = true;
     let entry: Entry | undefined;
     try {
+      if (await this.ctx.storage.get<ListingMigration>(listingMigrationKey)) await this.migrateListingBatch();
       await this.flushReports();
       const active = await this.ctx.storage.get<string>("active");
       if (!active) return;
@@ -287,7 +343,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
         if (current && current.run.generation === entry.run.generation && !codingTerminal(current.run.status)) await this.finish(entry, "failed", safeError(error));
         else if (current) await this.cleanup(current);
       }
-    } finally { this.#busy = false; await this.flushReports(); }
+    } finally { this.#busy = false; await this.flushReports(); await this.scheduleListingMigration(); }
   }
 
   /** Reconcile writes already dispatched, including when cancellation raced their response. */
@@ -468,7 +524,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
       entry.run.updatedAt = Math.max(Date.now(), current.run.updatedAt + 1);
       this.mergeReportOutbox(entry, current);
       if (error) this.event(entry, "error", error);
-      await txn.put({ [`run:${entry.run.runId}`]: entry, ...this.reportPending(entry) }); await txn.setAlarm(Date.now() + 100);
+      await this.writeEntry(txn, entry); await txn.setAlarm(Date.now() + 100);
     });
     const current = await this.ctx.storage.get<Entry>(`run:${entry.run.runId}`);
     if (current) await this.cleanup(current);

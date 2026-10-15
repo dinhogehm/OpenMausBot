@@ -4,6 +4,12 @@ const encoder = new TextEncoder();
 export const instructionBytes = (value: string) => encoder.encode(value).length;
 export const catalogFileLimit = 2 * 1024 * 1024;
 
+export function matchesCatalogSearch(agent: Pick<AgentCatalogDraft, "name" | "title" | "section">, query: string): boolean {
+  const normalize = (value: string) => value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("pt-BR");
+  const searchable = normalize(`${agent.name} ${agent.title} ${agent.section}`);
+  return normalize(query).trim().split(/\s+/u).every((word) => searchable.includes(word));
+}
+
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("O arquivo contém um perfil inválido.");
   return value as Record<string, unknown>;

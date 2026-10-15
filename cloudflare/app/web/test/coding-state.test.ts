@@ -43,6 +43,18 @@ test("new permissions take effect and an earlier listing cannot drop a newly cre
   assert.deepEqual(mergeCodingRuns([pending], []), [pending]);
 });
 
+test("recent terminal history cannot evict older tasks still awaiting approval or running", () => {
+  const pending = { ...run, runId: "older-approval", status: "pending_approval" as const, createdAt: 1 };
+  const working = { ...run, runId: "older-running", createdAt: 2 };
+  const history = Array.from({ length: 120 }, (_, index) => ({ ...run, runId: `done-${index}`, createdAt: 1000 + index, status: "completed" as const }));
+  const result = mergeCodingRuns([pending, working], history);
+  assert.equal(result.length, 102);
+  assert.ok(result.some((item) => item.runId === pending.runId));
+  assert.ok(result.some((item) => item.runId === working.runId));
+  assert.equal(result.filter((item) => item.status === "completed").length, 100);
+  assert.equal(result[0].runId, "done-119");
+});
+
 test("model text and completion alone never imply passing tests", () => {
   assert.equal(testOutcome({ ...run, status: "completed", summary: "All tests passed" }), "not_run");
   const verification = { command: "npm test", exitCode: 1, treeDigest: "digest", output: "failed", finishedAt: 110, truncated: false };

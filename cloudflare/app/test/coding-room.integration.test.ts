@@ -664,3 +664,133 @@ it("creates and approves a mission task once and refuses cross-mission reads", a
   const canceled = await f.stub.cancelFromMission({ ...scope, runId: input.requestId });
   expect(canceled.run?.status).toBe("canceled");
 });
+
+async function legacyListing(f: Fixture) {
+  const template = await create(f);
+  const otherWorkspace = crypto.randomUUID();
+  await env.DB.prepare("INSERT INTO workspaces VALUES (?,?,?)").bind(otherWorkspace, f.organizationId, "Legacy second workspace").run();
+  const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
+  const completed = Array.from({ length: 140 }, (_, index) => ({ ...template, runId: id(index + 1), requestId: id(index + 1), createdAt: 1000 + index, status: "completed" as const }));
+  const pending = { ...template, runId: id(999999999990), requestId: id(999999999990), createdAt: 1 };
+  const running = { ...template, runId: id(999999999991), requestId: id(999999999991), createdAt: 2, status: "running" as const };
+  const other = { ...pending, runId: id(999999999992), requestId: id(999999999992), workspaceId: otherWorkspace };
+  await runInDurableObject(f.stub, async (_instance, state) => {
+    const original = await state.storage.get<Record<string, unknown>>(`run:${template.runId}`);
+    await state.storage.deleteAll();
+    await state.storage.put({ organization: f.organizationId, [`recent:${f.workspaceId}`]: completed.slice(-100).reverse().map(run => run.runId) });
+    for (const run of [...completed, pending, running, other]) await state.storage.put(`run:${run.runId}`, { ...original, run, reporting: undefined });
+  });
+  return { completed, pending, running, other, otherWorkspace };
+}
+
+async function listingAfterMigration(f: Fixture, workspaceId = f.workspaceId) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const response = await f.command("list", {}, undefined, { workspaceId });
+    if (response.status === 200) return (await response.json() as { runs: VisibleRecord[] }).runs;
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "coding_history_preparing" });
+    await f.alarm();
+  }
+  throw new Error("Listing migration did not finish within the bounded fixture history");
+}
+
+it("retains every nonterminal task beyond 100 recent completions and migrates every workspace", async () => {
+  const f = await fixture();
+  const legacy = await legacyListing(f);
+  const runs = await listingAfterMigration(f);
+  expect(runs).toHaveLength(102);
+  expect(runs.filter(run => run.status === "completed").map(run => run.runId)).toEqual(legacy.completed.slice(-100).reverse().map(run => run.runId));
+  expect(runs).toEqual(expect.arrayContaining([
+    expect.objectContaining({ runId: legacy.pending.runId, status: "pending_approval", canApprove: true }),
+    expect.objectContaining({ runId: legacy.running.runId, status: "running" }),
+  ]));
+  expect((await listingAfterMigration(f, legacy.otherWorkspace)).map(run => run.runId)).toEqual([legacy.other.runId]);
+  const foreign = await fixture();
+  expect((await f.command("list", {}, undefined, { organizationId: foreign.organizationId, workspaceId: foreign.workspaceId, userId: foreign.userId })).status).toBe(404);
+  expect((await f.command("list", {}, undefined, { userId: foreign.userId })).status).toBe(404);
+});
+
+it("resumes bounded history reconstruction after a restart without rescanning full records during polling", async () => {
+  const f = await fixture();
+  await legacyListing(f);
+  const first = await f.command("list");
+  expect(first.status).toBe(503);
+  expect(await first.json()).toEqual({ error: "coding_history_preparing" });
+  const pages: { startAfter?: string; limit?: number }[] = [];
+  await runInDurableObject(f.stub, async (_instance, state) => {
+    const list = state.storage.list.bind(state.storage);
+    const transaction = state.storage.transaction.bind(state.storage);
+    const transactionSpy = vi.spyOn(state.storage, "transaction").mockImplementation(operation => transaction(async txn => {
+      const list = txn.list.bind(txn);
+      const spy = vi.spyOn(txn, "list").mockImplementation((options: DurableObjectListOptions = {}) => {
+        if (options.prefix === "run:") pages.push({ startAfter: options.startAfter, limit: options.limit });
+        return list(options);
+      });
+      try { return await operation(txn); } finally { spy.mockRestore(); }
+    }));
+    const spy = vi.spyOn(state.storage, "list").mockImplementation((options: DurableObjectListOptions = {}) => {
+      if (options.prefix === "run:") pages.push({ startAfter: options.startAfter, limit: options.limit });
+      return list(options);
+    });
+    try {
+      // Each instance starts without any in-memory migration cursor.
+      for (let step = 0; step < 8; step++) await new CodingRoom(state, configured).alarm();
+      expect(pages.length).toBeGreaterThan(0);
+      expect(pages.every(page => page.startAfter?.startsWith("run:") && page.limit! <= 32)).toBe(true);
+      const count = pages.length;
+      const room = new CodingRoom(state, configured) as unknown as { command(value: unknown): Promise<Response> };
+      for (let poll = 0; poll < 3; poll++) {
+        const response = await room.command({ organizationId: f.organizationId, workspaceId: f.workspaceId, userId: f.userId, action: "list", body: {} });
+        expect(response.status).toBe(200);
+      }
+      expect(pages).toHaveLength(count);
+    } finally { spy.mockRestore(); transactionSpy.mockRestore(); }
+  });
+});
+
+it("keeps creation and terminal transitions consistent while historical indexing is in progress", async () => {
+  const f = await fixture();
+  const legacy = await legacyListing(f);
+  await fakeExecutor(f);
+  expect((await f.command("list")).status).toBe(503);
+  const newRun = await create(f);
+  expect((await f.command("cancel", { generation: legacy.pending.generation }, legacy.pending.runId)).status).toBe(200);
+  const runs = await listingAfterMigration(f);
+  expect(runs.find(run => run.runId === newRun.runId)?.status).toBe("pending_approval");
+  expect(runs.some(run => run.runId === legacy.pending.runId)).toBe(false);
+  expect(runs.find(run => run.runId === legacy.running.runId)?.status).toBe("running");
+  await approve(f, newRun);
+  expect((await listingAfterMigration(f)).find(run => run.runId === newRun.runId)?.status).toBe("queued");
+  expect((await drain(f, newRun.runId)).status).toBe("completed");
+  const final = await listingAfterMigration(f);
+  expect(final.filter(run => run.status === "completed")).toHaveLength(100);
+  expect(final.find(run => run.runId === newRun.runId)?.status).toBe("completed");
+  expect(final.filter(run => run.runId === newRun.runId)).toHaveLength(1);
+});
+
+it("pages all pending approvals and batches record reads within Durable Object storage limits", async () => {
+  const f = await fixture();
+  const legacy = await legacyListing(f);
+  const added = Array.from({ length: 160 }, (_, index) => {
+    const runId = `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    return { ...legacy.pending, runId, requestId: runId };
+  });
+  await runInDurableObject(f.stub, async (_instance, state) => {
+    const template = await state.storage.get<Record<string, unknown>>(`run:${legacy.pending.runId}`);
+    for (const run of added) await state.storage.put(`run:${run.runId}`, { ...template, run });
+  });
+  const migrated = await listingAfterMigration(f);
+  expect(migrated.filter(run => run.status === "pending_approval")).toHaveLength(161);
+  await runInDurableObject(f.stub, async (instance, state) => {
+    const spy = vi.spyOn(state.storage, "get");
+    try {
+      const room = instance as unknown as { command(value: unknown): Promise<Response> };
+      const response = await room.command({ organizationId: f.organizationId, workspaceId: f.workspaceId, userId: f.userId, action: "list", body: {} });
+      const runs = (await response.json() as { runs: VisibleRecord[] }).runs;
+      const batchSizes = spy.mock.calls.flatMap(([key]) => Array.isArray(key) ? [key.length] : []);
+      expect(runs).toHaveLength(262);
+      expect(batchSizes.length).toBeGreaterThan(1);
+      expect(batchSizes.every(size => size <= 128)).toBe(true);
+    } finally { spy.mockRestore(); }
+  });
+});

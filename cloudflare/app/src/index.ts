@@ -37,7 +37,7 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
     if (!env.ASSETS) throw new HttpError(404, "not_found");
     const response = await env.ASSETS.fetch(request);
     const headers = new Headers(response.headers);
-    headers.set("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    headers.set("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     return new Response(response.body, { status: response.status, headers });
   }
   if (url.pathname === "/api/github/webhook") {

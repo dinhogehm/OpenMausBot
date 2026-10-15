@@ -1,7 +1,21 @@
 import type { BrowserRun, BrowserRunStatus } from "../../src/browser-types";
+import type { BudgetView } from "../../src/budget-types";
 export type VisibleBrowserRun = BrowserRun & { canApprove: boolean; canCancel: boolean };
+export function browserCanStart(budget: BudgetView | null): boolean { return budget !== null && budget.enforcement?.required !== true; }
 const progress: Record<BrowserRunStatus, number> = { pending_approval: 0, queued: 1, running: 2, completed: 3, failed: 3, canceled: 3, interrupted: 3 };
 export function needsBrowserRefresh(run: VisibleBrowserRun): boolean { return run.status === "queued" || run.status === "running" || run.cleanupStatus === "pending"; }
+export function browserCaptureMessage(run: VisibleBrowserRun): string {
+  if (run.status === "pending_approval") return "A sessão começa após a aprovação. Ainda não há captura.";
+  if (run.status === "running" || run.status === "queued") return "Aguardando a primeira captura da sessão.";
+  return "Nenhuma captura foi registrada nesta tarefa.";
+}
+export function browserSessionLabel(run: VisibleBrowserRun): string {
+  if (run.status === "pending_approval" || (run.status === "canceled" && !run.approvedAt)) return "Não iniciada";
+  if (run.status === "queued") return "Aguardando sessão";
+  if (run.cleanupStatus === "closed") return "Encerrada";
+  if (run.cleanupStatus === "idle_expiry") return "Encerramento por inatividade";
+  return run.status === "running" ? "Em uso" : "Encerramento pendente";
+}
 export function assertBrowserScope(runs: VisibleBrowserRun[], organizationId: string, workspaceId: string): VisibleBrowserRun[] {
   if (runs.some((run) => run.organizationId !== organizationId || run.workspaceId !== workspaceId)) throw new Error("Unexpected browser task scope");
   return runs;

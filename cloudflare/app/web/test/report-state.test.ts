@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertReportScope, reportComparison, reportDateInput, reportDuration, reportNumber, reportPercent, safeReportPr, validReportRange } from "../src/report-state.ts";
+import { assertReportScope, isReportMarkdown, reportBucketLabel, reportChartMaximum, reportComparison, reportDateInput, reportDuration, reportNumber, reportPercent, safeReportPr, validReportRange } from "../src/report-state.ts";
 import type { ExecutionReport } from "../../src/report-types.ts";
 
 test("unknown report data never formats as zero, while an observed zero remains visible", () => {
@@ -38,4 +38,33 @@ test("report scope rejects a response from a different company or workspace", ()
 test("PR evidence links stay on the recorded GitHub repository", () => {
   assert.equal(safeReportPr("https://github.com/owner/repo/pull/9", "owner/repo"), "https://github.com/owner/repo/pull/9");
   for (const url of ["javascript:alert(1)", "https://github.com/other/repo/pull/9", "https://evil@github.com/owner/repo/pull/9", "https://github.com/owner/repo/pull/9?redirect=evil"]) assert.equal(safeReportPr(url, "owner/repo"), null);
+});
+
+test("invalid telemetry cannot appear as numeric evidence", () => {
+  for (const value of [NaN, Infinity, -1]) {
+    assert.equal(reportNumber(value), "Não acompanhado");
+    assert.equal(reportPercent(value), "Não acompanhado");
+    assert.equal(reportDuration(value), "Não acompanhado");
+  }
+});
+
+test("hourly bucket labels distinguish the same hour on different Brasilia days", () => {
+  const first = reportBucketLabel(Date.parse("2026-10-14T13:00:00Z"), "hour");
+  const next = reportBucketLabel(Date.parse("2026-10-15T13:00:00Z"), "hour");
+  assert.notEqual(first, next);
+  assert.match(first, /14\/10/);
+  assert.match(first, /10:00/);
+});
+
+test("count charts preserve a zero baseline and never imply fractional tasks", () => {
+  assert.equal(reportChartMaximum([null, undefined]), 2);
+  assert.equal(reportChartMaximum([0, 1]), 2);
+  assert.equal(reportChartMaximum([3, 7]), 8);
+  assert.equal(reportChartMaximum([NaN, Infinity, -9, 2]), 2);
+});
+
+test("Markdown downloads reject HTML login and unexpected response types", () => {
+  assert.equal(isReportMarkdown("text/markdown;charset=utf-8"), true);
+  assert.equal(isReportMarkdown("text/markdown"), true);
+  for (const value of [null, "text/html", "application/json", "text/plain", "text/markdown-malformed"]) assert.equal(isReportMarkdown(value), false);
 });

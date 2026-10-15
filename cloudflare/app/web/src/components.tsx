@@ -1,8 +1,12 @@
 import type { ReactNode } from "react";
 
-export type IconName = "browser" | "store" | "chart" | "arrow" | "building" | "check" | "chevron" | "code" | "key" | "logout" | "play" | "plus" | "refresh" | "repository" | "shield" | "stop" | "team";
+export type IconName = "menu" | "close" | "search" | "filter" | "browser" | "store" | "chart" | "arrow" | "building" | "check" | "chevron" | "code" | "key" | "logout" | "play" | "plus" | "refresh" | "repository" | "shield" | "stop" | "team";
 
 const paths: Record<IconName, ReactNode> = {
+  menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+  close: <path d="m6 6 12 12M18 6 6 18" />,
+  search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
+  filter: <><path d="M4 6h16M7 12h10M10 18h4" /></>,
   browser: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" /></>,
   store: <><path d="M3 9h18l-2-6H5L3 9ZM5 13v8h14v-8M9 21v-6h6v6M3 9v1a3 3 0 0 0 6 0V9m0 1a3 3 0 0 0 6 0V9m0 1a3 3 0 0 0 6 0V9" /></>,
   chart: <><path d="M4 3v18h17M8 16v-4M13 16V7M18 16v-7" /></>,

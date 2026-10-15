@@ -24,7 +24,10 @@ export function mergeCodingRuns(current: VisibleCodingRun[], incoming: VisibleCo
         || (run.updatedAt === previous.updatedAt && progress[run.status] < progress[previous.status]))));
     byId.set(run.runId, older ? { ...previous, canApprove: previous.canApprove && run.canApprove, canCancel: previous.canCancel && run.canCancel } : run);
   }
-  return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 100);
+  // Keep work that still needs a decision visible when recent history grows.
+  let terminalCount = 0;
+  return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt)
+    .filter((run) => needsCodingRefresh(run) || ++terminalCount <= 100);
 }
 
 export function testOutcome(run: CodingRecord): "not_run" | "passed" | "failed" {

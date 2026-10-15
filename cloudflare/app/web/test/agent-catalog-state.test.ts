@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { catalogDraft, importCatalogProfiles, instructionBytes } from "../src/agent-catalog-state.ts";
+import { catalogDraft, importCatalogProfiles, instructionBytes, matchesCatalogSearch } from "../src/agent-catalog-state.ts";
+
+test("catalog search finds Portuguese names without accents and ignores outer whitespace", () => {
+  const profile = { name: "Documentação", title: "Especialista em documentação", section: "Desenvolvimento" };
+  assert.equal(matchesCatalogSearch(profile, "documentacao"), true);
+  assert.equal(matchesCatalogSearch(profile, "  DOCUMENTAÇÃO  "), true);
+  assert.equal(matchesCatalogSearch(profile, "documentac\u0327a\u0303o"), true);
+});
+
+test("catalog search matches all words across the same name, title and section fields in any order", () => {
+  const profile = { name: "Documentação", title: "Escrita técnica", section: "Desenvolvimento", description: "marketing", sourceEngine: "codex" };
+  assert.equal(matchesCatalogSearch(profile, "tecnica   documentacao"), true);
+  assert.equal(matchesCatalogSearch(profile, "desenvolvimento\tescrita"), true);
+  assert.equal(matchesCatalogSearch(profile, "documentacao financeiro"), false);
+  assert.equal(matchesCatalogSearch(profile, "marketing"), false);
+  assert.equal(matchesCatalogSearch(profile, "codex"), false);
+  assert.equal(matchesCatalogSearch(profile, " \n\t "), true);
+});
 
 test("OMB import preserves all twelve profiles and projects out credentials, sessions and executable model settings", () => {
   const profiles = Array.from({ length: 12 }, (_, i) => ({ id: `omb-${i}`, name: `Agent ${i}`, title: "Role", description: "Description", soul: i < 2 ? "" : "Instruction\nunchanged", section: "Development", modelSelection: { instanceId: "codex", model: "source-model", effort: "high", apiKey: "secret" }, sessions: ["private"], credentials: { token: "secret" }, provider: "execute-this" }));

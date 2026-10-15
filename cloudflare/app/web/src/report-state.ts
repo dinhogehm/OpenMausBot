@@ -1,10 +1,11 @@
-import type { ExecutionReport, ReportComparison, ReportPeriod } from "../../src/report-types";
+import type { ExecutionReport, ReportComparison, ReportGranularity, ReportPeriod } from "../../src/report-types";
 
 const formatter = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
-export const reportNumber = (value: number | null | undefined) => value === null || value === undefined ? "Não acompanhado" : formatter.format(value);
-export const reportPercent = (value: number | null | undefined) => value === null || value === undefined ? "Não acompanhado" : `${formatter.format(value * 100)}%`;
+export const isReportValue = (value: number | null | undefined): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+export const reportNumber = (value: number | null | undefined) => !isReportValue(value) ? "Não acompanhado" : formatter.format(value);
+export const reportPercent = (value: number | null | undefined) => !isReportValue(value) ? "Não acompanhado" : `${formatter.format(value * 100)}%`;
 export function reportDuration(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "Não acompanhado";
+  if (!isReportValue(value)) return "Não acompanhado";
   if (value < 60_000) return `${formatter.format(value / 1000)} s`;
   if (value < 3_600_000) return `${formatter.format(value / 60_000)} min`;
   return `${formatter.format(value / 3_600_000)} h`;
@@ -15,6 +16,16 @@ export function reportDateInput(at: number): string {
 export function reportPeriodLabel(period: ReportPeriod): string {
   const date = (at: number) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "short", year: "numeric" }).format(at);
   return `${date(period.from)} a ${date(period.to - 1)}`;
+}
+export function reportBucketLabel(at: number, granularity: ReportGranularity): string {
+  return new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", ...(granularity === "month" ? { month: "short", year: "numeric" } : { day: "2-digit", month: "2-digit", ...(granularity === "hour" ? { hour: "2-digit", minute: "2-digit" } : {}) }) }).format(at);
+}
+export function reportChartMaximum(values: Array<number | null | undefined>): number {
+  // Integer counts never need fractional task ticks. Keep a visible zero baseline.
+  return Math.max(2, Math.ceil(Math.max(0, ...values.filter(isReportValue)) / 2) * 2);
+}
+export function isReportMarkdown(contentType: string | null): boolean {
+  return contentType?.split(";", 1)[0]?.trim().toLowerCase() === "text/markdown";
 }
 export function validReportRange(from: string, to: string, maximumDays = 366): boolean {
   const valid = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;

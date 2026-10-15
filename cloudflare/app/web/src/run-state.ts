@@ -15,3 +15,9 @@ export function mergeRuns(current: VisibleRun[], incoming: VisibleRun[]): Visibl
   }
   return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 100);
 }
+
+/** Refuse a response from another company or workspace before it enters the UI. */
+export function validateRunScope(records: VisibleRun[], organizationId: string, workspaceId: string): VisibleRun[] {
+  if (records.some((run) => run.organizationId !== organizationId || run.workspaceId !== workspaceId)) throw new Error("Unexpected response scope");
+  return records;
+}

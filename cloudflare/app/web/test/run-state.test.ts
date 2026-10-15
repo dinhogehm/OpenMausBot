@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mergeRuns, type VisibleRun } from "../src/run-state.ts";
+import { mergeRuns, validateRunScope, type VisibleRun } from "../src/run-state.ts";
 
 const running: VisibleRun = {
   id: "run-a", organizationId: "company-a", workspaceId: "workspace-a",
@@ -34,4 +34,10 @@ test("an initial listing dispatched before creation does not drop the new receip
   const visible = mergeRuns([running], []);
   assert.equal(visible.length, 1);
   assert.equal(visible[0].id, running.id);
+});
+
+test("execution responses from another company or workspace never enter the UI", () => {
+  assert.throws(() => validateRunScope([running], "company-b", "workspace-a"), /Unexpected response scope/);
+  assert.throws(() => validateRunScope([running], "company-a", "workspace-b"), /Unexpected response scope/);
+  assert.deepEqual(validateRunScope([running], "company-a", "workspace-a"), [running]);
 });

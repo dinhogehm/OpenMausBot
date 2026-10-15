@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "test": "pnpm test:unit && vitest run",
-    "test:unit": "node --experimental-strip-types --test test/execution.test.ts test/credentials.test.ts test/linux-proof.test.ts test/coding-program.test.ts web/test/run-state.test.ts web/test/api.test.ts web/test/coding-state.test.ts web/test/kanban-state.test.ts test/report-period.test.ts web/test/agent-catalog-state.test.ts web/test/report-state.test.ts web/test/browser-state.test.ts test/claude-program.test.ts web/test/mission-state.test.ts",
+    "test:unit": "node --experimental-strip-types --test test/execution.test.ts test/credentials.test.ts test/linux-proof.test.ts test/coding-program.test.ts web/test/run-state.test.ts web/test/api.test.ts web/test/coding-state.test.ts web/test/kanban-state.test.ts test/report-period.test.ts web/test/agent-catalog-state.test.ts web/test/report-state.test.ts web/test/browser-state.test.ts test/claude-program.test.ts web/test/mission-state.test.ts web/test/navigation.test.ts web/test/navigation-guard.test.ts web/test/report-charts.test.mjs web/test/missions-ui.test.mjs web/test/marketplace-state.test.ts web/test/agent-editor-state.test.ts web/test/agents-ui.test.mjs web/test/company-execution-ui.test.mjs web/test/browser-ui.test.mjs web/test/repositories-ui.test.mjs",
     "test:integration": "vitest run",
     "check": "tsc --noEmit && tsc -p web/tsconfig.json",
     "dry-run": "pnpm build && wrangler deploy --dry-run",

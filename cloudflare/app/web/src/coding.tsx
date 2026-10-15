@@ -1,3 +1,4 @@
+import { useNavigationGuard } from "./navigation-guard";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { AgentCatalogState, AgentSelections } from "../../src/agent-catalog-types";
 import { CodingTeamPicker } from "./coding-team";
@@ -17,7 +18,7 @@ import "./kanban.css";
 const providers: Record<CredentialProvider, string> = { openai: "OpenAI", anthropic: "Anthropic", openrouter: "OpenRouter" };
 const statusNames: Record<CodingStatus, string> = {
   pending_approval: "Aguardando aprovação", queued: "Na fila", running: "Trabalhando", testing: "Executando testes",
-  publishing: "Criando PR", completed: "Concluída", failed: "Falhou", canceled: "Cancelada", interrupted: "Interrompida",
+  publishing: "Criando PR", completed: "Execução concluída", failed: "Falhou", canceled: "Cancelada", interrupted: "Interrompida",
 };
 
 function Status({ value }: { value: CodingStatus }) {
@@ -33,13 +34,33 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
   const [query, setQuery] = useState("");
   const [repositoryFilter, setRepositoryFilter] = useState("");
   const [agentFilter, setAgentFilter] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filterToggle = useRef<HTMLButtonElement>(null);
+  const filterPanel = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [draftChanged, setDraftChanged] = useState(false);
+  useNavigationGuard({ dirty: draftChanged, busy: dialogBusy });
+  const dialogOpener = useRef<HTMLElement | null>(null);
+  const columns = useRef(new Map<string, HTMLElement>());
   const [error, setError] = useState("");
   const [pollError, setPollError] = useState("");
   const [actionError, setActionError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const selected = runs.find((run) => run.runId === selectedId);
   const hasPending = runs.some((run) => needsCodingRefresh(run));
+
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 700px)");
+    const preserveFilterFocus = () => {
+      if (mobile.matches && filterPanel.current?.contains(document.activeElement)) setFiltersOpen(true);
+      else if (!mobile.matches && document.activeElement === filterToggle.current) document.getElementById("board-search")?.focus();
+    };
+    mobile.addEventListener("change", preserveFilterFocus);
+    return () => mobile.removeEventListener("change", preserveFilterFocus);
+  }, []);
 
   function validateScope(records: VisibleCodingRun[]): VisibleCodingRun[] {
     if (records.some((run) => run.organizationId !== organizationId || run.workspaceId !== workspaceId)) throw new Error("Unexpected response scope");
@@ -54,7 +75,7 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
         if (controller.signal.aborted) return;
         const scoped = validateScope(data.runs);
         setRuns((current) => mergeCodingRuns(current, scoped));
-
+        setUpdatedAt(Date.now());
       })
       .catch((failure: unknown) => {
         if (!isAbort(failure)) {
@@ -62,20 +83,19 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
           setError(errorMessage(failure));
         }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .finally(() => { if (!controller.signal.aborted) { setLoading(false); setLoaded(true); } });
     return () => controller.abort();
   }, [path, attempt]);
 
   useEffect(() => {
-    if (!hasPending) return;
+    if (!loaded) return;
     const controller = new AbortController();
     let pending = false;
-    const timer = window.setInterval(() => {
-      if (pending) return;
-      if (!runs.some((run) => needsCodingRefresh(run))) { window.clearInterval(timer); return; }
+    const refresh = () => {
+      if (pending || document.visibilityState !== "visible") return;
       pending = true;
       void api<{ runs: VisibleCodingRun[] }>(path, { signal: controller.signal })
-        .then((data) => { if (!controller.signal.aborted) { const scoped = validateScope(data.runs); setRuns((current) => mergeCodingRuns(current, scoped)); setPollError(""); } })
+        .then((data) => { if (!controller.signal.aborted) { const scoped = validateScope(data.runs); setRuns((current) => mergeCodingRuns(current, scoped)); setPollError(""); setError(""); setUpdatedAt(Date.now()); } })
         .catch((failure: unknown) => {
           if (!isAbort(failure)) {
             if (failure instanceof ApiError && [403, 404].includes(failure.status)) { setRuns([]); setError(errorMessage(failure)); }
@@ -83,40 +103,70 @@ export function Coding({ organizationId, workspaceId, onNavigate }: { organizati
           }
         })
         .finally(() => { pending = false; });
-    }, 2000);
-    return () => { controller.abort(); window.clearInterval(timer); };
-  }, [path, hasPending, runs]);
+    };
+    const timer = window.setInterval(refresh, hasPending ? 2000 : 15000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { controller.abort(); window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, [path, hasPending, loaded]);
 
   function changed(run: VisibleCodingRun) {
     validateScope([run]);
-    setActionError(""); setRuns((current) => mergeCodingRuns(current, [run])); setSelectedId(run.runId); setCreating(false);
+    setActionError(""); setRuns((current) => mergeCodingRuns(current, [run])); setSelectedId(run.runId); setCreating(false); setDraftChanged(false); setDialogBusy(false); setUpdatedAt(Date.now());
   }
 
   const visible = filterBoardRuns(runs, { query, repository: repositoryFilter, agent: agentFilter });
   const repositories = [...new Set(runs.map((run) => run.repositoryName))].sort();
   const agents = [...new Set(runs.flatMap((run) => run.agents?.map((agent) => agent.name) ?? []))].sort();
+  const filtered = Boolean(query.trim() || repositoryFilter || agentFilter);
+  const activeFilters = [query.trim() && `Busca: “${query.trim()}”`, repositoryFilter && `Repositório: ${repositoryFilter}`, agentFilter && `Agente da equipe: ${agentFilter}`].filter(Boolean);
+  const clearFilters = () => { setQuery(""); setRepositoryFilter(""); setAgentFilter(""); queueMicrotask(() => {
+    if (!filtersOpen && window.matchMedia("(max-width: 700px)").matches) filterToggle.current?.focus();
+    else document.getElementById("board-search")?.focus();
+  }); };
+  function openCreate(opener: HTMLElement) { dialogOpener.current = opener; setDialogBusy(false); setDraftChanged(false); setCreating(true); }
+  function openTask(run: VisibleCodingRun, opener: HTMLElement) { dialogOpener.current = opener; setDialogBusy(false); setSelectedId(run.runId); }
+  function jumpToColumn(id: string) {
+    const column = columns.current.get(id);
+    column?.scrollIntoView({ block: "nearest", inline: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    column?.focus({ preventScroll: true });
+  }
 
   return <>
-    <div className="kanban-heading"><PageHeading eyebrow="DO PEDIDO AO PULL REQUEST" title="Tarefas">Acompanhe o trabalho da equipe, da aprovação ao código revisado.</PageHeading><button className="button primary" onClick={() => setCreating(true)}><Icon name="plus" size={17} />Nova tarefa</button></div>
-    {error && <Notice>{error}</Notice>}{actionError && <Notice>{actionError}</Notice>}{pollError && <Notice kind="info">{pollError}</Notice>}
-    <div className="kanban-controls"><div className="field board-search"><label htmlFor="board-search">Buscar tarefas</label><input id="board-search" type="search" placeholder="Tarefa, repositório ou agente" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="field"><label htmlFor="board-repository">Repositório</label><select id="board-repository" value={repositoryFilter} onChange={(event) => setRepositoryFilter(event.target.value)}><option value="">Todos os repositórios</option>{repositories.map((name) => <option key={name} value={name}>{name}</option>)}</select></div><div className="field"><label htmlFor="board-agent">Agente</label><select id="board-agent" value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">Toda a equipe</option>{agents.map((name) => <option key={name} value={name}>{name}</option>)}</select></div><button className="button secondary" disabled={loading} onClick={() => setAttempt((value) => value + 1)}><Icon name="refresh" size={16} />Atualizar</button></div>
-    <div className="kanban-summary"><p aria-live="polite">{visible.length} {visible.length === 1 ? "tarefa" : "tarefas"}{visible.length !== runs.length ? ` de ${runs.length}` : ""}</p><p>Os cartões avançam conforme a execução dos agentes.</p></div>
-    {loading ? <Loading label="Carregando tarefas" /> : <div className="kanban-scroll" tabIndex={0} role="region" aria-label="Quadro Kanban de tarefas, role horizontalmente para ver todas as colunas"><div className="kanban-board">{boardColumns.map((column) => {
+    <div className="kanban-heading"><PageHeading eyebrow="DO PEDIDO AO PULL REQUEST" title="Tarefas">Um lugar para aprovar, acompanhar e revisar o trabalho da equipe.</PageHeading><button className="button primary" onClick={(event) => openCreate(event.currentTarget)}><Icon name="plus" size={17} />Nova tarefa</button></div>
+    {error && runs.length > 0 && <Notice>{error} O quadro mantém o último estado recebido.</Notice>}{actionError && <Notice>{actionError}</Notice>}{pollError && <Notice kind="info">{pollError}</Notice>}
+    <div className="kanban-filter-bar"><button ref={filterToggle} type="button" className="button secondary kanban-filter-toggle" aria-expanded={filtersOpen} aria-controls="kanban-filters" onClick={() => setFiltersOpen((current) => !current)}><Icon name="filter" size={16} />Filtros{activeFilters.length > 0 && <span className="filter-count">{activeFilters.length}</span>}</button><div ref={filterPanel} id="kanban-filters" className={`kanban-controls ${filtersOpen ? "is-open" : "is-collapsed"}`}><div className="field board-search"><label htmlFor="board-search">Buscar tarefas</label><input id="board-search" type="search" placeholder="Tarefa, repositório ou agente" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="field"><label htmlFor="board-repository">Repositório</label><select id="board-repository" value={repositoryFilter} onChange={(event) => setRepositoryFilter(event.target.value)}><option value="">Todos os repositórios</option>{repositories.map((name) => <option key={name} value={name}>{name}</option>)}</select></div><div className="field"><label htmlFor="board-agent">Agente da equipe</label><select id="board-agent" value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">Toda a equipe</option>{agents.map((name) => <option key={name} value={name}>{name}</option>)}</select></div></div><button className="button secondary kanban-refresh" disabled={loading} onClick={() => setAttempt((value) => value + 1)}><Icon name="refresh" size={16} />Atualizar</button></div>
+    {filtered && <p className="kanban-active-filters">{activeFilters.join(" · ")}</p>}
+    <div className="kanban-summary"><div><p aria-live="polite">{loaded ? error && !runs.length ? "Quadro indisponível" : `${visible.length} ${visible.length === 1 ? "tarefa" : "tarefas"}${filtered ? ` de ${runs.length} no quadro` : " no quadro"}` : "Carregando tarefas…"}</p>{filtered && <button type="button" className="text-button" onClick={clearFilters}>Limpar filtros</button>}</div><p>{updatedAt ? `Atualizado às ${new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(updatedAt)} · atualização automática` : "Os cartões avançam conforme a execução."}</p></div>
+    {!loaded ? <div className="kanban-loading" role="status" aria-label="Carregando tarefas"><div className="kanban-skeleton" aria-hidden="true">{[0, 1, 2].map((value) => <div key={value}><span /><i /><i /></div>)}</div></div> : error && !runs.length ? <section className="kanban-message"><Icon name="refresh" size={22} /><div><h2>Não foi possível carregar o quadro</h2><p>{error}</p><button className="button secondary" disabled={loading} onClick={() => setAttempt((value) => value + 1)}>Tentar novamente</button></div></section> : <>
+    {!runs.length && <section className="kanban-welcome"><div><span className="eyebrow">SEU PRIMEIRO TRABALHO</span><h2>Do objetivo a uma alteração revisável.</h2><p>Crie uma tarefa, confira a equipe e os testes. Após a aprovação, acompanhe cada etapa neste quadro.</p></div><ol aria-label="Etapas da primeira tarefa"><li><span>1</span>Descreva a mudança</li><li><span>2</span>Revise e aprove</li><li><span>3</span>Confira o PR</li></ol></section>}
+    {filtered && !visible.length ? <section className="kanban-message"><Icon name="code" size={22} /><div><h2>Nenhuma tarefa corresponde aos filtros</h2><p>Tente outro termo ou limpe os filtros para ver o quadro completo.</p><button className="button secondary" onClick={clearFilters}>Limpar filtros</button></div></section> : <>
+    <nav className="kanban-stage-nav" aria-label="Ir para uma etapa do quadro">{boardColumns.map((column) => { const count = visible.filter((run) => boardColumn(run) === column.id).length; return <button type="button" key={column.id} className={`stage-link ${column.id}`} onClick={() => jumpToColumn(column.id)} aria-controls={`board-column-${column.id}`} aria-label={`${column.name}: ${count} ${count === 1 ? "tarefa" : "tarefas"}`}><span className="board-dot" aria-hidden="true" /><span>{column.name}</span><strong>{count}</strong></button>; })}</nav>
+    <div className="kanban-scroll" tabIndex={0} role="region" aria-label="Quadro Kanban de tarefas" aria-describedby="kanban-scroll-help" aria-busy={loading}><div className={`kanban-board ${!runs.length ? "is-empty" : ""}`}>{boardColumns.map((column) => {
       const cards = visible.filter((run) => boardColumn(run) === column.id);
-      return <section className={`kanban-column ${column.id}`} key={column.id} aria-labelledby={`board-${column.id}`}><header><span className="board-dot" aria-hidden="true" /><h2 id={`board-${column.id}`}>{column.name}</h2><span aria-label={`${cards.length} tarefas`}>{cards.length}</span></header><div className="kanban-cards">{cards.length ? cards.map((run) => <button className="kanban-card" key={run.runId} onClick={() => setSelectedId(run.runId)} aria-label={`${run.task}, ${statusNames[run.status]}`}><span className="run-repository">{run.repositoryName}</span><strong>{run.task}</strong><Status value={run.status} />{run.result && safePullRequestUrl(run.result.prUrl, run.repositoryName) && <span className="board-receipt">PR #{run.result.prNumber} registrado</span>}<span className="kanban-card-footer"><span className="kanban-card-agent">{run.agents?.find((agent) => agent.role === run.agentStage)?.name ?? run.agents?.find((agent) => agent.role === "programmer")?.name ?? "Equipe da tarefa"}</span><time dateTime={new Date(run.createdAt).toISOString()}>{new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(run.createdAt)}</time></span></button>) : <p className="kanban-empty">{query || repositoryFilter || agentFilter ? "Nenhuma tarefa neste filtro." : column.hint}</p>}</div></section>;
-    })}</div></div>}
-    {creating && <TaskDialog title="Nova tarefa" onClose={() => setCreating(false)}><CodingSetup organizationPath={organization} path={path} onCreated={changed} onNavigate={(section) => { setCreating(false); onNavigate(section); }} /></TaskDialog>}
-    {selected && !creating && <TaskDialog title="Detalhes da tarefa" onClose={() => setSelectedId("")}><CodingDetail key={selected.runId} path={path} run={selected} onChanged={changed} onConflict={(message) => { setActionError(message); setAttempt((value) => value + 1); }} /></TaskDialog>}
+      return <section className={`kanban-column ${column.id}`} key={column.id} id={`board-column-${column.id}`} tabIndex={-1} ref={(element) => { if (element) columns.current.set(column.id, element); else columns.current.delete(column.id); }} aria-labelledby={`board-${column.id}`}><header><span className="board-dot" aria-hidden="true" /><h2 id={`board-${column.id}`}>{column.name}</h2><span aria-label={`${cards.length} ${cards.length === 1 ? "tarefa" : "tarefas"}`}>{cards.length}</span></header><div className="kanban-cards">{cards.length ? cards.map((run) => <button className="kanban-card" key={run.runId} onClick={(event) => openTask(run, event.currentTarget)} aria-label={`${run.task}, ${statusNames[run.status]}`}><span className="run-repository" title={run.repositoryName}>{run.repositoryName}</span><strong>{run.task}</strong><Status value={run.status} />{run.result && safePullRequestUrl(run.result.prUrl, run.repositoryName) && <span className="board-receipt">PR #{run.result.prNumber} registrado</span>}<span className="kanban-card-footer"><span className="kanban-card-agent" title={run.agents?.find((agent) => agent.role === run.agentStage)?.name ?? run.agents?.find((agent) => agent.role === "programmer")?.name}>{run.agents?.find((agent) => agent.role === run.agentStage)?.name ?? run.agents?.find((agent) => agent.role === "programmer")?.name ?? "Equipe da tarefa"}</span><time dateTime={new Date(run.createdAt).toISOString()}>{new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(run.createdAt)}</time></span></button>) : <p className="kanban-empty">{filtered ? "Nenhuma tarefa nesta etapa com os filtros atuais." : column.hint}</p>}</div></section>;
+    })}</div></div><p className="kanban-footnote" id="kanban-scroll-help">Use as etapas acima ou role o quadro para os lados. As tarefas mudam de etapa automaticamente.</p>
+    </>}
+    {runs.length >= 100 && <p className="kanban-history-note">O quadro mostra o histórico recente e as tarefas em andamento já carregadas. Os filtros se aplicam a esses itens.</p>}
+    </>}
+    {creating && <TaskDialog title="Nova tarefa" busy={dialogBusy} dirty={draftChanged} opener={dialogOpener.current} onClose={() => setCreating(false)}><CodingSetup organizationPath={organization} path={path} onCreated={changed} onBusyChange={setDialogBusy} onDraftChange={setDraftChanged} onNavigate={(section) => { setCreating(false); onNavigate(section); }} /></TaskDialog>}
+    {selected && !creating && <TaskDialog title="Detalhes da tarefa" busy={dialogBusy} opener={dialogOpener.current} onClose={() => setSelectedId("")}><CodingDetail key={selected.runId} path={path} run={selected} onChanged={changed} onBusyChange={setDialogBusy} onConflict={(message) => { setActionError(message); setAttempt((value) => value + 1); }} /></TaskDialog>}
   </>;
 }
 
-function TaskDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function TaskDialog({ title, onClose, children, busy = false, dirty = false, opener }: { title: string; onClose: () => void; children: ReactNode; busy?: boolean; dirty?: boolean; opener: HTMLElement | null }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { const element = dialog.current; element?.showModal(); return () => element?.close(); }, []);
-  return <dialog ref={dialog} className="task-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose(); }}><header className="task-dialog-header"><h2>{title}</h2><button className="text-button" onClick={onClose} aria-label={`Fechar ${title.toLocaleLowerCase("pt-BR")}`}>Fechar <span aria-hidden="true">×</span></button></header><div className="task-dialog-content">{children}</div></dialog>;
+  const [confirmClose, setConfirmClose] = useState(false);
+  const returnFocus = useRef(opener);
+  useEffect(() => {
+    const element = dialog.current; element?.showModal();
+    return () => { element?.close(); queueMicrotask(() => { if (returnFocus.current?.isConnected && !document.querySelector("dialog[open]")) returnFocus.current.focus({ preventScroll: true }); }); };
+  }, []);
+  function requestClose() { if (busy) return; if (dirty) setConfirmClose(true); else onClose(); }
+  function continueEditing() { setConfirmClose(false); queueMicrotask(() => dialog.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()); }
+  return <dialog ref={dialog} className="task-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); if (busy) return; if (confirmClose) continueEditing(); else requestClose(); }}><header className="task-dialog-header"><h2>{title}</h2><button className="text-button" disabled={busy} onClick={requestClose} aria-label={`Fechar ${title.toLocaleLowerCase("pt-BR")}`}>Fechar <span aria-hidden="true">×</span></button></header>{busy && <p className="task-dialog-progress" role="status">Aguarde a confirmação da operação para fechar.</p>}{confirmClose && <div className="task-draft-confirm" role="alert"><div><strong>Descartar o rascunho local?</strong><p>As informações preenchidas nesta janela serão perdidas.</p></div><div className="button-row"><button type="button" className="button secondary small" disabled={busy} onClick={continueEditing}>Continuar editando</button><button type="button" className="button danger small" disabled={busy} onClick={() => { if (!busy) onClose(); }}>Descartar rascunho</button></div></div>}<div className="task-dialog-content">{children}</div></dialog>;
 }
 
-function CodingSetup({ organizationPath: organization, path, onCreated, onNavigate }: { organizationPath: string; path: string; onCreated: (run: VisibleCodingRun) => void; onNavigate: (section: Section) => void }) {
+function CodingSetup({ organizationPath: organization, path, onCreated, onNavigate, onBusyChange, onDraftChange }: { organizationPath: string; path: string; onCreated: (run: VisibleCodingRun) => void; onNavigate: (section: Section) => void; onBusyChange: (busy: boolean) => void; onDraftChange: (dirty: boolean) => void }) {
   const [github, setGithub] = useState<GithubState | null>(null);
   const [catalog, setCatalog] = useState<AgentCatalogState | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -151,10 +201,10 @@ function CodingSetup({ organizationPath: organization, path, onCreated, onNaviga
     <div className="setup-step"><span className="setup-step-number" aria-hidden="true">1</span><div><h3>{repositories.length ? "Repositório conectado" : "Conecte um repositório"}</h3><p>{repositories.length ? `${repositories.length} ${repositories.length === 1 ? "repositório disponível" : "repositórios disponíveis"} para esta empresa.` : github?.configured ? "Escolha no GitHub o código em que o agente vai trabalhar." : "A conexão com o GitHub ainda precisa ser configurada pelo responsável pela Veltram."}</p></div><button className="button secondary small" onClick={() => onNavigate("repositories")}>{repositories.length ? "Ver repositórios" : "Repositórios"}</button></div>
     <div className="setup-step"><span className="setup-step-number" aria-hidden="true">2</span><div><h3>{availableProviders.length || nativeAvailable ? "IA conectada" : "Conecte sua IA"}</h3><p>{availableProviders.length ? "O modelo e o acesso ao provedor serão verificados durante a execução." : "Conecte uma assinatura compatível ou uma chave de API da empresa."}</p></div><button className="button secondary small" onClick={() => onNavigate("credentials")}>Conexões de IA</button></div>
   </section>;
-  return catalog && <CodingComposer organizationPath={organization} catalog={catalog} path={path} repositories={repositories} availableProviders={availableProviders} claude={nativeAvailable ? claude : null} onCreated={onCreated} />;
+  return catalog && <CodingComposer organizationPath={organization} catalog={catalog} path={path} repositories={repositories} availableProviders={availableProviders} claude={nativeAvailable ? claude : null} onCreated={onCreated} onBusyChange={onBusyChange} onDraftChange={onDraftChange} />;
 }
 
-function CodingComposer({ organizationPath, catalog, path, repositories, availableProviders, claude, onCreated }: { organizationPath: string; catalog: AgentCatalogState; path: string; repositories: RepositoryConnection[]; availableProviders: CredentialProvider[]; claude: ClaudeConnectionStatus | null; onCreated: (run: VisibleCodingRun) => void }) {
+function CodingComposer({ organizationPath, catalog, path, repositories, availableProviders, claude, onCreated, onBusyChange, onDraftChange }: { organizationPath: string; catalog: AgentCatalogState; path: string; repositories: RepositoryConnection[]; availableProviders: CredentialProvider[]; claude: ClaudeConnectionStatus | null; onCreated: (run: VisibleCodingRun) => void; onBusyChange: (busy: boolean) => void; onDraftChange: (dirty: boolean) => void }) {
   const [repositoryId, setRepositoryId] = useState(repositories[0].id);
   const [baseRef, setBaseRef] = useState(repositories[0].defaultBranch);
   const [task, setTask] = useState("");
@@ -172,7 +222,11 @@ function CodingComposer({ organizationPath, catalog, path, repositories, availab
   const [error, setError] = useState("");
   const abort = useRef<AbortController | null>(null);
   const request = useRef<{ fingerprint: string; id: string } | null>(null);
+  const draft = JSON.stringify({ repositoryId, baseRef, task, source, model, setupCommand, testCommand, agentSelections });
+  const initialDraft = useRef(draft);
   useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => { onBusyChange(busy || jevBusy); return () => onBusyChange(false); }, [busy, jevBusy, onBusyChange]);
+  useEffect(() => { onDraftChange(draft !== initialDraft.current); return () => onDraftChange(false); }, [draft, onDraftChange]);
 
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -212,11 +266,12 @@ function CodingComposer({ organizationPath, catalog, path, repositories, availab
   </form>;
 }
 
-function CodingDetail({ path, run, onChanged, onConflict }: { path: string; run: VisibleCodingRun; onChanged: (run: VisibleCodingRun) => void; onConflict: (message: string) => void }) {
+function CodingDetail({ path, run, onChanged, onConflict, onBusyChange }: { path: string; run: VisibleCodingRun; onChanged: (run: VisibleCodingRun) => void; onConflict: (message: string) => void; onBusyChange: (busy: boolean) => void }) {
   const [busy, setBusy] = useState<"approve" | "cancel" | null>(null);
   const [error, setError] = useState("");
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => { onBusyChange(busy !== null); return () => onBusyChange(false); }, [busy, onBusyChange]);
   const resultUrl = run.result ? safePullRequestUrl(run.result.prUrl, run.repositoryName) : null;
   const outcome = testOutcome(run);
   const providerNames = [...new Set((run.agents?.length ? run.agents : [run]).map((agent) => providers[agent.provider]))].join(", ");
@@ -230,8 +285,8 @@ function CodingDetail({ path, run, onChanged, onConflict }: { path: string; run:
       if (!controller.signal.aborted) onChanged(data.run);
     } catch (failure) {
       if (!isAbort(failure)) {
+        setError(errorMessage(failure));
         if (failure instanceof ApiError && [403, 404, 409].includes(failure.status)) onConflict(errorMessage(failure));
-        else setError(errorMessage(failure));
       }
     } finally { if (!controller.signal.aborted) setBusy(null); }
   }
