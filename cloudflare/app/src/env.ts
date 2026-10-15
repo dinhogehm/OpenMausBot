@@ -7,8 +7,11 @@ import type { CodingRoom } from "./coding-room";
 import type { CodingAdmission } from "./coding-admission";
 import type { BrowserRoom } from "./browser-room";
 import type { BrowserBinding } from "./browser-runtime";
+import type { ClaudeConnectionBindings } from "./claude-connection";
+import type { MissionRoom } from "./mission-room";
+import type { BudgetRpc } from "./budget-types";
 
-export interface AppEnv extends GitHubEnv {
+export interface AppEnv extends GitHubEnv, ClaudeConnectionBindings {
   DB: D1Database;
   ASSETS?: Fetcher;
   RUNS: DurableObjectNamespace<ExecutionRoom>;
@@ -17,6 +20,9 @@ export interface AppEnv extends GitHubEnv {
   CODING_ADMISSION: DurableObjectNamespace<CodingAdmission>;
   BROWSER_RUNS: DurableObjectNamespace<BrowserRoom>;
   BROWSER?: BrowserBinding;
+  MISSIONS?: DurableObjectNamespace<MissionRoom>;
+  BUDGETS?: { getByName(name: string): BudgetRpc };
+  AI_BUDGET_REQUIRED?: string;
   CODING_EXECUTORS: { getByName(name: string): CodingExecutorStub };
   LINUX_EXECUTORS: { getByName(name: string): {
     execute(input: { runId: string; organizationId: string; workspaceId: string; generation: number; message: string; delayMs: number; deadlineAt: number }): Promise<NonNullable<RunRecord["result"]>>;

@@ -16,6 +16,8 @@ function fixture() {
   let release: (() => void) | undefined;
   const monitors: (() => void)[] = [];
   let failDestroy = false;
+  let graftExitCode = 0;
+  const inputs: Record<string, unknown>[] = [];
   const container = {
     images: { coding: "fixture-image@sha256:abc" },
     get running() { return running; },
@@ -26,15 +28,17 @@ function fixture() {
     async exec(_argv: string[], options: ContainerExecOptions) {
       executions++;
       const body = await new Response(options.stdin as ReadableStream).text();
-      const trusted = _argv.at(-1) === "a".repeat(40) || body.includes('"kind":"snapshot"') || body.includes('"kind":"review_diff"');
+      const isGraft = body.includes('"kind":"graft_');
+      if (isGraft) inputs.push(JSON.parse(body));
+      const trusted = _argv.at(-1) === "a".repeat(40) || body.includes('"kind":"snapshot"') || body.includes('"kind":"review_diff"') || isGraft;
       const prefix = trusted ? [] : CODING_UNTRUSTED_PREFIX;
       expect(_argv.slice(0, prefix.length + 3)).toEqual([...prefix, CODING_PYTHON, "-I", "-c"]);
       const wait = paused ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
-      const output = _argv.at(-1) === "a".repeat(40) ? JSON.stringify({ baseline: "b".repeat(40) }) : body.includes('"kind":"snapshot"') ? JSON.stringify({ files: [], treeDigest: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" }) : "done";
-      return { stdout: new ReadableStream({ async start(c) { await wait; c.enqueue(new TextEncoder().encode(output)); c.close(); } }), exitCode: wait.then(() => 0) };
+      const output = _argv.at(-1) === "a".repeat(40) ? JSON.stringify({ baseline: "b".repeat(40) }) : body.includes('"kind":"snapshot"') ? JSON.stringify({ files: [], treeDigest: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" }) : isGraft ? JSON.stringify({ available: false, reason: "graft_unavailable", fallback: "Use read_file" }) : "done";
+      return { stdout: new ReadableStream({ async start(c) { await wait; c.enqueue(new TextEncoder().encode(output)); c.close(); } }), exitCode: wait.then(() => isGraft ? graftExitCode : 0) };
     },
   };
-  return { container, pause: () => { paused = true; }, failDestroy: () => { failDestroy = true; }, get executions() { return executions; }, get destroys() { return destroys; } };
+  return { container, inputs, pause: () => { paused = true; }, resume: () => { paused = false; release?.(); }, failGraftLauncher: () => { graftExitCode = 1; }, failDestroy: () => { failDestroy = true; }, get executions() { return executions; }, get destroys() { return destroys; } };
 }
 async function inExecutor(callback: (executor: CodingExecutor, state: DurableObjectState) => Promise<void>) {
   const ns = (env as unknown as { CODING_EXECUTORS: DurableObjectNamespace<CodingExecutor> }).CODING_EXECUTORS;
@@ -42,6 +46,38 @@ async function inExecutor(callback: (executor: CodingExecutor, state: DurableObj
 }
 
 describe("CodingExecutor durable effects", () => {
+  it("blocks all egress during structural queries, supplies trusted identity and preserves nonfatal fallback receipts", async () => {
+    await inExecutor(async (executor, state) => {
+      const f = fixture(); Object.defineProperty(state, "container", { configurable: true, value: f.container });
+      const input = identity();
+      await executor.init({ ...input, baseSha: "a".repeat(40), archive: archive() });
+      f.pause();
+      const call = { ...input, stepId: "graft_1", tool: { kind: "graft_map" as const, identity: { organizationId: "other" } } };
+      const pending = executor.step(call);
+      while (f.executions < 2) await new Promise(resolve => setTimeout(resolve, 1));
+      expect(await executor.reserveEgress({ ...input, bytes: 0, newRequest: true })).toBe(false);
+      expect(f.inputs[0].identity).toEqual({ ...input, baseSha: "a".repeat(40) });
+      f.resume();
+      const result = await pending;
+      expect(JSON.parse(result.output).available).toBe(false);
+      expect(await executor.step(call)).toEqual(result);
+      expect(f.executions).toBe(2);
+      expect(await executor.reserveEgress({ ...input, bytes: 0, newRequest: true })).toBe(true);
+      expect((await executor.step({ ...input, stepId: "read_after_graft", tool: { kind: "read_file", path: "src/main.ts", offset: 0, limit: 100 } })).output).toBe("done");
+      expect(f.destroys).toBe(0);
+      await executor.stop();
+    });
+  });
+  it("destroys the VM when the trusted Graft launcher cannot establish isolation", async () => {
+    await inExecutor(async (executor, state) => {
+      const f = fixture(); Object.defineProperty(state, "container", { configurable: true, value: f.container });
+      const input = identity(); await executor.init({ ...input, baseSha: "a".repeat(40), archive: archive() });
+      f.failGraftLauncher();
+      await expect(executor.step({ ...input, stepId: "graft_1", tool: { kind: "graft_map" } })).rejects.toThrow("coding_graft_isolation_failed");
+      expect(f.destroys).toBe(1);
+      expect(await executor.reserveEgress({ ...input, bytes: 0, newRequest: true })).toBe(false);
+    });
+  });
   it("replays known receipts and rejects changed input, tenant reuse and stale generations", async () => {
     await inExecutor(async (executor, state) => {
       const f = fixture(); Object.defineProperty(state, "container", { configurable: true, value: f.container });

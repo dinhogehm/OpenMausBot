@@ -1,4 +1,5 @@
 import type { AppEnv } from "./env";
+import { assertBudgetAdapter } from "./budget-fetch";
 import { decryptCredential } from "./credentials";
 import { requireMembership } from "./organizations";
 import { parseBrowserAction } from "./browser-state";
@@ -67,6 +68,7 @@ export function parseBrowserModel(run: BrowserRun, value: unknown): BrowserModel
 export async function callBrowserModel(env: AppEnv, run: BrowserRun, observation: BrowserObservation, signal: AbortSignal, requestFetch: typeof fetch = fetch): Promise<BrowserModelTurn> {
   await requireMembership(env.DB, run.organizationId, run.createdBy);
   await requireMembership(env.DB, run.organizationId, run.approvedBy!, true);
+  assertBudgetAdapter(env, "browser_vision");
   const row = await env.DB.prepare("SELECT id,key_version AS version,iv,ciphertext FROM provider_credentials WHERE organization_id=? AND provider=? AND status='configured'")
     .bind(run.organizationId, run.provider).first<{ id: string; version: number; iv: string; ciphertext: string }>();
   if (!row || row.version !== run.credentialVersion) throw new Error("browser_key_changed");

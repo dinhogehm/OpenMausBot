@@ -20,21 +20,28 @@
     { "name": "CODING_RUNS", "class_name": "CodingRoom" },
     { "name": "CODING_ADMISSION", "class_name": "CodingAdmission" },
     { "name": "CODING_EXECUTORS", "class_name": "CodingExecutor" },
-    { "name": "BROWSER_RUNS", "class_name": "BrowserRoom" }
+    { "name": "BROWSER_RUNS", "class_name": "BrowserRoom" },
+    { "name": "MISSIONS", "class_name": "MissionRoom" },
+    { "name": "BUDGETS", "class_name": "BudgetRoom" },
+    { "name": "CLAUDE_CONNECTIONS", "class_name": "ClaudeConnectionRoom" }
   ] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ExecutionRoom", "Admission", "LinuxExecutor"] },
     { "tag": "v2", "new_sqlite_classes": ["CodingRoom", "CodingAdmission", "CodingExecutor"] },
-    { "tag": "v3", "new_sqlite_classes": ["BrowserRoom"] }
+    { "tag": "v3", "new_sqlite_classes": ["BrowserRoom"] },
+    { "tag": "v4", "new_sqlite_classes": ["BudgetRoom", "ClaudeConnectionRoom", "MissionRoom"] }
   ],
   "containers": [
     { "class_name": "LinuxExecutor", "scheduling_policy": "durable_object" },
+    { "class_name": "ClaudeConnectionRoom", "scheduling_policy": "durable_object", "images": { "claude": { "dockerfile": "./Dockerfile.claude", "build_context": "." } } },
     { "class_name": "CodingExecutor", "scheduling_policy": "durable_object", "images": { "coding": { "dockerfile": "./Dockerfile.coding", "build_context": "." } } }
   ],
   "vars": {
+    "CLAUDE_CODE_ENABLED": "false",
+    "AI_BUDGET_REQUIRED": "true",
     "APP_ORIGIN": "https://veltram.com",
     "EMAIL_FROM": "noreply@veltram.com",
-    "RELEASE_ID": "veltram-2026-10-14.4"
+    "RELEASE_ID": "veltram-2026-10-15.1"
   },
   "secrets": { "required": ["AUTH_SECRET", "CREDENTIAL_MASTER_KEY"] },
   "d1_databases": [{

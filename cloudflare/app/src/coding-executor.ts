@@ -78,8 +78,13 @@ export class CodingExecutor extends DurableObject<unknown> {
     const claimed = await this.#claim(input, input.tool);
     if (claimed !== null) return claimed as CodingToolResult;
     try {
-      const deadlineAt = Math.min(input.deadlineAt, Date.now() + (input.tool.kind === "run_command" ? input.tool.timeoutMs : 30_000));
-      const result = await this.#execute([...CODING_UNTRUSTED_PREFIX, CODING_PYTHON, "-I", "-c", CODING_TOOL_PROGRAM], stream(bytes(JSON.stringify(input.tool))), deadlineAt, CODING_OUTPUT_BYTES);
+      const graft = input.tool.kind.startsWith("graft_");
+      const deadlineAt = Math.min(input.deadlineAt, Date.now() + (input.tool.kind === "run_command" ? input.tool.timeoutMs : graft ? 65_000 : 30_000));
+      const payload = graft ? { ...input.tool, identity: await this.ctx.storage.get<Identity>("identity") } : input.tool;
+      const result = await this.#execute([...(graft ? [] : CODING_UNTRUSTED_PREFIX), CODING_PYTHON, "-I", "-c", CODING_TOOL_PROGRAM], stream(bytes(JSON.stringify(payload))), deadlineAt, CODING_OUTPUT_BYTES);
+      // Missing/failed parsers return a bounded unavailable receipt with exit 0.
+      // A failed trusted launcher or quiescence is an isolation failure instead.
+      if (graft && (result.exitCode !== 0 || result.truncated)) throw new Error("coding_graft_isolation_failed");
       await this.#save(input, result);
       return result;
     } catch (error) { await this.#fail(error); throw error; }
@@ -130,7 +135,7 @@ export class CodingExecutor extends DurableObject<unknown> {
     if (!Number.isSafeInteger(input.bytes) || input.bytes < 0 || input.bytes > 100 * 1024 * 1024 || typeof input.newRequest !== "boolean") return false;
     return this.ctx.storage.transaction(async storage => {
       const identity = await storage.get<Identity>("identity");
-      if (this.#stopped || await storage.get("stopped") || !identity || identity.runId !== input.runId || identity.generation !== input.generation || identity.deadlineAt !== input.deadlineAt || Date.now() >= identity.deadlineAt) return false;
+      if (this.#stopped || await storage.get("stopped") || await storage.get("graftActive") || !identity || identity.runId !== input.runId || identity.generation !== input.generation || identity.deadlineAt !== input.deadlineAt || Date.now() >= identity.deadlineAt) return false;
       const budget = await storage.get<{ bytes: number; requests: number }>("egress") ?? { bytes: 0, requests: 0 };
       const next = { bytes: budget.bytes + input.bytes, requests: budget.requests + (input.newRequest ? 1 : 0) };
       if (next.bytes > 1024 * 1024 * 1024 || next.requests > 2000) return false;
@@ -158,6 +163,7 @@ export class CodingExecutor extends DurableObject<unknown> {
       const count = await storage.get<number>("steps") ?? 0;
       if (count >= 200) throw new Error("executor_step_limit");
       await storage.put({ [`step:${input.stepId}`]: { fingerprint: digest, status: "running" }, active: input.stepId, steps: count + 1 });
+      if (typeof operation === "object" && operation !== null && "kind" in operation && typeof operation.kind === "string" && operation.kind.startsWith("graft_")) await storage.put("graftActive", true);
       return null;
     });
     if (!receipt) return null;
@@ -181,7 +187,7 @@ export class CodingExecutor extends DurableObject<unknown> {
       const previous = await storage.get<Receipt>(`step:${input.stepId}`);
       if (!previous || previous.status !== "running" || await storage.get("active") !== input.stepId) throw new Error("executor_step_changed");
       await storage.put(`step:${input.stepId}`, { ...previous, status: "done", chunks });
-      await storage.delete("active"); await storage.setAlarm(input.deadlineAt);
+      await storage.delete("active"); await storage.delete("graftActive"); await storage.setAlarm(input.deadlineAt);
     });
   }
 

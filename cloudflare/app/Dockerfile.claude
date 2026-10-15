@@ -1,0 +1,11 @@
+FROM node:24.20.0-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0
+# Original published binary. No credentials, repository, plugins or hooks in this image.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global @anthropic-ai/claude-code@2.1.300 \
+    && /usr/local/bin/claude --version | grep -F '2.1.300' \
+    && mkdir -p /home/claude/.claude /opt/veltram/request \
+    && chown -R 1000:1000 /home/claude \
+    && chmod 700 /home/claude /home/claude/.claude \
+    && chmod 555 /opt/veltram/request
+ENTRYPOINT ["/usr/bin/sleep", "infinity"]

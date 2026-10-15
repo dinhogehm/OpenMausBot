@@ -30,6 +30,11 @@ test("native container API supports checkout, edit/test, bounded egress, diff, s
   try {
     const init = await fetch(origin + "/init", { method: "POST", headers: { "x-fixture-input": JSON.stringify({ ...identity, baseSha: "a".repeat(40) }) }, body: archive });
     assert.equal(init.status, 200, await init.text());
+    const graphBefore = JSON.parse((await tool({ kind: "graft_map" })).output);
+    assert.equal(graphBefore.available, true, JSON.stringify(graphBefore));
+    assert.equal(graphBefore.version, "0.22.0");
+    const skeleton = JSON.parse((await tool({ kind: "graft_skeleton", path: "sum.js" })).output);
+    assert.equal(skeleton.available, true, JSON.stringify(skeleton));
     const protectedRuntime = await tool({ kind: "run_command", cwd: ".", timeoutMs: 20_000, command: "/usr/bin/python3 -I -c 'import os,pathlib\nassert os.getuid()==os.geteuid()==1000\nassert os.getgid()==os.getegid()==1000\ns=dict(line.split('\"'\"':'\"'\"',1) for line in pathlib.Path('\"'\"'/proc/self/status'\"'\"').read_text().splitlines() if '\"'\"':'\"'\"' in line)\nfor k in ['\"'\"'CapInh'\"'\"','\"'\"'CapPrm'\"'\"','\"'\"'CapEff'\"'\"','\"'\"'CapBnd'\"'\"','\"'\"'CapAmb'\"'\"']: assert int(s[k].strip(),16)==0,(k,s[k])\nassert s['\"'\"'NoNewPrivs'\"'\"'].strip()=='\"'\"'1'\"'\"'\nfor p in ['\"'\"'/usr/local/bin/python3'\"'\"','\"'\"'/usr/bin/python3'\"'\"','\"'\"'/usr/bin/git'\"'\"','\"'\"'/usr/lib/python3.13/json/__init__.py'\"'\"','\"'\"'/workspace/repo/.git/config'\"'\"','\"'\"'/workspace/.veltram/baseline.json'\"'\"']:\n try:\n  with open(p,'\"'\"'wb'\"'\"') as f: f.write(b'\"'\"'forged'\"'\"')\n except PermissionError: pass\n else: raise Exception('\"'\"'trusted path writable: '\"'\"'+p)\nfor a,b in [('\"'\"'/workspace/repo/.git'\"'\"','\"'\"'/workspace/repo/stolen-git'\"'\"'),('\"'\"'/workspace/repo'\"'\"','\"'\"'/workspace/stolen-repo'\"'\"')]:\n try: os.rename(a,b)\n except PermissionError: pass\n else: raise Exception('\"'\"'trusted path replaceable: '\"'\"'+a)\ntry: os.setuid(0)\nexcept PermissionError: pass\nelse: raise Exception('\"'\"'root regained'\"'\"')\nprint('\"'\"'uid1000; capabilities zero; no_new_privs; trusted files protected'\"'\"')'" });
     assert.equal(protectedRuntime.exitCode, 0, protectedRuntime.output);
     const spoof = await tool({ kind: "write_file", path: "json.py", content: "raise Exception(\"repository import injected\")\n" });
@@ -40,6 +45,10 @@ test("native container API supports checkout, edit/test, bounded egress, diff, s
     const failed = await tool({ kind: "run_command", command: "npm test", cwd: ".", timeoutMs: 20_000 });
     assert.equal(failed.exitCode, 1);
     const changed = await tool({ kind: "write_file", path: "sum.js", content: "module.exports=(a,b)=>a+b;\n" }); assert.equal(changed.exitCode, 0);
+    const graphAfter = JSON.parse((await tool({ kind: "graft_grep", pattern: "a+b", path: "sum.js" })).output);
+    assert.equal(graphAfter.available, true, JSON.stringify(graphAfter));
+    assert.notEqual(graphAfter.revision, graphBefore.revision);
+    assert.match(JSON.stringify(graphAfter.result), /a\+b/);
     const network = await tool({ kind: "run_command", cwd: ".", timeoutMs: 60_000, command: "node -e \"(async()=>{let r=await fetch('https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz');if(!r.ok||(await r.arrayBuffer()).byteLength<100)throw Error('allowed dependency failed');r=await fetch('https://example.com/');if(r.status!==403)throw Error('egress not blocked');console.log('dependency downloaded; unknown host denied')})().catch(e=>{console.error(e.message);process.exit(1)})\"" });
     assert.equal(network.exitCode, 0, network.output);
     const background = await tool({ kind: "run_command", cwd: ".", timeoutMs: 20_000, command: "/usr/bin/python3 -c 'import pathlib,time; p=pathlib.Path(\"/tmp/veltram-background-proof\"); [(p.write_text(str(i)),time.sleep(.005)) for i in range(10000)]' >/dev/null 2>&1 & sleep .1" });
@@ -54,6 +63,7 @@ test("native container API supports checkout, edit/test, bounded egress, diff, s
     const after = await afterResponse.json() as CodingSnapshot; assert.equal(afterResponse.status, 200, JSON.stringify(after));
     assert.equal(before.treeDigest, after.treeDigest); assert.equal(after.treeDigest, await codingTreeDigest(after.files));
     assert.equal(after.files.some(file => file.path === "baseline-large.bin"), false);
+    assert.deepEqual(after.files.map(file => file.path), ["sum.js"]);
     const diffResponse = await request("/diff", { stepId: `s${++step}` });
     const diff = await diffResponse.json() as CodingToolResult; assert.equal(diffResponse.status, 200, JSON.stringify(diff));
     assert.match(diff.output, /a-b/); assert.match(diff.output, /a\+b/);

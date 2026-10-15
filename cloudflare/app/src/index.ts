@@ -10,6 +10,7 @@ import { agentCatalogRoute } from "./agent-catalog";
 import { handleReportsRoute } from "./reports";
 import { decisionModelRoute, recommendAgents } from "./decision-model";
 import { handleMarketplaceRoute } from "./marketplace-routes";
+import { handleAiSettings } from "./ai-settings";
 export { ExecutionRoom } from "./run-room";
 export { Admission } from "./admission";
 export { LinuxExecutor } from "./linux-executor";
@@ -18,6 +19,8 @@ export { CodingAdmission } from "./coding-admission";
 export { CodingExecutor } from "./coding-executor";
 export { CodingDependencyNetwork } from "./coding-network";
 export { BrowserRoom } from "./browser-room";
+export { BudgetRoom } from "./budget-room";
+export { ClaudeConnectionRoom } from "./claude-room";
 
 const authPaths = new Set(["/api/auth/email-otp/send-verification-otp", "/api/auth/sign-in/email-otp", "/api/auth/sign-out"]);
 
@@ -46,7 +49,7 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
   let body: Record<string, unknown> | undefined;
   if (mutating) {
     if (request.headers.get("origin") !== env.APP_ORIGIN) throw new HttpError(403, "origin_forbidden");
-    const limit = /\/agent-catalog(?:\/import)?$/.test(url.pathname) ? 262144 : url.pathname.endsWith("/agents") ? 131072 : /\/coding-runs(?:\/|$)/.test(url.pathname) ? 32768 : 8192;
+    const limit = /\/agent-catalog(?:\/import)?$/.test(url.pathname) ? 262144 : url.pathname.endsWith("/agents") ? 131072 : /\/missions(?:\/|$)/.test(url.pathname) ? 65536 : /\/coding-runs(?:\/|$)/.test(url.pathname) ? 32768 : 8192;
     body = await readJson(request, limit);
   }
   const auth = createAuth(env, ctx);
@@ -71,6 +74,8 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
   const session = await auth.api.getSession({ headers: request.headers });
   if (!session?.user?.emailVerified) throw new HttpError(401, "sign_in_required");
   const userId = session.user.id;
+  const aiSettings = await handleAiSettings(request, env, userId, body);
+  if (aiSettings) return aiSettings;
   const githubResponse = await handleGitHubRoute(request, env, { userId, sessionId: session.session.id }, body);
   if (githubResponse) return githubResponse;
   const marketplaceResponse = await handleMarketplaceRoute(request, env, userId, body);
@@ -97,6 +102,17 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
   }
   const agentsMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/agents$/);
   if (agentsMatch) return agentProfilesRoute(env, agentsMatch[1], userId, request.method, body ?? {});
+  const missionMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/workspaces\/([A-Za-z0-9_-]{1,80})\/missions(?:\/([A-Za-z0-9_-]{1,80})(?:\/(pause|resume|cancel))?)?$/);
+  if (missionMatch) {
+    const [, organizationId, workspaceId, missionId, operation] = missionMatch;
+    const action = request.method === "GET" && !operation ? (missionId ? "get" : "list") : request.method === "POST" ? (!missionId ? "create" : operation) : undefined;
+    if (!action) throw new HttpError(404, "not_found");
+    await requireMembership(env.DB, organizationId, userId, request.method !== "GET");
+    if (!env.MISSIONS) throw new HttpError(503, "mission_unavailable");
+    return env.MISSIONS.getByName(organizationId).fetch(new Request("https://missions.internal/command", {
+      method: "POST", body: JSON.stringify({ organizationId, workspaceId, missionId, userId, action, body: action === "list" ? { cursor: url.searchParams.get("cursor") ?? undefined } : body ?? {} }),
+    }));
+  }
   const codingMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/workspaces\/([A-Za-z0-9_-]{1,80})\/coding-runs(?:\/([A-Za-z0-9_-]{1,80})(?:\/(approve|cancel))?)?$/);
   if (codingMatch) {
     const [, organizationId, workspaceId, runId, operation] = codingMatch;
@@ -148,3 +164,5 @@ export default {
     }
   },
 };
+
+export { MissionRoom } from "./mission-room";

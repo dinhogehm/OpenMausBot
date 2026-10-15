@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import type { AgentCatalogState, AgentSelections } from "../../src/agent-catalog-types";
 import { CodingTeamPicker } from "./coding-team";
 import type { CodingRunInput, CodingStatus } from "../../src/coding-types";
+import type { BudgetView } from "../../src/budget-types";
+import type { ClaudeConnectionStatus } from "../../src/claude-types";
 import type { CredentialProvider } from "../../src/credentials";
 import { api, ApiError, errorMessage, formatDate, isAbort, organizationPath, type Credential } from "./api";
 import { Icon, Loading, Notice, PageHeading } from "./components";
@@ -118,11 +120,14 @@ function CodingSetup({ organizationPath: organization, path, onCreated, onNaviga
   const [github, setGithub] = useState<GithubState | null>(null);
   const [catalog, setCatalog] = useState<AgentCatalogState | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [budget, setBudget] = useState<BudgetView | null>(null);
+  const [claude, setClaude] = useState<ClaudeConnectionStatus | null>(null);
+  const nativeAvailable = claude?.enabled && claude.state === "connected" && claude.authMethod === "claude.ai";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const repositories = github?.connections.filter((connection) => connection.status === "active") ?? [];
-  const availableProviders = credentials.filter((credential) => credential.status === "configured" && credential.provider in providers).map((credential) => credential.provider as CredentialProvider);
+  const availableProviders = credentials.filter((credential) => credential.status === "configured" && credential.provider in providers && (!budget?.enforcement?.required || budget.enforcement.paidApiAvailable && credential.provider === "openrouter")).map((credential) => credential.provider as CredentialProvider);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -131,27 +136,31 @@ function CodingSetup({ organizationPath: organization, path, onCreated, onNaviga
       api<GithubState>(`${organization}/github`, { signal: controller.signal }),
       api<{ credentials: Credential[] }>(`${organization}/credentials`, { signal: controller.signal }),
       api<AgentCatalogState>(`${organization}/agent-catalog`, { signal: controller.signal }),
-    ]).then(([nextGithub, nextCredentials, nextCatalog]) => {
-      if (!controller.signal.aborted) { setGithub(nextGithub); setCredentials(nextCredentials.credentials); setCatalog(nextCatalog); }
+      api<ClaudeConnectionStatus>(`${organization}/me/claude-code`, { signal: controller.signal }),
+      api<BudgetView>(`${organization}/budget`, { signal: controller.signal }),
+    ]).then(([nextGithub, nextCredentials, nextCatalog, nextClaude, nextBudget]) => {
+      if (!controller.signal.aborted) { setGithub(nextGithub); setCredentials(nextCredentials.credentials); setCatalog(nextCatalog); setClaude(nextClaude); setBudget(nextBudget); }
     }).catch((failure: unknown) => { if (!isAbort(failure)) setError(errorMessage(failure)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [organization, attempt]);
 
-  if (loading) return <Loading label="Conferindo repositórios e chaves de IA" />;
+  if (loading) return <Loading label="Conferindo repositórios e conexões de IA" />;
   if (error) return <><Notice>{error}</Notice><button className="button secondary" onClick={() => setAttempt((value) => value + 1)}>Tentar novamente</button></>;
-  if (!repositories.length || !availableProviders.length) return <section className="coding-setup" aria-labelledby="coding-setup-title"><h2 id="coding-setup-title">Prepare a primeira tarefa</h2>
+  if (!repositories.length || (!availableProviders.length && !nativeAvailable)) return <section className="coding-setup" aria-labelledby="coding-setup-title"><h2 id="coding-setup-title">Prepare a primeira tarefa</h2>{budget?.enforcement?.required && !budget.enforcement.paidApiAvailable && <Notice kind="info">Chamadas pagas de API aguardam a validação do modo de cobrança. As assinaturas também precisam estar liberadas e conectadas antes de executar tarefas.</Notice>}
     <div className="setup-step"><span className="setup-step-number" aria-hidden="true">1</span><div><h3>{repositories.length ? "Repositório conectado" : "Conecte um repositório"}</h3><p>{repositories.length ? `${repositories.length} ${repositories.length === 1 ? "repositório disponível" : "repositórios disponíveis"} para esta empresa.` : github?.configured ? "Escolha no GitHub o código em que o agente vai trabalhar." : "A conexão com o GitHub ainda precisa ser configurada pelo responsável pela Veltram."}</p></div><button className="button secondary small" onClick={() => onNavigate("repositories")}>{repositories.length ? "Ver repositórios" : "Repositórios"}</button></div>
-    <div className="setup-step"><span className="setup-step-number" aria-hidden="true">2</span><div><h3>{availableProviders.length ? "Chave de IA armazenada" : "Adicione uma chave de IA"}</h3><p>{availableProviders.length ? "O modelo e o acesso ao provedor serão verificados durante a execução." : "A tarefa usa a chave e os limites da conta de IA da empresa."}</p></div><button className="button secondary small" onClick={() => onNavigate("credentials")}>{availableProviders.length ? "Ver chaves" : "Chaves de IA"}</button></div>
+    <div className="setup-step"><span className="setup-step-number" aria-hidden="true">2</span><div><h3>{availableProviders.length || nativeAvailable ? "IA conectada" : "Conecte sua IA"}</h3><p>{availableProviders.length ? "O modelo e o acesso ao provedor serão verificados durante a execução." : "Conecte uma assinatura compatível ou uma chave de API da empresa."}</p></div><button className="button secondary small" onClick={() => onNavigate("credentials")}>Conexões de IA</button></div>
   </section>;
-  return catalog && <CodingComposer organizationPath={organization} catalog={catalog} path={path} repositories={repositories} availableProviders={availableProviders} onCreated={onCreated} />;
+  return catalog && <CodingComposer organizationPath={organization} catalog={catalog} path={path} repositories={repositories} availableProviders={availableProviders} claude={nativeAvailable ? claude : null} onCreated={onCreated} />;
 }
 
-function CodingComposer({ organizationPath, catalog, path, repositories, availableProviders, onCreated }: { organizationPath: string; catalog: AgentCatalogState; path: string; repositories: RepositoryConnection[]; availableProviders: CredentialProvider[]; onCreated: (run: VisibleCodingRun) => void }) {
+function CodingComposer({ organizationPath, catalog, path, repositories, availableProviders, claude, onCreated }: { organizationPath: string; catalog: AgentCatalogState; path: string; repositories: RepositoryConnection[]; availableProviders: CredentialProvider[]; claude: ClaudeConnectionStatus | null; onCreated: (run: VisibleCodingRun) => void }) {
   const [repositoryId, setRepositoryId] = useState(repositories[0].id);
   const [baseRef, setBaseRef] = useState(repositories[0].defaultBranch);
   const [task, setTask] = useState("");
-  const [provider, setProvider] = useState<CredentialProvider>(availableProviders[0]);
+  const [source, setSource] = useState<CredentialProvider | "claude-code">(availableProviders[0] ?? "claude-code");
+  const provider: CredentialProvider = source === "claude-code" ? "anthropic" : source;
+  const sourceName = source === "claude-code" ? "Claude Code · minha conta" : `${providers[provider]} · API`;
   const [model, setModel] = useState("");
   const [setupCommand, setSetupCommand] = useState("");
   const [testCommand, setTestCommand] = useState("");
@@ -173,7 +182,7 @@ function CodingComposer({ organizationPath, catalog, path, repositories, availab
     if (!task.trim() || !baseRef.trim() || !model.trim() || !testCommand.trim()) {
       setError("Descreva a tarefa e preencha a branch, o modelo e o comando de testes."); setSettingsOpen(true); return;
     }
-    const fields = { repositoryConnectionId: repositoryId, baseRef: baseRef.trim(), task: task.trim(), provider, model: model.trim(), setupCommand: setupCommand.trim(), testCommand: testCommand.trim(), ...(agentSelections ? { agentSelections } : {}) };
+    const fields = { repositoryConnectionId: repositoryId, baseRef: baseRef.trim(), task: task.trim(), provider, model: model.trim(), setupCommand: setupCommand.trim(), testCommand: testCommand.trim(), ...(source === "claude-code" && claude ? { modelSource: { kind: "claude-code" as const, connectionVersion: claude.connectionVersion } } : {}), ...(agentSelections ? { agentSelections } : {}) };
     const fingerprint = JSON.stringify(fields);
     if (request.current?.fingerprint !== fingerprint) request.current = { fingerprint, id: crypto.randomUUID() };
     const body: CodingRunInput = { ...fields, requestId: request.current.id };
@@ -192,14 +201,14 @@ function CodingComposer({ organizationPath, catalog, path, repositories, availab
     <div className="field"><label htmlFor="coding-repository">Repositório</label><select id="coding-repository" disabled={busy} value={repositoryId} onChange={(event) => { setRepositoryId(event.target.value); setBaseRef(repositories.find((repository) => repository.id === event.target.value)?.defaultBranch ?? ""); }}>{repositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.fullName}</option>)}</select></div>
     <div className="field"><label htmlFor="coding-task">O que precisa mudar?</label><textarea id="coding-task" rows={4} required maxLength={4000} disabled={busy} value={task} onChange={(event) => setTask(event.target.value)} placeholder="Descreva o problema, o resultado esperado e como verificar a alteração." aria-describedby="coding-task-help" /><div className="textarea-footer" id="coding-task-help"><span>Inclua o contexto necessário para uma alteração específica.</span><span>{task.length}/4.000</span></div></div>
     <CodingTeamPicker catalog={catalog} organizationPath={organizationPath} task={task} disabled={busy} onBusyChange={setJevBusy} onChange={(selection, valid) => { setAgentSelections(selection); setTeamReady(valid); }} />
-    <details className="execution-settings" open={settingsOpen} onToggle={(event) => setSettingsOpen(event.currentTarget.open)}><summary>Modelo e execução <span>{model && testCommand ? `${providers[provider]} · ${model}` : "Configuração necessária"}</span></summary><div className="execution-settings-fields form-stack">
-      <div className="form-pair"><div className="field"><label htmlFor="coding-provider">Provedor de IA</label><select id="coding-provider" value={provider} disabled={busy} onChange={(event) => { setProvider(event.target.value as CredentialProvider); setModel(""); }}>{availableProviders.map((value) => <option key={value} value={value}>{providers[value]}</option>)}</select></div><div className="field"><label htmlFor="coding-model">Modelo</label><input id="coding-model" required maxLength={120} autoComplete="off" disabled={busy} value={model} onChange={(event) => setModel(event.target.value)} placeholder="ID do modelo na sua conta" /></div></div>
-      <p className="field-hint">Use um modelo com suporte a ferramentas. A disponibilidade e o custo dependem da conta da empresa no provedor.</p>
+    <details className="execution-settings" open={settingsOpen} onToggle={(event) => setSettingsOpen(event.currentTarget.open)}><summary>Modelo e execução <span>{model && testCommand ? `${sourceName} · ${model}` : "Configuração necessária"}</span></summary><div className="execution-settings-fields form-stack">
+      <div className="form-pair"><div className="field"><label htmlFor="coding-provider">Conexão de IA</label><select id="coding-provider" value={source} disabled={busy} onChange={(event) => { setSource(event.target.value as CredentialProvider | "claude-code"); setModel(""); }}>{claude && <option value="claude-code">Claude Code · minha conta</option>}{availableProviders.map((value) => <option key={value} value={value}>{providers[value]} · API da empresa</option>)}</select></div><div className="field"><label htmlFor="coding-model">Modelo</label><input id="coding-model" required maxLength={120} autoComplete="off" disabled={busy} value={model} onChange={(event) => setModel(event.target.value)} placeholder={source === "claude-code" ? "Ex.: sonnet" : "ID do modelo na sua conta"} /></div></div>
+      <p className="field-hint">{source === "claude-code" ? "A equipe usa exclusivamente sua conexão pessoal. A franquia e cobranças extras seguem seu plano; configure os limites no Claude." : "Use um modelo com suporte a ferramentas. A execução exige controle de custo compatível com o provedor e o modelo."}</p>
       <div className="field"><label htmlFor="coding-base">Branch de origem</label><input id="coding-base" required maxLength={200} autoComplete="off" disabled={busy} value={baseRef} onChange={(event) => setBaseRef(event.target.value)} /><p className="field-hint">A alteração será entregue em uma nova branch com um PR em rascunho.</p></div>
       <div className="field"><label htmlFor="coding-setup">Preparação do projeto <span className="optional-label">opcional</span></label><input id="coding-setup" maxLength={2000} autoComplete="off" spellCheck={false} disabled={busy} value={setupCommand} onChange={(event) => setSetupCommand(event.target.value)} placeholder="Ex.: npm ci" /><p className="field-hint">Comando para instalar dependências ou preparar o ambiente.</p></div>
       <div className="field"><label htmlFor="coding-test">Comando de testes</label><input id="coding-test" required maxLength={2000} autoComplete="off" spellCheck={false} disabled={busy} value={testCommand} onChange={(event) => setTestCommand(event.target.value)} placeholder="Ex.: npm test" /><p className="field-hint">Informe os testes que comprovam a tarefa. O comando será executado sobre o código final.</p></div>
     </div></details>
-    <div className="coding-composer-footer"><p>Um administrador revisa e aprova o uso da chave de IA antes da execução.</p><button className="button primary" disabled={busy || jevBusy || !task.trim() || !teamReady}>{busy ? "Criando tarefa…" : "Criar tarefa"}<Icon name="arrow" /></button></div>
+    <div className="coding-composer-footer"><p>Um administrador revisa e aprova o uso da conexão de IA antes da execução.</p><button className="button primary" disabled={busy || jevBusy || !task.trim() || !teamReady}>{busy ? "Criando tarefa…" : "Criar tarefa"}<Icon name="arrow" /></button></div>
   </form>;
 }
 
@@ -230,8 +239,8 @@ function CodingDetail({ path, run, onChanged, onConflict }: { path: string; run:
   return <article className="run-detail coding-detail" aria-label="Detalhes da tarefa">
     <div className="run-detail-heading"><h3>Tarefa no repositório</h3><Status value={run.status} /></div><p className="run-repository detail-repository">{run.repositoryName}</p><p className="run-input">{run.task}</p>
     {error && <Notice>{error}</Notice>}
-    <dl className="coding-configuration"><div><dt>Origem</dt><dd className="mono">{run.baseRef}</dd></div><div><dt>Modelo</dt><dd>{providers[run.provider]} · {run.model}</dd></div><div><dt>Preparação</dt><dd className="mono">{run.setupCommand || "Nenhum comando"}</dd></div><div><dt>Testes</dt><dd className="mono">{run.testCommand}</dd></div></dl>
-    {run.status === "pending_approval" && <div className="approval-request"><h4>{run.canApprove ? "Revisar e iniciar" : "Aguardando um administrador"}</h4><p>A aprovação permite usar as chaves de IA desta empresa ({providerNames}), executar os comandos acima e criar uma branch e um PR em rascunho no repositório. O uso de IA pode gerar cobrança nos provedores.</p><p>Limite por tarefa: 30 minutos e até 30 chamadas de IA.</p><div className="button-row">{run.canApprove && <button className="button primary small" disabled={busy !== null} onClick={() => void act("approve")}><Icon name="check" size={16} />{busy === "approve" ? "Aprovando…" : "Aprovar e executar"}</button>}{run.canCancel && <button className="button secondary small" disabled={busy !== null} onClick={() => void act("cancel")}>{busy === "cancel" ? "Cancelando…" : "Cancelar"}</button>}</div></div>}
+    <dl className="coding-configuration"><div><dt>Origem</dt><dd className="mono">{run.baseRef}</dd></div><div><dt>Modelo</dt><dd>{run.modelSource ? "Claude Code · conta do solicitante" : providers[run.provider]} · {run.model}</dd></div><div><dt>Preparação</dt><dd className="mono">{run.setupCommand || "Nenhum comando"}</dd></div><div><dt>Testes</dt><dd className="mono">{run.testCommand}</dd></div></dl>
+    {run.status === "pending_approval" && <div className="approval-request"><h4>{run.canApprove ? "Revisar e iniciar" : "Aguardando um administrador"}</h4><p>{run.modelSource ? "A aprovação usa a assinatura Claude do solicitante, com os limites e eventuais cobranças extras de seu plano." : `A aprovação usa as chaves de IA da empresa (${providerNames}), sujeitas aos controles de orçamento disponíveis.`} A equipe poderá executar os comandos acima e criar uma branch e um PR em rascunho.</p><p>Limite por tarefa: 30 minutos e até 30 chamadas de IA.</p><div className="button-row">{run.canApprove && <button className="button primary small" disabled={busy !== null} onClick={() => void act("approve")}><Icon name="check" size={16} />{busy === "approve" ? "Aprovando…" : "Aprovar e executar"}</button>}{run.canCancel && <button className="button secondary small" disabled={busy !== null} onClick={() => void act("cancel")}>{busy === "cancel" ? "Cancelando…" : "Cancelar"}</button>}</div></div>}
     {isCodingActive(run.status) && <div className="execution-progress"><p role="status"><span className="small-dot" />{statusNames[run.status]}{run.agentStage ? ` · ${run.agents?.find((agent) => agent.role === run.agentStage)?.name ?? agentRoleNames[run.agentStage]}` : ""}</p><p className="muted">A execução continua na nuvem. Você pode voltar a este histórico para acompanhar.</p>{run.canCancel && <button className="button secondary small" disabled={busy !== null} onClick={() => void act("cancel")}><Icon name="stop" size={14} />{busy === "cancel" ? "Cancelando…" : "Cancelar tarefa"}</button>}</div>}
     {run.status === "interrupted" && !run.error && <Notice kind="info">A execução foi interrompida. Confira o último registro e o GitHub antes de criar outra tarefa, pois algum efeito pode precisar de confirmação.</Notice>}
     {run.status === "canceled" && <p className="muted execution-message">Tarefa cancelada. As alterações já publicadas, se houver, permanecem no GitHub.</p>}

@@ -14,6 +14,17 @@ let catalog = { version: 1, decisionMode: "team", selections: { coordinator: "cl
 let decision = { provider: "jev", model: "jev-latest", version: null, status: "missing", updatedAt: null, canRecommend: false };
 let goals = { version: 1, targets: { taskSuccessRate: 90, testPassRate: 95, durationMinutes: 15 }, canEdit: true };
 const mutationBodies = [];
+const connectionsBlocked = process.env.VELTRAM_FIXTURE_CONNECTIONS_BLOCKED === "true";
+let fixtureBudget = { version: 1, limitBrlMicros: 1000000000, updatedAt: now, updatedBy: "fixture-user" };
+let fixtureClaude = { enabled: !connectionsBlocked, state: connectionsBlocked ? "disconnected" : "connected", authMethod: "claude.ai", connectionVersion: 1, cliVersion: "2.1.300", busy: false, persistence: "native_snapshot", snapshotRetentionDays: 30 };
+if (process.env.VELTRAM_FIXTURE_CLAUDE_PENDING === "true") fixtureClaude = { ...fixtureClaude, state: "connecting", flow: { id: "fixture-old-flow", expiresAt: now + 900000, authorizationUrl: "https://claude.ai/oauth/authorize?fixture=never-open", codeSubmitted: false } };
+// Synthetic mission receipts only. This fixture never calls a model or repository.
+const missionReceipt = { runId: "fixture-mission-run", generation: 3, runUpdatedAt: now, observedAt: now, status: "completed", reviewApproved: true, test: { exitCode: 0, treeDigest: "a".repeat(64), finishedAt: now }, pullRequest: { url: "https://github.com/fixture-owner/example/pull/7", number: 7, branch: "veltram/fixture", commitSha: "b".repeat(40) } };
+const missionTemplate = { organizationId: "fixture-company", workspaceId: "fixture-workspace", createdBy: "fixture-user", version: 1, createdAt: now, updatedAt: now, repositoryConnectionId: "repo-fixture", baseRef: "main", provider: "anthropic", model: "fixture-model", modelSource: { kind: "claude-code", connectionVersion: 1 }, setupCommand: "npm ci", testCommand: "npm test", acceptanceCriteria: ["As entradas inválidas apresentam mensagem clara.", "Os testes de regressão passam."], delivery: "pull_request", deliveryEvidence: "not_observed" };
+const missions = [
+  { ...missionTemplate, missionId: "11111111-1111-4111-8111-111111111111", requestId: "11111111-1111-4111-8111-111111111111", goal: "Melhorar a validação do projeto de teste", status: "active", nextWakeAt: now + 30000, canPause: true, canCancel: true, tasks: [{ title: "Validar o formulário de cadastro", instructions: "Verificar entradas inválidas e incluir testes de regressão.", runId: "fixture-mission-run", attempt: 1, status: "completed", evidence: missionReceipt }, { title: "Explicar erros no formulário de acesso", instructions: "Apresentar mensagens claras para entradas inválidas e testar cada caso.", runId: "fixture-next-run", attempt: 1, status: "running" }] },
+  { ...missionTemplate, createdAt: now - 60000, missionId: "22222222-2222-4222-8222-222222222222", requestId: "22222222-2222-4222-8222-222222222222", goal: "Publicar a correção do projeto de teste", status: "awaiting_delivery", delivery: "merge_and_deploy", deliveryEvidence: "project_adapter_required", canCancel: true, tasks: [{ title: "Corrigir a mensagem de validação", instructions: "Corrigir a mensagem e comprovar a entrega pelo processo do projeto.", runId: "fixture-mission-run", attempt: 1, status: "completed", evidence: missionReceipt }] },
+];
 const marketplaceReceipts = new Map();
 const marketplaceDefinitions = [
   ...ombTeams.map((team) => ({ id: `omb-${team.slug}`, source: "omb", kind: "team", name: team.name, description: team.summary, category: team.category,
@@ -57,7 +68,7 @@ const server = createServer(async (request, response) => {
     const empty = url.pathname.includes("/fixture-empty/");
     if (url.pathname === "/api/session") return json(response, { user: { id: "fixture-user", name: "Conta de teste", email: "fixture@example.invalid" } });
     if (url.pathname === "/api/organizations") return json(response, { organizations: [{ id: "fixture-company", name: "Empresa de teste · fixture", role: "owner" }, { id: "fixture-empty", name: "Outra empresa · fixture", role: "member" }] });
-    if (url.pathname === "/fixture-inspect") return json(response, { catalog, decision, goals, mutationBodies });
+    if (url.pathname === "/fixture-inspect") return json(response, { catalog, decision, goals, missions, fixtureBudget, fixtureClaude, mutationBodies });
     const marketplace = url.pathname.match(/^\/api\/organizations\/(fixture-company|fixture-empty)\/marketplace(?:\/([^/]+))?$/);
     if (marketplace) {
       const state = empty ? { version: 0, agents: [], selections: null, decisionMode: "team" } : catalog;
@@ -84,7 +95,47 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname.endsWith("/workspaces")) return json(response, { workspaces: [{ id: empty ? "empty-workspace" : "fixture-workspace", name: "Fixture" }] });
     if (url.pathname.endsWith("/github")) return json(response, { configured: true, connections: [{ id: "repo-fixture", repositoryId: 1, installationId: 1, fullName: "fixture-owner/example", defaultBranch: "main", status: "active" }], pending: null, installUrl: null });
-    if (url.pathname.endsWith("/credentials")) return json(response, { credentials: [{ provider: "openai", version: 1, status: "configured", updatedAt: now }] });
+    if (url.pathname.endsWith("/credentials")) return json(response, { credentials: ["openai", "openrouter"].map(provider => ({ provider, version: 1, status: "configured", updatedAt: now })) });
+    if (url.pathname.endsWith("/me/claude-code")) return json(response, empty ? { ...fixtureClaude, state: "disconnected" } : fixtureClaude);
+    if (url.pathname.endsWith("/me/claude-code/login/fixture-old-flow/cancel") && request.method === "POST") {
+      fixtureClaude = { ...fixtureClaude, state: "disconnected", connectionVersion: fixtureClaude.connectionVersion + 1 }; delete fixtureClaude.flow;
+      mutationBodies.push({ path: url.pathname, body }); return json(response, fixtureClaude);
+    }
+    if (url.pathname.endsWith("/me/claude-code/logout") && request.method === "POST") {
+      if (empty) return json(response, { error: "not_found" }, 404);
+      if (body.expectedVersion !== fixtureClaude.connectionVersion) return json(response, { error: "claude_connection_changed" }, 409);
+      fixtureClaude = { ...fixtureClaude, state: "disconnected", connectionVersion: fixtureClaude.connectionVersion + 1 };
+      mutationBodies.push({ path: url.pathname, body }); return json(response, fixtureClaude);
+    }
+    if (url.pathname.endsWith("/budget")) {
+      if (request.method === "PUT") {
+        if (empty) return json(response, { error: "admin_required" }, 403);
+        if (body.expectedVersion !== fixtureBudget.version) return json(response, { error: "budget_configuration_changed" }, 409);
+        fixtureBudget = { ...fixtureBudget, version: fixtureBudget.version + 1, limitBrlMicros: body.limitBrlMicros, updatedAt: Date.now() };
+        mutationBodies.push({ path: url.pathname, body });
+      }
+      return json(response, { organizationId: empty ? "fixture-empty" : "fixture-company", day: "2026-10-15", timezone: "America/Sao_Paulo", currency: "BRL", unit: "micros", scope: "estimated_api_inference", exclusions: ["subscriptions", "infrastructure", "taxes", "payment_fees"], enforcement: { required: true, paidApiAvailable: !connectionsBlocked }, configuration: fixtureBudget, settledBrlMicros: 0, reservedBrlMicros: 0, carryoverBrlMicros: 0, availableBrlMicros: fixtureBudget.limitBrlMicros, overrunBlocked: false, canEdit: !empty });
+    }
+    const missionRoute = url.pathname.match(/^\/api\/organizations\/(fixture-company|fixture-empty)\/workspaces\/(fixture-workspace|empty-workspace)\/missions(?:\/([^/]+))?(?:\/(pause|resume|cancel))?$/);
+    if (missionRoute) {
+      if (request.method === "POST" && empty) return json(response, { error: "admin_required" }, 403);
+      if (request.method === "POST" && !missionRoute[3]) {
+        const known = missions.find(item => item.requestId === body.requestId); if (known) return json(response, { mission: known });
+        const mission = { ...missionTemplate, ...body, missionId: body.requestId, status: "active", createdAt: Date.now(), updatedAt: Date.now(), nextWakeAt: Date.now() + 30000, canPause: true, canCancel: true, tasks: body.tasks.map(task => ({ ...task, runId: randomUUID(), attempt: 1, status: "queued" })) };
+        if (!body.modelSource) delete mission.modelSource;
+        missions.unshift(mission); mutationBodies.push({ path: url.pathname, body }); return json(response, { mission }, 201);
+      }
+      if (!missionRoute[3]) return json(response, { missions: empty ? [] : missions, nextCursor: null });
+      const mission = empty ? null : missions.find(item => item.missionId === missionRoute[3]); if (!mission) return json(response, { error: "not_found" }, 404);
+      if (request.method === "POST") {
+        if (body.expectedVersion !== mission.version) return json(response, { error: "mission_state_changed" }, 409);
+        const action = missionRoute[4]; if (!action) return json(response, { error: "not_found" }, 404);
+        const status = action === "pause" ? "paused" : action === "resume" ? "active" : "canceled";
+        Object.assign(mission, { version: mission.version + 1, updatedAt: Date.now(), status, canPause: status === "active", canResume: status === "paused", canCancel: status !== "canceled", nextWakeAt: status === "active" ? Date.now() + 30000 : undefined });
+        mutationBodies.push({ path: url.pathname, body });
+      }
+      return json(response, { mission });
+    }
     if (url.pathname.endsWith("/agents")) return json(response, { version: 1, agents: legacyAgents });
     if (url.pathname.endsWith("/coding-runs")) {
       if (request.method === "POST") { const run = { ...codingRuns[0], ...body, runId: randomUUID(), requestId: body.requestId, createdAt: Date.now(), updatedAt: Date.now(), status: "pending_approval", canApprove: true, canCancel: true }; codingRuns.unshift(run); return json(response, { run }, 201); }

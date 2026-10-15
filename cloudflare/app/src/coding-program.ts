@@ -12,11 +12,16 @@ export function validateCodingTool(value: unknown): asserts value is CodingTool 
   const tool = value as CodingTool | undefined;
   const text = (s: unknown, max: number) => typeof s === "string" && s.isWellFormed() && !s.includes("\0") && new TextEncoder().encode(s).length <= max;
   const path = (s: unknown) => text(s, 1024) && (s as string).length > 0 && !(s as string).startsWith("/") && !(s as string).split(/[\\/]/).some(p => p === ".." || p.toLowerCase() === ".git");
+  const sourcePath = (s: unknown) => path(s) && !(s as string).includes("\\") && !(s as string).split("/").some(p => p !== "." && p.startsWith("."));
   if (!tool || typeof tool !== "object") throw new Error("invalid_coding_tool");
   if (tool.kind === "list_files" && path(tool.path)) return;
   if (tool.kind === "read_file" && path(tool.path) && Number.isSafeInteger(tool.offset) && tool.offset >= 0 && Number.isSafeInteger(tool.limit) && tool.limit > 0 && tool.limit <= CODING_OUTPUT_BYTES) return;
   if (tool.kind === "write_file" && path(tool.path) && (tool.content === null || text(tool.content, 1_048_576))) return;
   if (tool.kind === "run_command" && text(tool.command, 16_384) && tool.command.trim() && path(tool.cwd) && Number.isSafeInteger(tool.timeoutMs) && tool.timeoutMs > 0 && tool.timeoutMs <= 600_000) return;
+  if (tool.kind === "graft_map") return;
+  if (tool.kind === "graft_grep" && text(tool.pattern, 512) && tool.pattern.length > 0 && sourcePath(tool.path)) return;
+  if (tool.kind === "graft_skeleton" && sourcePath(tool.path)) return;
+  if (tool.kind === "graft_callers" && text(tool.symbol, 256) && tool.symbol.trim() && sourcePath(tool.path) && ["in", "out"].includes(tool.direction) && [1, 2].includes(tool.depth)) return;
   throw new Error("invalid_coding_tool");
 }
 
@@ -144,7 +149,7 @@ def safe_path(value):
 def git(*args):
     return subprocess.check_output(['/usr/bin/git', '-c', 'safe.directory=' + str(root), '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', *args], cwd=root, env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'HOME': '/tmp/veltram-home'})
 def paths(data): return [p.decode('utf-8', 'strict') for p in data.split(b'\0') if p]
-def quiesce_repository():
+def quiesce_repository(uid=1000):
     # A shell may leave descendants with redirected output. UID1000 has no
     # capabilities and cannot change identity; stop every live descendant before
     # trusting a filesystem observation. Zombies cannot mutate the checkout.
@@ -155,7 +160,7 @@ def quiesce_repository():
             if not entry.name.isdigit(): continue
             try:
                 status = dict(line.split(':', 1) for line in (entry / 'status').read_text().splitlines() if ':' in line)
-                if 1000 in [int(uid) for uid in status.get('Uid', '').split()] and not status.get('State', '').strip().startswith('Z'):
+                if uid in [int(value) for value in status.get('Uid', '').split()] and not status.get('State', '').strip().startswith('Z'):
                     active.append(int(entry.name))
             except (FileNotFoundError, ProcessLookupError): pass
         if not active: return
@@ -217,6 +222,29 @@ try:
             env['REQUESTS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
             env['SSL_CERT_FILE'] = '/etc/ssl/certs/ca-certificates.crt'
         os.execvpe('/bin/bash', ['bash', '--noprofile', '--norc', '-c', tool['command']], env)
+    elif kind in ['graft_map', 'graft_grep', 'graft_skeleton', 'graft_callers']:
+        # The root launcher only quiesces/calls a fixed program. The parser itself
+        # has a distinct unprivileged UID; repository code cannot poison its index.
+        quiesce_repository()
+        quiesce_repository(1001)
+        runtime = pathlib.Path('/workspace/.veltram-graft')
+        runtime.mkdir(exist_ok=True)
+        runtime.chmod(0o700)
+        os.chown(runtime, 1001, 1001)
+        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(runtime), 'CI': '1', 'DO_NOT_TRACK': '1', 'GRAFT_NO_SEED': '1', 'GRAFT_REFRESH': 'hash', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CEILING_DIRECTORIES': str(runtime)}
+        argv = ['/usr/bin/setpriv', '--reuid=1001', '--regid=1001', '--clear-groups', '--bounding-set=-all', '--inh-caps=-all', '--ambient-caps=-all', '--no-new-privs', '/usr/local/bin/node', '--max-old-space-size=384', '/opt/veltram-graft/query.mjs']
+        reason = 'graft_unavailable'
+        try:
+            result = subprocess.run(argv, input=json.dumps({'identity': tool['identity'], 'tool': tool}).encode(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd='/opt/veltram-graft', timeout=55)
+            if result.returncode == 0 and len(result.stdout) <= 32000:
+                value = json.loads(result.stdout)
+                if isinstance(value, dict) and isinstance(value.get('available'), bool):
+                    sys.stdout.write(result.stdout.decode('utf-8', 'strict'))
+                    sys.exit(0)
+        except subprocess.TimeoutExpired: reason = 'graft_timeout'
+        except (OSError, ValueError): pass
+        finally: quiesce_repository(1001)
+        print(json.dumps({'available': False, 'version': '0.22.0', 'reason': reason, 'fallback': 'Use list_files/read_file for direct source inspection.'}))
     elif kind == 'list_files':
         directory = safe_path(tool['path'])
         if not directory.is_dir(): raise ValueError('invalid_directory')

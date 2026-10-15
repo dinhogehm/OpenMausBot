@@ -1,0 +1,7 @@
+{
+  "name": "@veltram/graft-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": { "@nanonets/graft": "0.22.0" }
+}

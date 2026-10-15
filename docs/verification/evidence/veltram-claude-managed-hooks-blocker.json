@@ -1,0 +1,68 @@
+{
+  "recordedAt": "2026-10-15T03:11:51.352254+00:00",
+  "status": "activation_blocked",
+  "cliVersion": "2.1.300",
+  "environment": "Disposable Docker linux/amd64, --network none; mock API only on container loopback",
+  "authenticated": false,
+  "paidModelRequests": 0,
+  "accountCredentialsRead": false,
+  "checks": [
+    {
+      "scenario": "production flags, model structured output",
+      "passed": true
+    },
+    {
+      "scenario": "production flags, model attempts Bash",
+      "passed": true,
+      "commandExecuted": false
+    },
+    {
+      "scenario": "managed SessionStart hook with disableAllHooks false",
+      "passed": false,
+      "commandExecuted": true
+    },
+    {
+      "scenario": "managed SessionStart hook only plus CLI settings disableAllHooks true",
+      "passed": false,
+      "commandExecuted": true
+    },
+    {
+      "scenario": "managed SessionStart hook and disableAllHooks false plus CLI settings disableAllHooks true",
+      "passed": false,
+      "commandExecuted": true
+    }
+  ],
+  "effect": "Synthetic hook touched /tmp/unsafe-hook-ran inside the disposable container only",
+  "command": "VELTRAM_CLAUDE_DOCKER_PROOF=1 node --experimental-strip-types --test test/claude-runtime.native.test.ts",
+  "exitCode": 1,
+  "tests": {
+    "passed": 2,
+    "failed": 3
+  },
+  "flags": [
+    "--safe-mode",
+    "--restricted",
+    "--tools empty",
+    "--disallowedTools mcp__*",
+    "--setting-sources empty",
+    "--strict-mcp-config",
+    "--mcp-config empty"
+  ],
+  "conclusion": "The native binary executes managed command hooks despite this restricted invocation. A managed hook shares the individual CLI home. Model tools alone are not a complete boundary for untrusted managed policy.",
+  "limits": "No authenticated remote policy delivery was exercised. File-managed policy reproduces the documented managed-hook behavior; official documentation says remote settings can deliver hooks and take precedence over local managed and SDK parent settings. This is an activation blocker, not proof of a cross-tenant escape.",
+  "requiredBeforeActivation": "Qualify a supported host control or separate OS enforcement that blocks managed hooks, provider rerouting and arbitrary native commands while preserving original authentication; re-run the adversarial native tests and Cloudflare proof as required by any runtime/image changes.",
+  "productionFlag": "CLAUDE_CODE_ENABLED remains false",
+  "sources": [
+    "https://code.claude.com/docs/en/cli-reference#cli-flags",
+    "https://code.claude.com/docs/en/hooks#disable-or-remove-hooks",
+    "https://code.claude.com/docs/en/managed-settings#how-claude-code-combines-managed-sources",
+    "https://code.claude.com/docs/en/managed-settings#let-an-embedding-host-add-policy",
+    "https://code.claude.com/docs/en/server-managed-settings"
+  ],
+  "sha256": {
+    "cloudflare/app/src/claude-program.ts": "0b98af5a9300c72793e9f45a766a81dfba5ccf8820fb9e05e2e617b337e06b5a",
+    "cloudflare/app/Dockerfile.claude": "c51d8ece887a53d321c5c75d087c10d748f9e2b6319fc7f12037a625cd933ba6",
+    "cloudflare/app/test/claude-runtime.native.test.ts": "e0f30b14ee3848937d23be1a1c70f9d5ff4003adc5c503d16584cf09ffe6aa79",
+    "cloudflare/app/test/fixtures/claude-native-fixture.cjs": "96b754c152f2d284d0f052ab7beb89e939c1d1c0ea71fc550838dce86f14b440"
+  }
+}

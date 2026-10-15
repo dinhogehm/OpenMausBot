@@ -407,6 +407,69 @@ it("requires current administration and generation before approval, and fences s
   expect(mutations).toHaveLength(0);
 });
 
+it.each(["token reservation", "credential authorization"] as const)("does not dispatch a model after cancellation during %s", async (boundary) => {
+  const f = await fixture(); const executor = await fakeExecutor(f);
+  const run = await create(f); await approve(f, run); await f.alarm();
+  let release!: () => void, reached = false;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let restore = () => {};
+  await runInDurableObject(f.stub, (instance) => {
+    if (boundary === "token reservation") {
+      // Complete the durable reservation, but hold its continuation before dispatch.
+      // Cancel must cover this window even when no provider call has started yet.
+      const room = instance as unknown as { saveActive(entry: { phase: string; run: CodingRecord }): Promise<void> };
+      const original = room.saveActive.bind(room);
+      const spy = vi.spyOn(room, "saveActive").mockImplementation(async (entry) => {
+        await original(entry);
+        if (!reached && entry.phase === "model" && entry.run.modelCalls === 1) { reached = true; await gate; }
+      });
+      restore = () => spy.mockRestore();
+    } else {
+      // Let the real credential lookup finish, then delay delivery to the broker.
+      // A signal checked only before its awaited authorization cannot stop this race.
+      const bound = (instance as unknown as { env: AppEnv }).env, database = bound.DB;
+      bound.DB = new Proxy(database, { get(target, property) {
+        if (property === "prepare") return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (!sql.includes("SELECT id, key_version AS version, iv, ciphertext")) return statement;
+          return new Proxy(statement, { get(prepared, member) {
+            if (member === "bind") return (...values: unknown[]) => {
+              const query = prepared.bind(...values);
+              return new Proxy(query, { get(result, method) {
+                if (method === "first") return async () => {
+                  const credential = await result.first(); reached = true; await gate; return credential;
+                };
+                const value = Reflect.get(result, method); return typeof value === "function" ? value.bind(result) : value;
+              } });
+            };
+            const value = Reflect.get(prepared, member); return typeof value === "function" ? value.bind(prepared) : value;
+          } });
+        };
+        const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+      } });
+      restore = () => { bound.DB = database; };
+    }
+  });
+  const modelStep = f.alarm();
+  try {
+    await expect.poll(() => reached, { timeout: 15_000 }).toBe(true);
+    expect(modelReply).not.toHaveBeenCalled();
+    const response = await f.command("cancel", { generation: run.generation }, run.runId);
+    expect(response.status).toBe(200);
+    expect((await response.json() as { run: CodingRecord }).run).toMatchObject({ status: "canceled", generation: run.generation + 1 });
+  } finally { release(); await modelStep; restore(); }
+  const canceled = await get(f, run.runId);
+  expect(canceled.status).toBe("canceled");
+  expect(canceled.plan).toBeUndefined();
+  expect(canceled.result).toBeUndefined();
+  expect(modelReply).not.toHaveBeenCalled();
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith("https://api.openai.com/"))).toHaveLength(0);
+  expect(executor.init).toHaveBeenCalledTimes(1);
+  expect(executor.step).not.toHaveBeenCalled();
+  expect(executor.stop).toHaveBeenCalled();
+  expect(mutations).toHaveLength(0);
+});
+
 it("does not accept a late model result after cancellation or perform subsequent commands", async () => {
   const f = await fixture();
   const executor = await fakeExecutor(f);
@@ -575,4 +638,29 @@ it("rechecks frozen credential versions before model calls after a key rotation"
   const result = await drain(f, run.runId);
   expect(result.status).toBe("failed"); expect(result.error).toBe("coding_key_changed");
   expect(modelReply).not.toHaveBeenCalled(); expect(executor.stop).toHaveBeenCalled(); expect(mutations).toHaveLength(0);
+});
+
+it("tombstones a mission cancellation before creation arrives and cannot resurrect the task", async () => {
+  const f = await fixture();
+  const missionId = crypto.randomUUID(), runId = crypto.randomUUID();
+  const scope = { organizationId: f.organizationId, workspaceId: f.workspaceId, userId: f.userId, missionId };
+  const canceled = await f.stub.cancelFromMission({ ...scope, runId });
+  expect(canceled.run).toBeNull();
+  await runInDurableObject(f.stub, async (instance) => {
+    await expect(instance.createFromMission({ ...scope, input: { requestId: runId, repositoryConnectionId: f.connectionId, baseRef: "main", task: "Do not execute", provider: "openai", model: "fixture", setupCommand: "", testCommand: "npm test" } })).rejects.toThrow("coding_canceled");
+  });
+  expect((await f.stub.getFromMission({ ...scope, runId })).run).toBeNull();
+});
+
+it("creates and approves a mission task once and refuses cross-mission reads", async () => {
+  const f = await fixture(); await fakeExecutor(f);
+  const scope = { organizationId: f.organizationId, workspaceId: f.workspaceId, userId: f.userId, missionId: crypto.randomUUID() };
+  const input: CodingRunInput = { requestId: crypto.randomUUID(), repositoryConnectionId: f.connectionId, baseRef: "main", task: "Fix fixture", provider: "openai", model: "fixture", setupCommand: "", testCommand: "npm test" };
+  const first = await f.stub.createFromMission({ ...scope, input });
+  expect(first.run.status).toBe("queued"); expect(first.run.missionId).toBe(scope.missionId);
+  const replay = await f.stub.createFromMission({ ...scope, input });
+  expect(replay.run.approvedAt).toBe(first.run.approvedAt);
+  await runInDurableObject(f.stub, async (instance) => { await expect(instance.getFromMission({ ...scope, missionId: crypto.randomUUID(), runId: input.requestId })).rejects.toThrow("not_found"); });
+  const canceled = await f.stub.cancelFromMission({ ...scope, runId: input.requestId });
+  expect(canceled.run?.status).toBe("canceled");
 });

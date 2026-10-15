@@ -14,7 +14,11 @@ export type CodingTool =
   | { kind: "list_files"; path: string }
   | { kind: "read_file"; path: string; offset: number; limit: number }
   | { kind: "write_file"; path: string; content: string | null }
-  | { kind: "run_command"; command: string; cwd: string; timeoutMs: number };
+  | { kind: "run_command"; command: string; cwd: string; timeoutMs: number }
+  | { kind: "graft_map" }
+  | { kind: "graft_grep"; pattern: string; path: string }
+  | { kind: "graft_skeleton"; path: string }
+  | { kind: "graft_callers"; symbol: string; path: string; direction: "in" | "out"; depth: 1 | 2 };
 export interface CodingToolResult {
   output: string; exitCode: number; truncated: boolean;
   startedAt: number; finishedAt: number;
@@ -46,6 +50,7 @@ export interface CodingRunInput {
   requestId: string; repositoryConnectionId: string; baseRef: string;
   task: string; provider: CredentialProvider; model: string;
   setupCommand: string; testCommand: string;
+  modelSource?: { kind: "claude-code"; connectionVersion: number };
   agentSelections?: { catalogVersion: number; coordinator: string; programmer: string; reviewer: string };
 }
 export type AgentRole = "coordinator" | "programmer" | "reviewer";
@@ -55,6 +60,7 @@ export interface AgentProfile {
 }
 export interface ResolvedAgent extends Omit<AgentProfile, "provider"> {
   provider: CredentialProvider; credentialVersion: number;
+  modelSource?: { kind: "claude-code"; connectionVersion: number };
   profileId?: string; profileRevision?: number; catalogVersion?: number;
 }
 export interface CodingEvent {
@@ -62,6 +68,7 @@ export interface CodingEvent {
   text: string; exitCode?: number; truncated?: boolean;
 }
 export interface CodingRecord extends CodingRunInput, CodingIdentity {
+  missionId?: string;
   createdBy: string; approvedBy?: string; createdAt: number; updatedAt: number;
   approvedAt?: number; startedAt?: number; finishedAt?: number; publishedAt?: number;
   status: CodingStatus; repositoryName: string; credentialVersion: number;

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, errorMessage, formatDate, isAbort, organizationPath, type Credential, type Organization } from "./api";
 import { Icon, Loading, Notice, PageHeading } from "./components";
+import { Subscriptions } from "./subscriptions";
+import { BudgetSettings } from "./budget";
 
 const providers = [
   { id: "openai", name: "OpenAI", monogram: "O", description: "Modelos da OpenAI", className: "openai" },
@@ -34,8 +36,10 @@ export function Credentials({ organization }: { organization: Organization }) {
   }
 
   return <>
-    <PageHeading eyebrow="CONFIGURAÇÕES DA EMPRESA" title="Suas chaves. Seus modelos.">Cadastre as chaves de IA de {organization.name}. Elas pertencem a esta empresa e não são exibidas novamente após salvar.</PageHeading>
-    <div className="section-heading"><h2>Provedores de IA</h2><button className="text-button" disabled={loading} onClick={() => { setNotice(""); setAttempt((value) => value + 1); }}><Icon name="refresh" size={15} /> Atualizar</button></div>
+    <PageHeading eyebrow="CONEXÕES DE IA" title="Suas contas. Seus modelos.">Vincule sua conta pessoal ou cadastre uma chave de API para {organization.name}.</PageHeading>
+    <Subscriptions key={organization.id} organizationId={organization.id} />
+    <BudgetSettings key={`budget:${organization.id}`} organizationId={organization.id} />
+    <div className="section-heading"><h2>Chaves de API da empresa</h2><button className="text-button" disabled={loading} onClick={() => { setNotice(""); setAttempt((value) => value + 1); }}><Icon name="refresh" size={15} /> Atualizar</button></div>
     {error && <Notice>{error}</Notice>}
     {notice && <Notice kind="success">{notice}</Notice>}
     {!canManage && <Notice kind="info">Você pode consultar as configurações. Alterações de chaves exigem acesso de administrador.</Notice>}

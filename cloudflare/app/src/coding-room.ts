@@ -4,12 +4,14 @@ import { HttpError, json } from "./http";
 import { requireMembership } from "./organizations";
 import { authorizeRepository, prepareRepository, publishRepository, reconcileRepositoryPublication } from "./github";
 import { resolveAgents } from "./agent-profiles";
-import { appendToolResult, buildModelRequest, callModel, credentialVersion, type ModelCall, type ModelItem } from "./model-broker";
+import { appendToolResult, buildModelRequest, callModel, credentialVersion, nativeConnectionVersion, type ModelCall, type ModelItem, type ModelTurn } from "./model-broker";
 import { codingExecutorName, codingTerminal, codingView, parseCodingInput } from "./coding-state";
 import { confirmedCodingStop } from "./coding-admission";
 import { CODING_LIMITS, codingTreeDigest, type AgentRole, type CodingChange, type CodingRecord, type CodingTool, type CodingToolResult } from "./coding-types";
+import { budgetRequired } from "./budget-fetch";
 import { recordReportSnapshot } from "./reports";
 import type { ReportFact } from "./report-types";
+import { isMissionId, type MissionCodingScope } from "./mission-types";
 
 type Phase = "source" | "setup" | "model" | "tools" | "test_before" | "test_command" | "test_after" | "review_diff" | "publish" | "cleanup";
 interface Entry {
@@ -22,7 +24,7 @@ interface Command { organizationId: string; workspaceId: string; userId: string;
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 const safeError = (error: unknown) => {
   const code = error instanceof HttpError ? error.code : error instanceof Error ? error.message : "";
-  return /^(coding|github|model|executor)_[a-z_]{1,60}$/.test(code) ? code : "coding_execution_failed";
+  return /^(coding|github|model|executor|claude|budget)_[a-z_]{1,60}$/.test(code) ? code : "coding_execution_failed";
 };
 
 /** One company coordinator. Each task/generation receives a separate disposable VM. */
@@ -39,7 +41,59 @@ export class CodingRoom extends DurableObject<AppEnv> {
     });
   }
 
-  private async command(c: Command): Promise<Response> {
+  private async missionGate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
+      try { return { value: await operation() }; } catch (error) { return { error }; }
+    });
+    if ("error" in result) throw result.error;
+    return result.value;
+  }
+  private async missionScope(input: MissionCodingScope) {
+    if (!isMissionId(input.missionId)) throw new HttpError(400, "mission_invalid_input");
+    await requireMembership(this.env.DB, input.organizationId, input.userId, true);
+    if (!await this.env.DB.prepare("SELECT id FROM workspaces WHERE id=? AND organization_id=?").bind(input.workspaceId, input.organizationId).first()) throw new HttpError(404, "not_found");
+    const organization = await this.ctx.storage.get<string>("organization");
+    if (organization && organization !== input.organizationId) throw new HttpError(404, "not_found");
+    if (!organization) await this.ctx.storage.put("organization", input.organizationId);
+  }
+  async createFromMission(input: MissionCodingScope & { input: import("./coding-types").CodingRunInput }): Promise<{ run: CodingRecord }> {
+    return this.missionGate(async () => {
+      await this.missionScope(input);
+      if (await this.ctx.storage.get(`mission-canceled:${input.missionId}:${input.input.requestId}`)) throw new Error("coding_canceled");
+      await this.command({ ...input, action: "create", body: input.input as unknown as Record<string, unknown> }, input.missionId);
+      let entry = (await this.ctx.storage.get<Entry>(`run:${input.input.requestId}`))!;
+      if (entry.run.status === "pending_approval") {
+        await this.command({ ...input, action: "approve", runId: entry.run.runId, body: { generation: entry.run.generation } });
+        entry = (await this.ctx.storage.get<Entry>(`run:${entry.run.runId}`))!;
+      }
+      this.ctx.waitUntil(this.flushReports());
+      return { run: entry.run };
+    });
+  }
+  async getFromMission(input: MissionCodingScope & { runId: string }): Promise<{ run: CodingRecord | null }> {
+    return this.missionGate(async () => {
+      await this.missionScope(input);
+      if (!isMissionId(input.runId)) throw new HttpError(400, "mission_invalid_input");
+      const entry = await this.ctx.storage.get<Entry>(`run:${input.runId}`);
+      if (entry && (entry.run.missionId !== input.missionId || entry.run.workspaceId !== input.workspaceId || entry.run.createdBy !== input.userId)) throw new HttpError(404, "not_found");
+      return { run: entry?.run ?? null };
+    });
+  }
+  async cancelFromMission(input: MissionCodingScope & { runId: string }): Promise<{ run: CodingRecord | null }> {
+    return this.missionGate(async () => {
+      await this.missionScope(input);
+      if (!isMissionId(input.runId)) throw new HttpError(400, "mission_invalid_input");
+      const entry = await this.ctx.storage.get<Entry>(`run:${input.runId}`);
+      if (entry && (entry.run.missionId !== input.missionId || entry.run.workspaceId !== input.workspaceId)) throw new HttpError(404, "not_found");
+      // Retained even when create has not arrived; a late create can never resurrect it.
+      await this.ctx.storage.put(`mission-canceled:${input.missionId}:${input.runId}`, true);
+      if (entry && !codingTerminal(entry.run.status)) await this.command({ ...input, action: "cancel", body: { generation: entry.run.generation } });
+      this.ctx.waitUntil(this.flushReports());
+      return { run: (await this.ctx.storage.get<Entry>(`run:${input.runId}`))?.run ?? null };
+    });
+  }
+
+  private async command(c: Command, missionId?: string): Promise<Response> {
     const role = await requireMembership(this.env.DB, c.organizationId, c.userId, c.action === "approve");
     if (!await this.env.DB.prepare("SELECT id FROM workspaces WHERE id=? AND organization_id=?").bind(c.workspaceId, c.organizationId).first()) throw new HttpError(404, "not_found");
     const scope = await this.ctx.storage.get<string>("organization");
@@ -47,29 +101,32 @@ export class CodingRoom extends DurableObject<AppEnv> {
     if (!scope) await this.ctx.storage.put("organization", c.organizationId);
     if (c.action === "report-sync") return json({ synced: await this.flushReports() });
     if (c.action === "list") {
-      const entries = await this.ctx.storage.list<Entry>({ prefix: "run:", limit: 100 });
+      const recent = await this.ctx.storage.get<string[]>(`recent:${c.workspaceId}`);
+      const entries = recent ? await this.ctx.storage.get<Entry>(recent.map(id => `run:${id}`)) : await this.ctx.storage.list<Entry>({ prefix: "run:", limit: 100 });
       return json({ runs: [...entries.values()].filter((entry) => entry.run.workspaceId === c.workspaceId).map((entry) => codingView(entry.run, c.userId, role)).sort((a, b) => b.createdAt - a.createdAt) });
     }
     if (c.action === "create") {
       const input = parseCodingInput(c.body);
       const old = await this.ctx.storage.get<Entry>(`run:${input.requestId}`);
       if (old) {
-        if (old.run.createdBy !== c.userId || old.run.workspaceId !== c.workspaceId
+        if (old.run.createdBy !== c.userId || old.run.workspaceId !== c.workspaceId || old.run.missionId !== missionId
+          || JSON.stringify(old.run.modelSource ?? null) !== JSON.stringify(input.modelSource ?? null)
           || JSON.stringify(old.run.agentSelections ?? null) !== JSON.stringify(input.agentSelections ?? null)
-          || Object.entries(input).some(([key, value]) => key !== "agentSelections" && old.run[key as keyof CodingRecord] !== value)) throw new HttpError(409, "request_id_reused");
+          || Object.entries(input).some(([key, value]) => key !== "agentSelections" && key !== "modelSource" && old.run[key as keyof CodingRecord] !== value)) throw new HttpError(409, "request_id_reused");
         return json({ run: codingView(old.run, c.userId, role) });
       }
-      const count = await this.ctx.storage.get<number>("count") ?? 0;
-      if (count >= 100) throw new HttpError(429, "coding_history_limit");
       const connection = await authorizeRepository(this.env, c.organizationId, c.userId, input.repositoryConnectionId);
-      const agents = await resolveAgents(this.env, c.organizationId, input);
+      const agents = await resolveAgents(this.env, c.organizationId, input, c.userId);
       const now = Date.now();
-      const run: CodingRecord = { ...input, organizationId: c.organizationId, workspaceId: c.workspaceId,
+      const run: CodingRecord = { ...input, ...(missionId ? { missionId } : {}), organizationId: c.organizationId, workspaceId: c.workspaceId,
         runId: input.requestId, generation: 1, deadlineAt: 0, createdBy: c.userId, createdAt: now, updatedAt: now,
         status: "pending_approval", repositoryName: connection.fullName, credentialVersion: agents.find((agent) => agent.role === "programmer")!.credentialVersion,
         modelCalls: 0, tokens: 0, events: [], agents, agentStage: "coordinator" };
       const entry: Entry = { run, phase: "source", executorKey: codingExecutorName(run), dispatched: false, step: 0, history: {}, calls: [], repairAttempts: 0, reporting: { startedAt: now, outbox: [] } };
-      await this.ctx.storage.put({ [`run:${run.runId}`]: entry, ...this.reportPending(entry), count: count + 1 });
+      const recentKey = `recent:${c.workspaceId}`;
+      let recent = await this.ctx.storage.get<string[]>(recentKey);
+      if (!recent) recent = [...(await this.ctx.storage.list<Entry>({ prefix: "run:", limit: 100 })).values()].filter(value => value.run.workspaceId === c.workspaceId).sort((a,b) => b.run.createdAt - a.run.createdAt).map(value => value.run.runId);
+      await this.ctx.storage.put({ [`run:${run.runId}`]: entry, ...this.reportPending(entry), [recentKey]: [run.runId, ...recent].slice(0, 100) });
       return json({ run: codingView(run, c.userId, role) }, 201);
     }
     const entry = await this.ctx.storage.get<Entry>(`run:${c.runId}`);
@@ -155,14 +212,21 @@ export class CodingRoom extends DurableObject<AppEnv> {
     await requireMembership(this.env.DB, run.organizationId, run.createdBy);
     await requireMembership(this.env.DB, run.organizationId, run.approvedBy!, true);
     const connection = await authorizeRepository(this.env, run.organizationId, run.createdBy, run.repositoryConnectionId);
-    for (const agent of run.agents ?? []) if (await credentialVersion(this.env, run.organizationId, agent.provider) !== agent.credentialVersion) throw new Error("coding_key_changed");
+    if (budgetRequired(this.env) && !run.modelSource) throw new Error("budget_billing_unqualified");
+    if (run.modelSource) await nativeConnectionVersion(this.env, run.organizationId, run.createdBy, run.modelSource.connectionVersion);
+    else for (const agent of run.agents ?? []) if (await credentialVersion(this.env, run.organizationId, agent.provider) !== agent.credentialVersion) throw new Error("coding_key_changed");
     return connection;
   }
   private async assertActive(entry: Entry) {
     const current = await this.ctx.storage.get<Entry>(`run:${entry.run.runId}`);
     if (!current || current.run.generation !== entry.run.generation || codingTerminal(current.run.status)) throw new Error("coding_canceled");
     if (entry.run.deadlineAt <= Date.now()) throw new Error("coding_deadline_elapsed");
-    return this.authorize(entry.run);
+    const connection = await this.authorize(entry.run);
+    // Authorization can suspend on D1/GitHub. Cancellation may commit meanwhile.
+    const latest = await this.ctx.storage.get<Entry>(`run:${entry.run.runId}`);
+    if (!latest || latest.run.generation !== entry.run.generation || codingTerminal(latest.run.status)) throw new Error("coding_canceled");
+    if (entry.run.deadlineAt <= Date.now()) throw new Error("coding_deadline_elapsed");
+    return connection;
   }
   private async saveActive(entry: Entry) {
     await this.ctx.storage.transaction(async (txn) => {
@@ -287,10 +351,14 @@ export class CodingRoom extends DurableObject<AppEnv> {
       const callId = `s${entry.step}`, modelStartedAt = Date.now();
       const agentFact = { agentId: agent?.profileId ?? `role:${run.agentStage ?? "programmer"}`, agentRole: run.agentStage ?? "programmer", agentName: agent?.name ?? "Programador", callId };
       entry.reporting?.outbox.push({ id: `model-start:${callId}`, kind: "model_started", at: modelStartedAt, ...agentFact });
-      await this.saveActive(entry); // Unknown provider response is charged conservatively and never retried.
-      this.#modelAbort = new AbortController();
-      const turn = await callModel(this.env, run, history, this.#modelAbort.signal);
-      this.#modelAbort = undefined;
+      const controller = new AbortController();
+      this.#modelAbort = controller;
+      let turn: ModelTurn;
+      try {
+        await this.saveActive(entry); // Unknown response remains reserved and is never retried.
+        await this.assertActive(entry);
+        turn = await callModel(this.env, run, history, controller.signal);
+      } finally { if (this.#modelAbort === controller) this.#modelAbort = undefined; }
       await this.observeReportFact(entry, { id: `model-usage:${callId}`, kind: "model_observed", at: Date.now(), ...agentFact, tokens: turn.tokens, durationMs: Math.max(0, Date.now() - modelStartedAt) });
       run.tokens += Math.max(0, turn.tokens) - reserve;
       history.push(...turn.items); entry.calls = turn.calls;
@@ -324,7 +392,7 @@ export class CodingRoom extends DurableObject<AppEnv> {
         }
       } else {
         const result = await this.tool(entry, call.tool);
-        const description = call.tool.kind === "run_command" ? `$ ${call.tool.command}` : `${call.tool.kind}: ${call.tool.path}`;
+        const description = call.tool.kind === "run_command" ? `$ ${call.tool.command}` : call.tool.kind === "graft_map" ? "graft_map" : `${call.tool.kind}: ${call.tool.path}`;
         this.event(entry, "tool", `${description}\n${result.output}`, result);
         appendToolResult(provider, this.history(entry), call, JSON.stringify(result));
         entry.phase = entry.calls.length ? "tools" : "model";

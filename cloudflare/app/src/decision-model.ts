@@ -1,4 +1,5 @@
 import type { AppEnv } from "./env";
+import { assertBudgetAdapter, budgetRequired } from "./budget-fetch";
 import { decryptCredential, encryptCredential } from "./credentials";
 import { HttpError, json } from "./http";
 import { requireMembership } from "./organizations";
@@ -21,7 +22,7 @@ function view(value: Credential | null, canRecommend: boolean): DecisionModelSta
 export async function decisionModelRoute(env: AppEnv, organizationId: string, userId: string, method: string, body: Record<string, unknown>) {
   const role = await requireMembership(env.DB, organizationId, userId, method !== "GET");
   const current = await credential(env, organizationId);
-  if (method === "GET") return json(view(current, role !== "member"));
+  if (method === "GET") return json(view(current, role !== "member" && !budgetRequired(env)));
   if (method !== "PUT" && method !== "DELETE") throw new HttpError(404, "not_found");
   const expected = body.expectedVersion;
   if (expected !== null && (!Number.isSafeInteger(expected) || Number(expected) < 1 || Number(expected) >= Number.MAX_SAFE_INTEGER)) throw new HttpError(400, "invalid_version");
@@ -50,7 +51,7 @@ export async function decisionModelRoute(env: AppEnv, organizationId: string, us
     SELECT ?,organization_id,'jev',id,version,?,?,? FROM decision_credentials WHERE organization_id=? AND mutation_id=?`)
     .bind(mutationId, method === "DELETE" ? "revoked" : current ? "rotated" : "configured", userId, now, organizationId, mutationId)]);
   if (results[0].meta.changes !== 1) { await requireMembership(env.DB, organizationId, userId, true); throw new HttpError(409, "credential_changed"); }
-  return json(view({ id, version, status, iv: null, ciphertext: null, updated_at: now }, true));
+  return json(view({ id, version, status, iv: null, ciphertext: null, updated_at: now }, !budgetRequired(env)));
 }
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -100,6 +101,7 @@ async function responseBody(response: Response): Promise<unknown> {
 }
 export async function recommendAgents(env: AppEnv, organizationId: string, userId: string, body: Record<string, unknown>, requestFetch: typeof fetch = fetch) {
   await requireMembership(env.DB, organizationId, userId, true);
+  assertBudgetAdapter(env, "jev");
   const task = body.task;
   if (typeof task !== "string" || !task.isWellFormed() || !task.trim() || task.length > 4000 || task.includes("\0")
     || !Number.isSafeInteger(body.catalogVersion) || Number(body.catalogVersion) < 1) throw new HttpError(400, "invalid_recommendation");

@@ -17,9 +17,16 @@ export function parseCodingInput(body: Record<string, unknown>): CodingRunInput 
     || !/^[\w-]+$/.test(repositoryConnectionId) || !/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(baseRef)
     || baseRef.includes("..") || baseRef.includes("//") || baseRef.endsWith("/") || !/^[A-Za-z0-9_][A-Za-z0-9_./:@-]*$/.test(model)
     || !["openai", "anthropic", "openrouter"].includes(String(body.provider))) throw new HttpError(400, "invalid_coding_task");
+  let modelSource: CodingRunInput["modelSource"];
+  if (body.modelSource !== undefined) {
+    const source = body.modelSource as Record<string, unknown> | null;
+    if (!source || source.kind !== "claude-code" || body.provider !== "anthropic" || !Number.isSafeInteger(source.connectionVersion) || Number(source.connectionVersion) < 1) throw new HttpError(400, "invalid_coding_task");
+    modelSource = { kind: "claude-code", connectionVersion: Number(source.connectionVersion) };
+  }
   return { requestId, repositoryConnectionId, baseRef, model, provider: body.provider as CodingRunInput["provider"],
     task: string("task", 4000), setupCommand: string("setupCommand", 2000, true), testCommand: string("testCommand", 2000),
-    ...(body.agentSelections === undefined ? {} : { agentSelections: parseAgentSelections(body.agentSelections) }) };
+    ...(body.agentSelections === undefined ? {} : { agentSelections: parseAgentSelections(body.agentSelections) }),
+    ...(modelSource ? { modelSource } : {}) };
 }
 export function codingTerminal(status: CodingStatus): boolean {
   return ["completed", "failed", "canceled", "interrupted"].includes(status);

@@ -6,11 +6,14 @@
   "scripts": {
     "dev": "wrangler dev",
     "test": "pnpm test:unit && vitest run",
-    "test:unit": "node --experimental-strip-types --test test/execution.test.ts test/credentials.test.ts test/linux-proof.test.ts test/coding-program.test.ts web/test/run-state.test.ts web/test/api.test.ts web/test/coding-state.test.ts web/test/kanban-state.test.ts test/report-period.test.ts web/test/agent-catalog-state.test.ts web/test/report-state.test.ts web/test/browser-state.test.ts",
+    "test:unit": "node --experimental-strip-types --test test/execution.test.ts test/credentials.test.ts test/linux-proof.test.ts test/coding-program.test.ts web/test/run-state.test.ts web/test/api.test.ts web/test/coding-state.test.ts web/test/kanban-state.test.ts test/report-period.test.ts web/test/agent-catalog-state.test.ts web/test/report-state.test.ts web/test/browser-state.test.ts test/claude-program.test.ts web/test/mission-state.test.ts",
     "test:integration": "vitest run",
     "check": "tsc --noEmit && tsc -p web/tsconfig.json",
     "dry-run": "pnpm build && wrangler deploy --dry-run",
-    "build": "vite build --config web/vite.config.ts"
+    "build": "vite build --config web/vite.config.ts",
+    "test:graft": "npm --prefix graft ci --ignore-scripts --no-audit --no-fund && node --experimental-strip-types --test test/coding-graft.test.ts",
+    "test:graft:docker": "VELTRAM_GRAFT_DOCKER_TEST=1 node --experimental-strip-types --test test/coding-graft.docker.test.ts",
+    "test:claude:native": "VELTRAM_CLAUDE_DOCKER_PROOF=1 node --experimental-strip-types --test test/claude-runtime.native.test.ts"
   },
   "dependencies": {
     "@cloudflare/puppeteer": "1.4.0",

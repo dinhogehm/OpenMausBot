@@ -4,5 +4,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global pnpm@10.33.0 \
     && mkdir -p /tmp/veltram-home
+# Structural-only Graft. The lock pins every package; lifecycle scripts (including
+# upstream telemetry) never run. Native prebuilds/WASM grammars are in the package.
+COPY graft/package.json graft/package-lock.json /opt/veltram-graft/
+RUN cd /opt/veltram-graft && CI=1 DO_NOT_TRACK=1 npm ci --ignore-scripts --omit=dev --no-audit --no-fund \
+    && npm cache clean --force
+COPY graft/query.mjs graft/NOTICE.md graft/LICENSE.GRAFT /opt/veltram-graft/
 # The outbound interception CA is supplied at runtime, never baked into the image.
 ENTRYPOINT ["sh", "-c", "if [ -f /etc/cloudflare/certs/cloudflare-containers-ca.crt ]; then cp /etc/cloudflare/certs/cloudflare-containers-ca.crt /usr/local/share/ca-certificates/veltram-containers.crt && update-ca-certificates >/dev/null; fi; exec sleep infinity"]

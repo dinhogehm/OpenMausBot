@@ -1,7 +1,7 @@
 import type { AppEnv } from "./env";
 import { HttpError, json } from "./http";
 import { requireMembership } from "./organizations";
-import { credentialVersion } from "./model-broker";
+import { credentialVersion, nativeConnectionVersion } from "./model-broker";
 import type { AgentProfile, CodingRunInput, ResolvedAgent } from "./coding-types";
 import { catalogueInstructions, parseAgentSelections, readAgentCatalog } from "./agent-catalog";
 
@@ -48,7 +48,9 @@ export async function agentProfilesRoute(env: AppEnv, organizationId: string, us
   } else if (result.meta.changes !== 1) throw new HttpError(409, "agents_changed");
   return json({ version: Number(expected) + 1, agents });
 }
-export async function resolveAgents(env: AppEnv, organizationId: string, input: CodingRunInput): Promise<ResolvedAgent[]> {
+export async function resolveAgents(env: AppEnv, organizationId: string, input: CodingRunInput, userId?: string): Promise<ResolvedAgent[]> {
+  const source = input.modelSource;
+  const nativeVersion = source ? await nativeConnectionVersion(env, organizationId, userId ?? "", source.connectionVersion) : undefined;
   const catalogue = await readAgentCatalog(env, organizationId);
   const selection = input.agentSelections === undefined
     ? catalogue.selections && { catalogVersion: catalogue.version, ...catalogue.selections }
@@ -61,10 +63,11 @@ export async function resolveAgents(env: AppEnv, organizationId: string, input: 
       return { role, name: profile.name, instructions: catalogueInstructions(profile), provider: input.provider, model: input.model,
         profileId: profile.id, profileRevision: profile.revision, catalogVersion: catalogue.version };
     });
-    const version = await credentialVersion(env, organizationId, input.provider);
-    return profiles.map((profile) => ({ ...profile, credentialVersion: version }));
+    const version = nativeVersion ?? await credentialVersion(env, organizationId, input.provider);
+    return profiles.map((profile) => ({ ...profile, credentialVersion: version, ...(source ? { modelSource: source } : {}) }));
   }
   const team = await readAgentTeam(env, organizationId);
+  if (source) return team.agents.map((agent) => ({ ...agent, provider: "anthropic", model: input.model, credentialVersion: nativeVersion!, modelSource: source }));
   return Promise.all(team.agents.map(async (agent) => {
     const provider = agent.provider === "inherit" ? input.provider : agent.provider;
     return { ...agent, provider, model: agent.model || input.model, credentialVersion: await credentialVersion(env, organizationId, provider) };

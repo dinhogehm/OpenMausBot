@@ -1,0 +1,75 @@
+{
+  "name": "veltram-claude-proof-60cdf9c513b7",
+  "startedAt": "2026-10-15T03:00:41.951Z",
+  "accountId": "768841fa976bce74242ce11c4e98bc9d",
+  "expiresAt": "2026-10-15T03:20:41.951Z",
+  "productionTouched": false,
+  "sourceHashes": {
+    "Dockerfile.claude": "c51d8ece887a53d321c5c75d087c10d748f9e2b6319fc7f12037a625cd933ba6",
+    "src/claude-runtime.ts": "616a43d8eadb0e4a3d8b063c0c20b8a614e2fab5a7413b88a1212eb8b70c1a0b",
+    "src/claude-program.ts": "0b98af5a9300c72793e9f45a766a81dfba5ccf8820fb9e05e2e617b337e06b5a",
+    "src/claude-types.ts": "e659162c4a46f938f5eaa4b1314f9ca352b377cf2f05b7bac5d405f370df3500",
+    "test/fixtures/claude-remote-worker.ts": "ca5b3728944bd98170d4dabe0569e038c7176e17e6c857f34e559eb04bf752ef",
+    "test/claude-runtime.remote.mjs": "0820f5c581a3577b63a1317f6e0bb29fcab0601ecf7ca27e104b861be7c2c0ba"
+  },
+  "checks": {
+    "unauthorized": 403,
+    "wrongToken": 403,
+    "httpStatus": 200,
+    "runtime": {
+      "checks": {
+        "initiallyLoggedOut": true,
+        "unprivileged": true,
+        "snapshotBytes": 60975,
+        "snapshotCreated": true,
+        "firstDestroyed": true,
+        "markerRestored": true,
+        "restoredLoggedOut": true,
+        "finalDestroyed": true
+      },
+      "failure": null,
+      "authenticated": false,
+      "paidModelRequests": 0,
+      "snapshotContains": "filesystem and public synthetic marker; no account credentials",
+      "snapshotRetention": "30 days; platform has no delete API"
+    }
+  },
+  "cleanup": {
+    "errors": [],
+    "workerDeleteExit": 0,
+    "remainingContainers": [],
+    "images": [
+      {
+        "image": "veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude:rootfs-set-48ac5839c24133d9fee03c9f1d6b006f82da8fcf80a26ecf74a2199912020acc",
+        "exit": 0
+      },
+      {
+        "image": "veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude:rootfs-snapshot-5dee6a872f9ff1e123f482970a8f8745bce365aedcca922a2e3d9b25b03740c5",
+        "exit": 0
+      },
+      {
+        "image": "veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude:wrangler-mv8ybod2",
+        "exit": 0
+      }
+    ],
+    "remainingImages": [],
+    "finalHttpStatus": 404
+  },
+  "logs": {
+    "deploy": "\n ⛅️ wrangler 4.151.0\n────────────────────\n#0 building with \"desktop-linux\" instance using docker driver\n\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 720B done\n#1 DONE 0.0s\n\n#2 [internal] load metadata for docker.io/library/node:24.20.0-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0\n#2 DONE 0.0s\n\n#3 [internal] load .dockerignore\n#3 transferring context: 2B done\n#3 DONE 0.0s\n\n#4 [1/2] FROM docker.io/library/node:24.20.0-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0\n#4 resolve docker.io/library/node:24.20.0-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0 0.0s done\n#4 DONE 0.0s\n\n#5 [2/2] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates util-linux     && rm -rf /var/lib/apt/lists/*     && npm install --global @anthropic-ai/claude-code@2.1.300     && /usr/local/bin/claude --version | grep -F '2.1.300'     && mkdir -p /home/claude/.claude /opt/veltram/request     && chown -R 1000:1000 /home/claude     && chmod 700 /home/claude /home/claude/.claude     && chmod 555 /opt/veltram/request\n#5 CACHED\n\n#6 exporting to image\n#6 exporting layers\n#6 exporting layers done\n#6 exporting manifest sha256:3bb9dd12ab150d9911f30ad0d7960fb151fb4eb839871f7cc6b3cf9f37054011 done\n#6 exporting config sha256:c1c31756c53643a2932b4b9ef0d605dc6c37c8e9efbbc0be08099d24cc16744b done\n#6 naming to docker.io/library/veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude:wrangler-mv8ybod2 done\n#6 DONE 0.0s\n\nView build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/tqjyfxmw57jij4wj9s0bhj8li\nLogin Succeeded\nImage does not exist remotely, pushing: registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude:wrangler-mv8ybod2\nUntagged: veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude:wrangler-mv8ybod2\nThe push refers to repository [registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude]\n636d97508c53: Waiting\n6310eb16bf42: Waiting\nde61e764aefe: Waiting\n0f2155a59774: Waiting\n0f2155a59774: Waiting\n636d97508c53: Waiting\n6310eb16bf42: Waiting\nde61e764aefe: Waiting\n0f2155a59774: Waiting\n636d97508c53: Waiting\n6310eb16bf42: Waiting\nde61e764aefe: Waiting\n636d97508c53: Waiting\n6310eb16bf42: Waiting\nde61e764aefe: Waiting\n0f2155a59774: Waiting\nde61e764aefe: Waiting\n0f2155a59774: Waiting\n636d97508c53: Waiting\n6310eb16bf42: Waiting\n6310eb16bf42: Layer already exists\nde61e764aefe: Layer already exists\n0f2155a59774: Layer already exists\nc04f797437f1: Waiting\nd30282f749d3: Waiting\n636d97508c53: Layer already exists\nc04f797437f1: Waiting\nd30282f749d3: Waiting\nc04f797437f1: Waiting\nd30282f749d3: Waiting\nc04f797437f1: Layer already exists\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Waiting\nd30282f749d3: Pushed\nwrangler-mv8ybod2: digest: sha256:3bb9dd12ab150d9911f30ad0d7960fb151fb4eb839871f7cc6b3cf9f37054011 size: 1438\n├ Preparing claude for Cloudflare Containers\n│   registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude@sha256:3bb9dd12ab150d9911f30ad0d7960fb151fb4eb839871f7cc6b3cf9f37054011\n│\n├ claude is ready to run\n│   registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude@sha256:3bb9dd12ab150d9911f30ad0d7960fb151fb4eb839871f7cc6b3cf9f37054011\n│\nTotal Upload: 16.46 KiB / gzip: 5.09 KiB\nWorker Startup Time: 5 ms\nYour Worker has access to the following bindings:\nBinding                                                                  Resource                  \nenv.PROOF (ClaudeSnapshotProof)                                          Durable Object            \nenv.FIXTURE_TOKEN_HASH (\"21f2ae03962ff248878f91ef604a1098a1ec8...\")      Environment Variable      \nenv.FIXTURE_EXPIRES_AT (\"1792034441951\")                                 Environment Variable      \nenv.FIXTURE_RUN_ID (\"veltram-claude-proof-60cdf9c513b7\")                 Environment Variable      \n\nThe following containers are available:\n- ClaudeSnapshotProof (durable_object)\n\nUploaded veltram-claude-proof-60cdf9c513b7 (105.27 sec)\nDeployed veltram-claude-proof-60cdf9c513b7 triggers (2.79 sec)\n  https://veltram-claude-proof-60cdf9c513b7.dinhogehm.workers.dev\nCurrent Version ID: 98218bf2-47f1-4d0a-ab59-5f6b656b403d\n",
+    "delete": "\n ⛅️ wrangler 4.151.0\n────────────────────\nSuccessfully deleted veltram-claude-proof-60cdf9c513b7\n",
+    "deleteContainer": "\n ⛅️ wrangler 4.151.0\n────────────────────\n╭ Delete your container \n│\n╰ Your container has been deleted \n\n"
+  },
+  "origin": "https://veltram-claude-proof-60cdf9c513b7.dinhogehm.workers.dev",
+  "images": [
+    {
+      "name": "veltram-claude-proof-60cdf9c513b7-claudesnapshotproof-claude",
+      "tags": [
+        "rootfs-set-48ac5839c24133d9fee03c9f1d6b006f82da8fcf80a26ecf74a2199912020acc",
+        "rootfs-snapshot-5dee6a872f9ff1e123f482970a8f8745bce365aedcca922a2e3d9b25b03740c5",
+        "wrangler-mv8ybod2"
+      ]
+    }
+  ],
+  "finishedAt": "2026-10-15T03:03:26.025Z"
+}

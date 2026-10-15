@@ -10,6 +10,22 @@ export class ApiError extends Error {
 }
 
 const messages: Record<string, string> = {
+  claude_auth_method_unsupported: "Esta conexão nativa não usa o método Claude elegível para assinatura. Conecte uma conta compatível ou use uma API separadamente.",
+  claude_disabled: "A conexão Claude ainda não foi ativada neste serviço.",
+  claude_busy: "Sua conexão está em uso. Aguarde a operação atual.",
+  claude_reconnect_required: "Conecte novamente sua conta Claude em Conexões de IA.",
+  claude_connection_changed: "Sua conexão Claude mudou. Crie uma nova tarefa usando a conexão atual.",
+  claude_quota_exhausted: "O Claude atingiu o limite da conta. A execução parou sem trocar para uma API paga.",
+  claude_login_failed: "Não foi possível concluir o acesso ao Claude. Atualize a conexão e tente novamente.",
+  budget_exhausted: "O orçamento disponível acabou. A tarefa aguarda saldo no próximo dia ou ajuste do limite.",
+  budget_billing_unqualified: "O modo de cobrança desta chave ainda precisa ser verificado para permitir o controle de orçamento.",
+  budget_adapter_unqualified: "Este serviço ainda não possui controle de custo compatível com o orçamento obrigatório. Nenhuma chamada foi enviada.",
+  budget_provider_unsupported: "Este provedor ainda não tem controle de orçamento compatível. A chamada não foi enviada.",
+  budget_price_unavailable: "Não foi possível confirmar o preço deste modelo. A chamada não foi enviada.",
+  budget_quote_expired: "A cotação de preço expirou. Nenhuma chamada adicional foi autorizada.",
+  budget_request_reused: "A operação já foi registrada. Confira o resultado antes de criar outra.",
+  budget_state_changed: "O orçamento foi alterado em outra sessão. Atualize antes de salvar.",
+  budget_usage_uncertain: "O custo de uma chamada ainda não foi confirmado. O valor reservado permanece retido.",
   sign_in_required: "Sua sessão terminou. Entre novamente para continuar.",
   origin_forbidden: "Não foi possível confirmar esta solicitação. Atualize a página e tente novamente.",
   origin_not_configured: "Este endereço ainda não está pronto para acesso. Tente novamente mais tarde.",
