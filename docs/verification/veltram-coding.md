@@ -42,6 +42,22 @@ Identificador de release, versão Cloudflare ativa, migrações, HTTPS e hashes 
 
 Após a [configuração autorizada da GitHub App](veltram-github-setup.md), conferir por leitura a conta e o único repositório solicitado. Uma primeira tarefa real precisa de objetivo e comandos de preparação/teste definidos. O recibo deve ligar tarefa, SHA de origem, arquivos testados, saída do teste e PR em rascunho. O Veltram não faz merge nem deploy do repositório conectado.
 
+## Evidências de 14/10/2026
+
+- 70 testes unitários, 93 de integração e dois da configuração do operador aprovados. Tipos do backend/frontend, lint, build e dry-run de produção aprovados. Hooks de push do repositório (lint, tipos e catálogos) aprovados.
+- Revisão independente confirmou o fechamento da substituição de ferramentas do runtime e da perda de recibo de PR em cancelamento/reinício. Os testes do coordenador incluem 18 cenários, com serviços externos simulados.
+- [Prova remota final](evidence/veltram-coding-proof-df7240d01cee.json): uma VM real na Cloudflare executou o teste nativo em 23 segundos, incluindo um arquivo original de 24 MiB, privilégio removido, ferramentas protegidas, encerramento de processos em segundo plano, rede, edição, teste, diff, manifesto e cancelamento. Os hashes do recibo coincidem com os fontes do commit `4675f331db43303f16d824c308c16d841eaf725f`.
+- A fixture rejeitou credencial ausente/incorreta e empresa incorreta com 403. Worker, aplicação de contêiner e imagem temporários foram removidos, com inventários vazios e sem erro de limpeza. Não havia D1, GitHub, modelo pago ou dados de produção associados à fixture.
+- A primeira tentativa parou em 404 durante a propagação de `workers.dev`, sem iniciar o teste; seus recursos foram removidos. O runner agora aguarda disponibilidade de modo limitado. Os recibos preservam tanto essa tentativa quanto as duas provas aprovadas, sem apresentá-las como equivalentes.
+
+## Publicação e conexão verificadas
+
+O [recibo de produção](evidence/2026-10-14-veltram-coding-production.json) registra a release `veltram-2026-10-14.3`, do commit de runtime `4675f331db43303f16d824c308c16d841eaf725f`. A versão Cloudflare `50c6cf46-9dc8-432f-9e23-4044367ce78d` recebeu 100% do tráfego no deployment `69af0c85-a967-42de-a8fa-24b7565cc312`, criado em `2026-10-15T01:24:23.80072Z` (14/10, às 22:24 em Brasília). As migrações `0003_github.sql` e `0004_agents.sql` foram aplicadas; a conferência não encontrou migrações pendentes.
+
+Em `https://veltram.com`, saúde e página responderam 200, e os hashes do JavaScript e CSS publicados coincidiram com o build local. Na sessão de navegador autorizada, a GitHub App `VeltramApp` (ID `5324149`, slug `veltramapp`, instalação `171559276`) foi instalada somente em `dinhogehm/nuria-platform`. OAuth e seleção foram concluídos na empresa Nuria; a interface mostrou o repositório conectado, branch padrão `main`, e os três agentes disponíveis.
+
+A publicação e a conexão estão comprovadas. Nenhuma tarefa real de IA foi executada nem PR produzido por esses agentes no repositório conectado. A prova remota acima usa fonte sintética e verifica o executor isolado; os testes do coordenador usam respostas de modelos e GitHub simuladas. O recibo de produção não contém e-mails, cookies, tokens ou capturas de tela.
+
 ## Limites iniciais
 
 - Equipe fixa de três papéis, personalizável; modelos OpenAI, Anthropic e OpenRouter com chaves da empresa.

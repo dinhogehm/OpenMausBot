@@ -1,6 +1,6 @@
 # Veltram: empresas, credenciais e prova Linux
 
-Esta receita verifica `cloudflare/app`, não o servidor desktop. As fixtures locais usam workerd, D1 e Durable Objects locais, dados descartáveis e e-mail simulado. Nenhuma configuração do OpenMausBot local é importada. A versão `veltram-2026-10-14.2` está publicada em `https://veltram.com`; as evidências abaixo separam testes locais, executor remoto isolado e autenticação real autorizada por API.
+Esta receita verifica `cloudflare/app`, não o servidor desktop. As fixtures locais usam workerd, D1 e Durable Objects locais, dados descartáveis e e-mail simulado. Nenhuma configuração do OpenMausBot local é importada. As evidências abaixo registram a versão inicial `veltram-2026-10-14.2`, separando testes locais, executor remoto isolado e autenticação real autorizada por API. A publicação atual `veltram-2026-10-14.3`, com agentes e conexão GitHub, está documentada na [receita dos agentes](veltram-coding.md#publicação-e-conexão-verificadas).
 
 ## Testes automatizados
 

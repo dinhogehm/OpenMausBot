@@ -1,0 +1,99 @@
+{
+  "name": "veltram-coding-proof-df7240d01cee",
+  "startedAt": "2026-10-15T01:20:14.255Z",
+  "accountId": "768841fa976bce74242ce11c4e98bc9d",
+  "expiresAt": "2026-10-15T01:40:14.256Z",
+  "productionTouched": false,
+  "sourceHashes": {
+    "Dockerfile.coding": "fbcbc6a5a44f4c3760ed031d8fb442cd33bba069494f38664e9a119c22ebbc01",
+    "src/coding-executor.ts": "b716aa637279a2dbc0ec37f000c418d2eefc8350cd0743ff4416b473a8dd6593",
+    "src/coding-program.ts": "0a6935963a177aa7e1cb76ae568c87dcb760a15551a51c614a3dcd8f68799783",
+    "src/coding-network.ts": "7c069e816b18e9c8abf7cf28706ca204a3d5d3dbf7eac3070409ff172e822b2b",
+    "test/coding-executor.native.test.ts": "0915f4354c3e314a9b983b82cab648a7baa739bd84915a90db7fd89bcb256d8b",
+    "test/fixtures/coding-remote-worker.ts": "42c45a4b5859dce73bdecad21c3b98db307fa0dfe753d3eb01209a7c38a66101"
+  },
+  "checks": {
+    "propagation": [
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab01e04fc1f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab01ed1a41f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab01f9cc70f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab02068ef6f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab0213bac3f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab02209ed3f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab022d8b39f003-CFC"
+      },
+      {
+        "status": 404,
+        "server": "cloudflare",
+        "ray": "a4ab023a5f6af003-CFC"
+      },
+      {
+        "status": 403,
+        "server": "cloudflare",
+        "ray": "a4ab02470afcf003-CFC"
+      }
+    ],
+    "unauthorized": 403,
+    "lastProbeBody": "<!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 8]>    <html class=\"no-js ie8 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if gt IE 8]><!--> <html class=\"no-js\" lang=\"en-US\"> <!--<![endif]-->\n  <head>\n    <meta charSet=\"utf-8\"/>\n    <meta http-equiv=\"refresh\" content=\"30\">\n    <title>Page not found</title>\n    <link rel=\"icon\" type=\"image/png\" href=\"https://workers.cloudflare.com/favicon.ico\" sizes=\"48x48\"/>\n    <style>\n      body {\n        font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Roboto\", \"Oxygen\", \"Ubuntu\", \"Cantarell\", \"Fira Sans\", \"Droid Sans\", \"Helvetica Neue\", sans-serif\n      }\n      body,html {\n        margin: 0;\n        padding: 0;\n      }\n      * {\n        box-sizing: border-box;\n      }\n      .box {\n        display: flex;\n        flex-direction: column;\n        justify-content: center;\n        height: 100vh;\n        background-color: ",
+    "wrongToken": 403,
+    "wrongScope": 403,
+    "nativeAcceptanceExit": 0
+  },
+  "cleanup": {
+    "errors": [],
+    "workerDeleteExit": 0,
+    "containerDeleteExit": 0,
+    "remainingContainers": [],
+    "images": [
+      {
+        "image": "veltram-coding-proof-df7240d01cee-codingexecutor-coding:wrangler-mv8uqgvg",
+        "exit": 0
+      }
+    ],
+    "remainingImages": [],
+    "finalHttpStatus": 404
+  },
+  "logs": {
+    "deploy": "\n ⛅️ wrangler 4.151.0\n────────────────────\n#0 building with \"desktop-linux\" instance using docker driver\n\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 685B done\n#1 DONE 0.0s\n\n#2 [internal] load metadata for docker.io/library/node:24.20.0-trixie-slim\n#2 DONE 0.0s\n\n#3 [internal] load .dockerignore\n#3 transferring context: 2B done\n#3 DONE 0.0s\n\n#4 [1/2] FROM docker.io/library/node:24.20.0-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0\n#4 resolve docker.io/library/node:24.20.0-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0 done\n#4 DONE 0.0s\n\n#5 [2/2] RUN apt-get update && apt-get install -y --no-install-recommends     git python3 python3-venv python3-pip ca-certificates build-essential util-linux     && rm -rf /var/lib/apt/lists/*     && npm install --global pnpm@10.33.0     && mkdir -p /tmp/veltram-home\n#5 CACHED\n\n#6 exporting to image\n#6 exporting layers done\n#6 exporting manifest sha256:bd819cf3bfba9a6e35aa85961f7bc5a02e6f60add84ca830394cfe453e3bfb65 done\n#6 exporting config sha256:6f147784436a125cb8f5ffb87fd10a0f9aec0ce343706cfc07852e1ac0cca8f6 done\n#6 naming to docker.io/library/veltram-coding-proof-df7240d01cee-codingexecutor-coding:wrangler-mv8uqgvg done\n#6 DONE 0.0s\n\nView build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/mjkqhcn9dyd505bz7imd0dmkh\nLogin Succeeded\nImage does not exist remotely, pushing: registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-coding-proof-df7240d01cee-codingexecutor-coding:wrangler-mv8uqgvg\nUntagged: veltram-coding-proof-df7240d01cee-codingexecutor-coding:wrangler-mv8uqgvg\nThe push refers to repository [registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-coding-proof-df7240d01cee-codingexecutor-coding]\n636d97508c53: Waiting\nde61e764aefe: Waiting\n6310eb16bf42: Waiting\n0f2155a59774: Waiting\n636d97508c53: Waiting\nde61e764aefe: Waiting\n6310eb16bf42: Waiting\n0f2155a59774: Waiting\n636d97508c53: Waiting\nde61e764aefe: Waiting\n6310eb16bf42: Waiting\n0f2155a59774: Waiting\n0f2155a59774: Layer already exists\nc04f797437f1: Waiting\n1eb4e0bcfc67: Waiting\n636d97508c53: Layer already exists\nde61e764aefe: Layer already exists\n6310eb16bf42: Layer already exists\nc04f797437f1: Waiting\n1eb4e0bcfc67: Waiting\nc04f797437f1: Waiting\n1eb4e0bcfc67: Waiting\nc04f797437f1: Layer already exists\n1eb4e0bcfc67: Layer already exists\nwrangler-mv8uqgvg: digest: sha256:bd819cf3bfba9a6e35aa85961f7bc5a02e6f60add84ca830394cfe453e3bfb65 size: 1438\n├ Preparing coding for Cloudflare Containers\n│   registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-coding-proof-df7240d01cee-codingexecutor-coding@sha256:bd819cf3bfba9a6e35aa85961f7bc5a02e6f60add84ca830394cfe453e3bfb65\n│\n├ coding is ready to run\n│   registry.cloudflare.com/768841fa976bce74242ce11c4e98bc9d/veltram-coding-proof-df7240d01cee-codingexecutor-coding@sha256:bd819cf3bfba9a6e35aa85961f7bc5a02e6f60add84ca830394cfe453e3bfb65\n│\nTotal Upload: 35.08 KiB / gzip: 9.57 KiB\nWorker Startup Time: 1 ms\nYour Worker has access to the following bindings:\nBinding                                                                  Resource                  \nenv.CODING_EXECUTORS (CodingExecutor)                                    Durable Object            \nenv.FIXTURE_TOKEN_HASH [REDACTED VERIFIER]\nenv.FIXTURE_EXPIRES_AT (\"1792028414256\")                                 Environment Variable      \nenv.FIXTURE_RUN_ID (\"e0cb97a069ad5f04deacc375ebb7eb70\")                  Environment Variable      \n\nThe following containers are available:\n- CodingExecutor (durable_object)\n\nUploaded veltram-coding-proof-df7240d01cee (61.76 sec)\nDeployed veltram-coding-proof-df7240d01cee triggers (2.95 sec)\n  https://veltram-coding-proof-df7240d01cee.dinhogehm.workers.dev\nCurrent Version ID: a04e0c6c-67d4-4c67-a555-bb03707d6cb5\n",
+    "acceptance": "✔ native container API supports checkout, edit/test, bounded egress, diff, snapshot and cancellation (23046.459667ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 23327.051875\n",
+    "deleteWorker": "\n ⛅️ wrangler 4.151.0\n────────────────────\nSuccessfully deleted veltram-coding-proof-df7240d01cee\n",
+    "deleteContainer": "\n ⛅️ wrangler 4.151.0\n────────────────────\n╭ Delete your container \n│\n╰ Your container has been deleted \n\n"
+  },
+  "origin": "https://veltram-coding-proof-df7240d01cee.dinhogehm.workers.dev",
+  "images": [
+    {
+      "name": "veltram-coding-proof-df7240d01cee-codingexecutor-coding",
+      "tags": [
+        "wrangler-mv8uqgvg"
+      ]
+    }
+  ],
+  "finishedAt": "2026-10-15T01:22:32.072Z"
+}

@@ -1,0 +1,83 @@
+{
+  "kind": "veltram_coding_production_publication",
+  "release": "veltram-2026-10-14.3",
+  "runtimeCommit": "4675f331db43303f16d824c308c16d841eaf725f",
+  "worker": "veltram",
+  "origin": "https://veltram.com",
+  "deployment": {
+    "cloudflareVersionId": "50c6cf46-9dc8-432f-9e23-4044367ce78d",
+    "deploymentId": "69af0c85-a967-42de-a8fa-24b7565cc312",
+    "createdAt": "2026-10-15T01:24:23.80072Z",
+    "trafficPercent": 100
+  },
+  "migrations": {
+    "appliedInThisRelease": [
+      "0003_github.sql",
+      "0004_agents.sql"
+    ],
+    "pendingAfterPublication": []
+  },
+  "publicChecks": {
+    "checkedAt": "2026-10-15T01:24:51.297Z",
+    "healthStatus": 200,
+    "health": {
+      "service": "veltram",
+      "status": "ok",
+      "release": "veltram-2026-10-14.3"
+    },
+    "htmlStatus": 200,
+    "assets": [
+      {
+        "path": "/assets/index-Bn_GtF4h.js",
+        "status": 200,
+        "sha256": "7c4a6806680cc3fdd13035ad465a6b93845cd99c4026d610acb8d3bdb7b1e3c0",
+        "match": true
+      },
+      {
+        "path": "/assets/index-BZg9WIeR.css",
+        "status": 200,
+        "sha256": "7a070f05a887379a20df02943dbdd813bfa19cfce9688e6d244a94a2011831a7",
+        "match": true
+      }
+    ],
+    "assetComparison": "Published response bytes match the local build SHA-256 digests."
+  },
+  "githubConnection": {
+    "evidenceSource": "Authorized production browser session observed by the publishing operator.",
+    "appName": "VeltramApp",
+    "appId": 5324149,
+    "appSlug": "veltramapp",
+    "installationId": 171559276,
+    "installationRepositorySelection": "selected",
+    "installationRepositories": [
+      "dinhogehm/nuria-platform"
+    ],
+    "organizationName": "Nuria",
+    "oauthCompleted": true,
+    "repositorySelectedInApplication": true,
+    "repository": "dinhogehm/nuria-platform",
+    "defaultBranch": "main",
+    "uiConnectionStatus": "Conectado"
+  },
+  "productionInterface": {
+    "observedAgentRoles": [
+      "coordinator",
+      "programmer",
+      "reviewer"
+    ]
+  },
+  "isolatedValidation": {
+    "unitTestsPassed": 70,
+    "integrationTestsPassed": 93,
+    "operatorSetupTestsPassed": 2,
+    "remoteRuntimeReceipt": "veltram-coding-proof-df7240d01cee.json",
+    "remoteRuntimeSourceMatchesCommit": "4675f331db43303f16d824c308c16d841eaf725f"
+  },
+  "realAgentAcceptance": {
+    "status": "not_run",
+    "realAiTaskExecuted": false,
+    "aiGeneratedPullRequestCreated": false,
+    "note": "Publication, authorized repository connection and isolated runtime checks do not certify a real model-generated change in the connected repository."
+  },
+  "redaction": "No email addresses, cookies, authentication tokens, credential values or screenshots are included."
+}
