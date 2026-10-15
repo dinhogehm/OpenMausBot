@@ -15,6 +15,7 @@ test("native container API supports checkout, edit/test, bounded egress, diff, s
   writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { test: "node -e 'if(require(\"./sum\")(2,3)!==5)process.exit(1)'" } }));
   writeFileSync(join(repo, ".gitignore"), "node_modules/\n.venv/\n");
   writeFileSync(join(repo, "sum.js"), "module.exports=(a,b)=>a-b;\n");
+  writeFileSync(join(repo, "baseline-large.bin"), Buffer.alloc(24 * 1024 * 1024));
   const archive = spawnSync("tar", ["czf", "-", "-C", directory, "repo"], { env: { ...process.env, COPYFILE_DISABLE: "1" } }).stdout;
   const identity = { organizationId: "native_fixture", workspaceId: "native_fixture", runId: crypto.randomUUID(), generation: 1, deadlineAt: Date.now() + 180_000 };
   let step = 0;
@@ -52,6 +53,7 @@ test("native container API supports checkout, edit/test, bounded egress, diff, s
     const afterResponse = await request("/snapshot", { stepId: `s${++step}` });
     const after = await afterResponse.json() as CodingSnapshot; assert.equal(afterResponse.status, 200, JSON.stringify(after));
     assert.equal(before.treeDigest, after.treeDigest); assert.equal(after.treeDigest, await codingTreeDigest(after.files));
+    assert.equal(after.files.some(file => file.path === "baseline-large.bin"), false);
     const diffResponse = await request("/diff", { stepId: `s${++step}` });
     const diff = await diffResponse.json() as CodingToolResult; assert.equal(diffResponse.status, 200, JSON.stringify(diff));
     assert.match(diff.output, /a-b/); assert.match(diff.output, /a\+b/);

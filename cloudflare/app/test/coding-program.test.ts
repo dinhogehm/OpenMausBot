@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { CODING_INIT_PROGRAM, CODING_TOOL_PROGRAM, validateCodingTool, boundedStream, limitedArchive, CODING_ARCHIVE_BYTES } from "../src/coding-program.ts";
 import { codingTreeDigest } from "../src/coding-types.ts";
 
-function fixture() {
+function fixture(largeSourceBytes = 0) {
   const path = mkdtempSync(join(tmpdir(), "veltram-program-"));
   const source = join(path, "archive/repository");
   mkdirSync(join(source, ".github/workflows"), { recursive: true });
   writeFileSync(join(source, "sum.py"), "def sum(a, b): return a - b\n");
   writeFileSync(join(source, ".github/workflows/test.yml"), "name: Original\n");
+  if (largeSourceBytes) writeFileSync(join(source, "large.bin"), Buffer.alloc(largeSourceBytes));
   const archive = spawnSync("tar", ["czf", "-", "-C", join(path, "archive"), "repository"], { env: { ...process.env, COPYFILE_DISABLE: "1" } }).stdout;
   const init = spawnSync("python3", ["-c", CODING_INIT_PROGRAM.replace("    protect_checkout()", "    # Linux ownership is covered by Docker/native fixtures").replaceAll("/workspace", join(path, "work")), "a".repeat(40)], { input: archive });
   assert.equal(init.status, 0, init.stderr.toString());
@@ -64,8 +65,8 @@ test("bounded output drains excess bytes and preserves UTF-8 without retaining a
   assert.equal(result.truncated, true);
 });
 
-test("archive handling rejects traversals and symlinks before checkout", () => {
-  for (const mode of ["traversal", "symlink"]) {
+test("archive handling rejects traversals, symlinks and oversized file declarations before checkout", () => {
+  for (const mode of ["traversal", "symlink", "large"]) {
     const path = mkdtempSync(join(tmpdir(), "veltram-archive-"));
     try {
       const archive = spawnSync("python3", ["-c", `import tarfile,io,sys
@@ -73,11 +74,13 @@ with tarfile.open(fileobj=sys.stdout.buffer,mode='w|gz') as tar:
  root=tarfile.TarInfo('repository');root.type=tarfile.DIRTYPE;tar.addfile(root)
  item=tarfile.TarInfo('repository/../outside' if sys.argv[1]=='traversal' else 'repository/link')
  if sys.argv[1]=='symlink':item.type=tarfile.SYMTYPE;item.linkname='/tmp'
- tar.addfile(item)
+ if sys.argv[1]=='large':
+  item.size=65*1024*1024;tar.fileobj.write(item.tobuf());tar.offset+=512
+ else:tar.addfile(item)
 `, mode]).stdout;
       const result = spawnSync("python3", ["-c", CODING_INIT_PROGRAM.replace("    protect_checkout()", "    # Linux ownership is covered by Docker/native fixtures").replaceAll("/workspace", join(path, "work")), "a".repeat(40)], { input: archive });
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr.toString(), /unsafe_archive_path|unsupported_repository_entry/);
+      assert.match(result.stderr.toString(), /unsafe_archive_path|unsupported_repository_entry|repository_size_limit/);
     } finally { rmSync(path, { recursive: true, force: true }); }
   }
 });
@@ -120,5 +123,20 @@ test("git index assume-unchanged cannot hide edited source from the final manife
     assert.equal(f.call({ kind: "write_file", path: "sum.py", content: "def sum(a,b): return a+b\n" }).status, 0);
     const snapshot = JSON.parse(f.call({ kind: "snapshot" }).stdout.toString());
     assert.equal(snapshot.files.length, 1);
+  } finally { f.clean(); }
+});
+
+// Large unchanged source assets belong to the baseline, not the PR payload budget.
+test("checks out an unchanged source file above 20 MiB but still rejects a changed file above 1 MiB", () => {
+  const f = fixture(24 * 1024 * 1024);
+  try {
+    const original = f.call({ kind: "snapshot" });
+    assert.equal(original.status, 0, original.stderr.toString());
+    assert.deepEqual(JSON.parse(original.stdout.toString()).files, []);
+    const changed = f.call({ kind: "run_command", cwd: ".", command: "printf x >> large.bin", timeoutMs: 1000 });
+    assert.equal(changed.status, 0, changed.stderr.toString());
+    const snapshot = f.call({ kind: "snapshot" });
+    assert.notEqual(snapshot.status, 0);
+    assert.match(snapshot.stderr.toString(), /change_file_size_limit/);
   } finally { f.clean(); }
 });

@@ -1,6 +1,6 @@
 import type { CodingTool } from "./coding-types";
 
-export const CODING_ARCHIVE_BYTES = 50 * 1024 * 1024;
+export const CODING_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const CODING_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 export const CODING_OUTPUT_BYTES = 32_768;
 export const CODING_PYTHON = "/usr/bin/python3";
@@ -99,7 +99,7 @@ try:
         if str(relative) in seen: raise ValueError('duplicate_archive_path')
         seen.add(str(relative))
         size += item.size
-        if item.size > 20 * 1024 * 1024 or size > 200 * 1024 * 1024: raise ValueError('repository_size_limit')
+        if item.size > 64 * 1024 * 1024 or size > 512 * 1024 * 1024: raise ValueError('repository_size_limit')
         target.parent.mkdir(parents=True, exist_ok=True)
         source = archive.extractfile(item)
         if source is None: raise ValueError('invalid_archive')
@@ -188,7 +188,7 @@ def manifest(baseline):
         if not path.is_file() or path.is_symlink(): raise ValueError('unsupported_change_entry')
         size = path.stat().st_size
         scanned += size
-        if size > 20 * 1024 * 1024 or scanned > 200 * 1024 * 1024: raise ValueError('repository_size_limit')
+        if size > 64 * 1024 * 1024 or scanned > 512 * 1024 * 1024: raise ValueError('repository_size_limit')
         data = path.read_bytes()
         mode = '100755' if path.stat().st_mode & stat.S_IXUSR else '100644'
         oid = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()

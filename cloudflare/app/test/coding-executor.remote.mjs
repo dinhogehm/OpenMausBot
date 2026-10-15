@@ -44,7 +44,17 @@ try {
   assert.equal(deployed.code, 0, deployed.output);
   origin = deployed.output.match(new RegExp("https://" + name + "\\.[a-z0-9-]+\\.workers\\.dev"))?.[0];
   assert.ok(origin, "No exact fixture URL in deploy receipt"); receipt.origin = origin;
-  receipt.checks.unauthorized = (await fetch(origin + "/init", { method: "POST" })).status;
+  const readinessDeadline = Date.now() + 90_000;
+  receipt.checks.propagation = [];
+  while (true) {
+    const probe = await fetch(origin + "/init", { method: "POST", cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    receipt.checks.unauthorized = probe.status;
+    receipt.checks.propagation.push({ status: probe.status, server: probe.headers.get("server"), ray: probe.headers.get("cf-ray") });
+    if (probe.status === 403) break;
+    receipt.checks.lastProbeBody = (await probe.text()).slice(0, 1000);
+    if (Date.now() >= readinessDeadline || ![404, 500, 502, 503, 504].includes(probe.status)) break;
+    await new Promise(resolveReady => setTimeout(resolveReady, 2000));
+  }
   receipt.checks.wrongToken = (await fetch(origin + "/init", { method: "POST", headers: { authorization: "Bearer " + "0".repeat(64) } })).status;
   assert.equal(receipt.checks.unauthorized, 403); assert.equal(receipt.checks.wrongToken, 403);
   receipt.checks.wrongScope = (await fetch(origin + "/init", { method: "POST", headers: { authorization: "Bearer " + token, "x-fixture-input": JSON.stringify({ organizationId: "other", workspaceId: "native_fixture", runId, generation: 1, deadlineAt: Date.now() + 180_000 }) } })).status;

@@ -46,6 +46,7 @@ Após a [configuração autorizada da GitHub App](veltram-github-setup.md), conf
 
 - Equipe fixa de três papéis, personalizável; modelos OpenAI, Anthropic e OpenRouter com chaves da empresa.
 - JavaScript/TypeScript e Python; arquivo de um commit, sem histórico anterior, submódulos, LFS ou links simbólicos. Metadados Git são protegidos; comandos que modificam o índice local não são suportados.
+- A fonte aceita arquivo compactado de até 64 MiB, até 20 mil entradas e 512 MiB expandidos, com 64 MiB por arquivo existente. A inspeção somente leitura de `nuria-platform` no SHA `202df064740b5bba7947de8102a34c198d85756f` encontrou 12.431 arquivos/198.653.838 bytes, incluindo um arquivo gerado de 46.529.568 bytes; o arquivo tar.gz local desse commit mede 49.332.322 bytes. Isso verifica compatibilidade de tamanho, não uma execução de tarefa nesse repositório.
 - Sem alteração de workflows, daemons persistentes ou registries privados. Rede limitada a dependências públicas, até 1 GiB e 2.000 requisições por tarefa.
 - 30 minutos por tarefa, 10 minutos por comando, 30 chamadas de IA, 240 mil tokens; até 100 arquivos alterados e 10 MiB. Esses limites não representam um preço fixo.
 - Uma tarefa ativa por empresa, quatro no conjunto, histórico de até 100 tarefas por empresa; retenção móvel ainda não implementada.
