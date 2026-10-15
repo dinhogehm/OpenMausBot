@@ -10,7 +10,7 @@ Administradores e equipes de empresas que coordenam agentes de IA pelo navegador
 
 ## Product Purpose
 
-Reconstruir o produto de agentes como um serviço inteiramente hospedado na Cloudflare. Este primeiro recorte oferece acesso por código de e-mail, criação e seleção de empresa, armazenamento de chaves próprias e um teste explícito de execução. O teste não é apresentado como agente de IA, e uma chave armazenada não é apresentada como validada pelo provedor.
+Reconstruir o produto de agentes como um serviço inteiramente hospedado na Cloudflare. O fluxo de trabalho oferece acesso por código de e-mail, seleção de empresa, chaves próprias e tarefas em repositórios conectados do GitHub. Cada tarefa exige aprovação, usa um modelo escolhido pela empresa, registra comandos e testes reais e entrega um PR em rascunho. O teste fixo do ambiente permanece identificado como Teste de execução. Uma chave armazenada não é apresentada como validada pelo provedor, e um resumo do modelo nunca substitui a evidência dos testes.
 
 ## Brand Personality
 

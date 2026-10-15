@@ -16,5 +16,6 @@ export default defineConfig({
       TEST_MIGRATIONS: await readD1Migrations(fileURLToPath(new URL("./migrations", import.meta.url))),
     } },
   }))],
-  test: { include: ["test/**/*.integration.test.ts"], setupFiles: ["./test/setup.ts"] },
+  // Each file boots workerd + SQLite; bound parallel boots on developer machines.
+  test: { include: ["test/**/*.integration.test.ts"], setupFiles: ["./test/setup.ts"], maxWorkers: 2, testTimeout: 20_000 },
 });

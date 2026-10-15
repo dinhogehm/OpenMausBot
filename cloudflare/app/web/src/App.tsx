@@ -38,7 +38,8 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
   const [activeId, setActiveId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [section, setSection] = useState<Section>("runs");
+  const callback = useRef(new URLSearchParams(window.location.search));
+  const [section, setSection] = useState<Section>(callback.current.has("github") ? "repositories" : "coding");
   const [creating, setCreating] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [reload, setReload] = useState(0);
@@ -52,7 +53,14 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
       .then((data) => {
         if (controller.signal.aborted) return;
         setOrganizations(data.organizations);
-        setActiveId((current) => data.organizations.some((organization) => organization.id === current) ? current : data.organizations[0]?.id ?? "");
+        const returnedOrganization = callback.current.has("github") ? callback.current.get("organization") : null;
+        setActiveId((current) => data.organizations.some((organization) => organization.id === returnedOrganization) ? returnedOrganization! : data.organizations.some((organization) => organization.id === current) ? current : data.organizations[0]?.id ?? "");
+        if (callback.current.has("github")) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("github"); url.searchParams.delete("organization");
+          window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+          callback.current = new URLSearchParams();
+        }
       })
       .catch((failure: unknown) => { if (!isAbort(failure)) setError(errorMessage(failure)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -75,7 +83,7 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 
   const created = useCallback((organization: Organization) => {
     setOrganizations((current) => [...current, organization]);
-    setActiveId(organization.id); setCreating(false); setSection("runs");
+    setActiveId(organization.id); setCreating(false); setSection("coding");
   }, []);
 
   return <div className="app-shell">
@@ -86,9 +94,12 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
         {organizations.length === 0 ? <option value="">Sua empresa</option> : organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
       </select><Icon name="chevron" size={16} /></div><button className="text-button add-company" onClick={() => setCreating(true)} disabled={loading}><Icon name="plus" size={14} /> Nova empresa</button></div>
       <nav className="main-nav" aria-label="Menu principal">
-        <button className={section === "runs" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "runs" && !creating ? "page" : undefined} onClick={() => { setSection("runs"); setCreating(false); }}><Icon name="play" />Teste de execução</button>
+        <button className={section === "coding" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "coding" && !creating ? "page" : undefined} onClick={() => { setSection("coding"); setCreating(false); }}><Icon name="code" />Tarefas</button>
+        <button className={section === "repositories" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "repositories" && !creating ? "page" : undefined} onClick={() => { setSection("repositories"); setCreating(false); }}><Icon name="repository" />Repositórios</button>
+        <button className={section === "agents" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "agents" && !creating ? "page" : undefined} onClick={() => { setSection("agents"); setCreating(false); }}><Icon name="team" />Agentes</button>
         <button className={section === "credentials" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "credentials" && !creating ? "page" : undefined} onClick={() => { setSection("credentials"); setCreating(false); }}><Icon name="key" />Chaves de IA</button>
         <button className={section === "company" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "company" && !creating ? "page" : undefined} onClick={() => { setSection("company"); setCreating(false); }}><Icon name="building" />Empresa</button>
+        <button className={section === "runs" && !creating ? "nav-item selected" : "nav-item"} aria-current={section === "runs" && !creating ? "page" : undefined} onClick={() => { setSection("runs"); setCreating(false); }}><Icon name="play" />Teste de execução</button>
       </nav>
       <div className="sidebar-bottom"><div className="early-access"><span className="small-dot" /> Acesso antecipado</div><div className="account"><div className="avatar" aria-hidden="true">{(user.name || user.email).slice(0, 1).toUpperCase()}</div><div className="account-text"><span>{user.name || "Sua conta"}</span><small title={user.email}>{user.email}</small></div><button className="icon-button" title="Sair da conta" aria-label="Sair da conta" disabled={signingOut} onClick={() => void signOut()}><Icon name="logout" /></button></div></div>
     </aside>

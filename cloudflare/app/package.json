@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "test": "pnpm test:unit && vitest run",
-    "test:unit": "node --experimental-strip-types --test test/execution.test.ts test/credentials.test.ts test/linux-proof.test.ts web/test/run-state.test.ts web/test/api.test.ts",
+    "test:unit": "node --experimental-strip-types --test test/execution.test.ts test/credentials.test.ts test/linux-proof.test.ts test/coding-program.test.ts web/test/run-state.test.ts web/test/api.test.ts web/test/coding-state.test.ts",
     "test:integration": "vitest run",
     "check": "tsc --noEmit && tsc -p web/tsconfig.json",
     "dry-run": "pnpm build && wrangler deploy --dry-run",

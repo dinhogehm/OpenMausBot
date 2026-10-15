@@ -1,7 +1,7 @@
 // Disposable, loopback-only browser fixture. Never a production entrypoint.
 import worker from "../../src/index";
 import type { AppEnv } from "../../src/env";
-export { Admission, ExecutionRoom, LinuxExecutor } from "../../src/index";
+export { Admission, ExecutionRoom, LinuxExecutor, CodingAdmission, CodingRoom, CodingExecutor, CodingDependencyNetwork } from "../../src/index";
 
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext) {

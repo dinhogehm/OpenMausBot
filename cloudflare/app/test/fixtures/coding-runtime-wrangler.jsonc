@@ -1,0 +1,10 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "veltram-coding-runtime-fixture",
+  "main": "coding-runtime-worker.ts",
+  "compatibility_date": "2026-10-14",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "CODING_EXECUTORS", "class_name": "CodingExecutor" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CodingExecutor"] }],
+  "containers": [{ "class_name": "CodingExecutor", "scheduling_policy": "durable_object", "images": { "coding": { "dockerfile": "../../Dockerfile.coding", "build_context": "../.." } } }]
+}

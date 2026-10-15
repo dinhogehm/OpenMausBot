@@ -4,9 +4,15 @@ import { changeCredential, listCredentials } from "./credential-store";
 import { HttpError, json, privateResponse, readJson } from "./http";
 import { createOrganization, listOrganizations, listWorkspaces, requireMembership } from "./organizations";
 import { limitOTPDelivery } from "./otp-limits";
+import { handleGitHubRoute } from "./github";
+import { agentProfilesRoute } from "./agent-profiles";
 export { ExecutionRoom } from "./run-room";
 export { Admission } from "./admission";
 export { LinuxExecutor } from "./linux-executor";
+export { CodingRoom } from "./coding-room";
+export { CodingAdmission } from "./coding-admission";
+export { CodingExecutor } from "./coding-executor";
+export { CodingDependencyNetwork } from "./coding-network";
 
 const authPaths = new Set(["/api/auth/email-otp/send-verification-otp", "/api/auth/sign-in/email-otp", "/api/auth/sign-out"]);
 
@@ -26,11 +32,17 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
     headers.set("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     return new Response(response.body, { status: response.status, headers });
   }
+  if (url.pathname === "/api/github/webhook") {
+    const response = await handleGitHubRoute(request, env, undefined);
+    if (!response) throw new HttpError(404, "not_found");
+    return response;
+  }
   const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
   let body: Record<string, unknown> | undefined;
   if (mutating) {
     if (request.headers.get("origin") !== env.APP_ORIGIN) throw new HttpError(403, "origin_forbidden");
-    body = await readJson(request);
+    const limit = url.pathname.endsWith("/agents") ? 65536 : /\/coding-runs(?:\/|$)/.test(url.pathname) ? 32768 : 8192;
+    body = await readJson(request, limit);
   }
   const auth = createAuth(env, ctx);
   if (url.pathname.startsWith("/api/auth/")) {
@@ -54,6 +66,20 @@ async function route(request: Request, env: AppEnv, ctx: ExecutionContext): Prom
   const session = await auth.api.getSession({ headers: request.headers });
   if (!session?.user?.emailVerified) throw new HttpError(401, "sign_in_required");
   const userId = session.user.id;
+  const githubResponse = await handleGitHubRoute(request, env, { userId, sessionId: session.session.id }, body);
+  if (githubResponse) return githubResponse;
+  const agentsMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/agents$/);
+  if (agentsMatch) return agentProfilesRoute(env, agentsMatch[1], userId, request.method, body ?? {});
+  const codingMatch = url.pathname.match(/^\/api\/organizations\/([A-Za-z0-9_-]{1,80})\/workspaces\/([A-Za-z0-9_-]{1,80})\/coding-runs(?:\/([A-Za-z0-9_-]{1,80})(?:\/(approve|cancel))?)?$/);
+  if (codingMatch) {
+    const [, organizationId, workspaceId, runId, operation] = codingMatch;
+    const action = request.method === "GET" && !operation ? (runId ? "get" : "list") : request.method === "POST" ? (!runId ? "create" : operation) : undefined;
+    if (!action) throw new HttpError(404, "not_found");
+    await requireMembership(env.DB, organizationId, userId, action === "approve");
+    return env.CODING_RUNS.getByName(organizationId).fetch(new Request("https://coding.internal/command", {
+      method: "POST", body: JSON.stringify({ organizationId, workspaceId, runId, userId, action, body: body ?? {} }),
+    }));
+  }
   if (url.pathname === "/api/session" && request.method === "GET") {
     return json({ user: { id: userId, email: session.user.email, name: session.user.name } });
   }

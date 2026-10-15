@@ -1,6 +1,6 @@
 # Veltram
 
-Aplicativo web em desenvolvimento para várias empresas na Cloudflare, publicado em [veltram.com](https://veltram.com), com Worker, interface e recursos próprios. Saúde HTTPS, arquivos publicados, recebimento real do código de e-mail, login e logout via API foram verificados. A navegação completa em produção ainda depende de nova conferência após atualizar o cache DNS local. O [desenho da reconstrução](../../docs/plans/2026-10-14-cloudflare-reconstruction-design.md) registra decisões e referências, e o [plano do primeiro fluxo](../../docs/plans/2026-10-14-veltram-first-workflow.md) delimita esta etapa.
+Aplicativo web para várias empresas na Cloudflare, publicado em [veltram.com](https://veltram.com), com Worker, interface e recursos próprios. A primeira versão publicada oferece acesso por e-mail, empresas, chaves e prova de execução. Este branch acrescenta agentes de programação e GitHub; implementação, validação e publicação são estados separados. O [desenho da reconstrução](../../docs/plans/2026-10-14-cloudflare-reconstruction-design.md) registra as decisões, e o [plano GitHub/agentes](../../docs/plans/2026-10-14-veltram-github-agents.md) descreve a evolução.
 
 ## Estado atual
 
@@ -14,11 +14,27 @@ Aplicativo web em desenvolvimento para várias empresas na Cloudflare, publicado
 - Cada tentativa usa um `LinuxExecutor` próprio, com rede externa desligada e sem chaves de provedores. A concessão tem prazo absoluto de 60 segundos a partir da aprovação; o executor usa o menor prazo entre esse limite e 45 segundos após recebê-la, incluindo preparação e execução.
 - Cancelamento invalida a geração anterior. Uma vaga só é liberada após confirmação da parada do executor, inclusive quando sua concessão expirou. Recuperação após despacho incerto marca interrupção e não repete comandos; uma chamada idêntica já concluída pode devolver o recibo persistido sem executar novamente.
 
-Ainda não há convites/gestão de membros, bots, conversas com IA, broker de modelos, R2 ou rotinas. Os testes inserem membros adicionais apenas em fixture. O pacote não importa dados, chaves ou código enterprise do aplicativo existente.
+Ainda não há convites/gestão de membros, conversas gerais, R2 ou rotinas. Os testes inserem membros adicionais apenas em fixture. O pacote não importa dados, chaves ou código enterprise do aplicativo existente.
+
+## Agentes de programação neste branch
+
+- Equipe pronta com coordenador, programador e revisor. Administradores personalizam nomes, instruções e modelos; tarefas congelam essa configuração na criação. O coordenador entrega um plano estruturado; o revisor recebe apenas leitura e precisa emitir um parecer explícito.
+- GitHub App com OAuth PKCE, seleção explícita de repositórios, vínculo único de instalação por empresa, comprovação de proprietário e revogação por webhook. O [procedimento do operador](../../docs/verification/veltram-github-setup.md) registra exatamente as permissões e a instalação.
+- BYOK real com protocolos OpenAI Responses, Anthropic Messages e OpenRouter Chat Completions. Credenciais e tokens GitHub ficam nos Workers; código do repositório não os recebe.
+- Uma VM descartável por tarefa/geração com Node, pnpm, Python e Git. Código fixado por SHA, ferramentas limitadas, dependências públicas permitidas explicitamente, comandos de preparação e teste aprovados pelo usuário. LFS, submódulos e registries privados não têm suporte inicial.
+- A fonte é um arquivo do commit escolhido, com baseline Git local; o histórico anterior não é baixado. Comandos que dependem de tags ou commits antigos precisam de suporte adicional. Arquivos especiais e links simbólicos são recusados nesta versão.
+- Comandos do repositório executam sem privilégios; Python, Git e o baseline são protegidos. Processos em segundo plano são encerrados antes de snapshot/diff. Metadados Git locais são imutáveis; branches e PRs são criados pelo broker externo.
+- Após as alterações, o comando de teste final roda de fato; os manifestos antes/depois devem coincidir. Falha de teste ou revisão devolve trabalho ao programador dentro de limites. O broker publica o manifesto validado em branch exclusiva e abre PR em rascunho; não faz merge nem deploy do repositório conectado.
+- Limites iniciais: 30 minutos, 30 chamadas de modelo e 240 mil tokens por tarefa, até 100 arquivos alterados/10 MiB, 1 MiB por arquivo. Uma tarefa ativa por empresa, quatro no conjunto; cada empresa retém até 100 tarefas. Os limites de tokens não equivalem a um preço fixo.
+- Cancelamento persiste geração e impede efeitos posteriores. Uma etapa sem recibo após reinício fica interrompida. A capacidade só é liberada após a parada confirmada da VM. Logs e manifestos ficam em armazenamento privado do coordenador com limites; não há endpoint público de artefatos.
+
+Essas capacidades exigem a App registrada/instalada e chaves de IA fornecidas pela empresa. Testes com provedores simulados e repositórios descartáveis não certificam uma chamada real de IA no repositório escolhido.
+
+A [receita de verificação dos agentes](../../docs/verification/veltram-coding.md) descreve os testes, os limites e a distinção entre publicação, conexão e execução real.
 
 ## API
 
-Todas as rotas de dados exigem sessão de usuário com e-mail verificado. Mutações exigem `Origin` igual a `APP_ORIGIN`, JSON e corpo de até 8 KiB. Respostas privadas não são cacheáveis. Não há suporte a bearer.
+Todas as rotas de dados exigem sessão de usuário com e-mail verificado. Mutações exigem `Origin` igual a `APP_ORIGIN`, JSON e corpo de até 8 KiB (32 KiB em tarefas, 64 KiB em perfis). O webhook GitHub é uma exceção específica autenticada por HMAC do corpo bruto. Respostas privadas não são cacheáveis. Não há suporte a bearer.
 
 | Método | Rota | Uso |
 | --- | --- | --- |
@@ -35,6 +51,14 @@ Todas as rotas de dados exigem sessão de usuário com e-mail verificado. Mutaç
 | GET | `/api/organizations/:id/workspaces/:workspaceId/runs/:runId` | Estado e resultado persistidos |
 | POST | `/api/organizations/:id/workspaces/:workspaceId/runs/:runId/approve` | Administrador: `{}`; persiste aprovação antes do despacho |
 | POST | `/api/organizations/:id/workspaces/:workspaceId/runs/:runId/cancel` | Administrador ou autor da prova: `{}` |
+| GET/PUT | `/api/organizations/:id/agents` | Equipe e atualização administrativa com `expectedVersion` |
+| GET | `/api/organizations/:id/github` | Configuração, conexões e seleção OAuth pendente |
+| POST | `/api/organizations/:id/github/connect` | Iniciar autorização GitHub |
+| POST/DELETE | `/api/organizations/:id/github/repositories[/:connectionId]` | Selecionar/revogar repositório |
+| GET/POST | `/api/organizations/:id/workspaces/:workspaceId/coding-runs` | Listar/criar tarefas com aprovação pendente |
+| GET | `/api/organizations/:id/workspaces/:workspaceId/coding-runs/:runId` | Estado, equipe, comandos, testes e PR |
+| POST | `/api/organizations/:id/workspaces/:workspaceId/coding-runs/:runId/approve` | Administrador: `{generation}` |
+| POST | `/api/organizations/:id/workspaces/:workspaceId/coding-runs/:runId/cancel` | Autor/administrador: `{generation}` |
 
 `expectedVersion` é `null` apenas no primeiro cadastro; depois corresponde à versão observada nos metadados, inclusive após revogação. Uma disputa retorna 409. O cliente deve atualizar os metadados e solicitar a decisão do usuário, sem repetir cegamente a alteração.
 
@@ -75,4 +99,4 @@ Workers Paid foi confirmado como plano atual no dashboard em 14/10/2026; não é
 
 Substituir a chave mestra sem recriptografar as credenciais impede sua leitura. O procedimento de rotação, retenção de backups e recuperação ainda precisa ser implementado e testado. Revogar aqui remove a cópia ativa; não revoga a chave na conta do provedor nem apaga backups antigos.
 
-Antes de integrar agentes, o broker deverá conferir associação, permissão, versão da credencial e limites em cada chamada. A chave de longa duração não deve entrar no ambiente que executa código. Testes locais e dry-run não comprovam operação na nuvem.
+O broker confere associação, permissão, versão da credencial e limites em cada chamada. A chave de longa duração não entra no ambiente que executa código. Testes locais e dry-run não comprovam operação na nuvem.

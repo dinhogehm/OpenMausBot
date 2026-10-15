@@ -3,8 +3,11 @@ import { api, errorMessage, isAbort, organizationPath, type Organization, type W
 import { Icon, Loading, Notice, PageHeading } from "./components";
 import { Credentials } from "./credentials";
 import { Runs } from "./runs";
+import { Coding } from "./coding";
+import { Repositories } from "./repositories";
+import { Agents } from "./agents";
 
-export type Section = "runs" | "credentials" | "company";
+export type Section = "coding" | "repositories" | "agents" | "runs" | "credentials" | "company";
 const roleNames = { owner: "Responsável", admin: "Administrador", member: "Membro" };
 
 export function OrganizationSpace({ organization, section, onNavigate }: { organization: Organization; section: Section; onNavigate: (section: Section) => void }) {
@@ -28,6 +31,8 @@ export function OrganizationSpace({ organization, section, onNavigate }: { organ
   }, [organization.id, attempt]);
 
   if (section === "credentials") return <Credentials organization={organization} />;
+  if (section === "repositories") return <Repositories organization={organization} />;
+  if (section === "agents") return <Agents organization={organization} />;
   if (section === "company") return <>
     <PageHeading eyebrow="SEU CONTEXTO" title="Empresa">As informações do espaço em que você está trabalhando.</PageHeading>
     <dl className="company-details"><div><dt>Nome da empresa</dt><dd>{organization.name}</dd></div><div><dt>Seu acesso</dt><dd>{roleNames[organization.role]}</dd></div><div><dt>Espaços de trabalho</dt><dd>{loading ? "Carregando…" : workspaces.length > 0 ? workspaces.map((workspace) => workspace.name).join(", ") : "Nenhum espaço disponível"}</dd></div></dl>
@@ -39,6 +44,6 @@ export function OrganizationSpace({ organization, section, onNavigate }: { organ
   if (!workspaceId) return <><PageHeading eyebrow="SEU ESPAÇO" title="Nenhum espaço de trabalho disponível">Não encontramos um espaço para esta empresa. Atualize os dados ou fale com o responsável.</PageHeading><button className="button secondary" onClick={() => setAttempt((value) => value + 1)}>Atualizar</button></>;
   return <>
     {workspaces.length > 1 && <div className="workspace-picker field"><label htmlFor="active-workspace">Espaço de trabalho</label><select id="active-workspace" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></div>}
-    <Runs key={workspaceId} organizationId={organization.id} workspaceId={workspaceId} />
+    {section === "coding" ? <Coding key={workspaceId} organizationId={organization.id} workspaceId={workspaceId} onNavigate={onNavigate} /> : <Runs key={workspaceId} organizationId={organization.id} workspaceId={workspaceId} />}
   </>;
 }

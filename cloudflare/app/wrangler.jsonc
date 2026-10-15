@@ -9,10 +9,19 @@
   "durable_objects": { "bindings": [
     { "name": "RUNS", "class_name": "ExecutionRoom" },
     { "name": "ADMISSION", "class_name": "Admission" },
-    { "name": "LINUX_EXECUTORS", "class_name": "LinuxExecutor" }
+    { "name": "LINUX_EXECUTORS", "class_name": "LinuxExecutor" },
+    { "name": "CODING_RUNS", "class_name": "CodingRoom" },
+    { "name": "CODING_ADMISSION", "class_name": "CodingAdmission" },
+    { "name": "CODING_EXECUTORS", "class_name": "CodingExecutor" }
   ] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ExecutionRoom", "Admission", "LinuxExecutor"] }],
-  "containers": [{ "class_name": "LinuxExecutor", "scheduling_policy": "durable_object" }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ExecutionRoom", "Admission", "LinuxExecutor"] },
+    { "tag": "v2", "new_sqlite_classes": ["CodingRoom", "CodingAdmission", "CodingExecutor"] }
+  ],
+  "containers": [
+    { "class_name": "LinuxExecutor", "scheduling_policy": "durable_object" },
+    { "class_name": "CodingExecutor", "scheduling_policy": "durable_object", "images": { "coding": { "dockerfile": "./Dockerfile.coding", "build_context": "." } } }
+  ],
   // Local fixture only. Provision new resources before publishing.
   "vars": {
     "APP_ORIGIN": "http://localhost:8787",
