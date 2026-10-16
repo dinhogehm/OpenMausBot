@@ -75,7 +75,7 @@ describe("board model", () => {
   });
 
   it("success rate over the runs that ran; superseded and aborted apart (INSP-V r1 #1)", () => {
-    expect(by("successRate")).toMatchObject({ value: "60%", detail: "3 de 5 que rodaram · fora da conta: 1 trocado por um commit mais novo e 1 abortado antes de rodar" });
+    expect(by("successRate")).toMatchObject({ value: "75%", detail: "3 de 4 commits que rodaram · fora da conta: 1 trocado por um commit mais novo e 1 abortado sem veredito" });
   });
 
   it("the stopped pipeline says production stayed up and shows the weekend (INSP-V r1 #2)", () => {
@@ -110,9 +110,9 @@ describe("board model", () => {
 
   it("lights a target only when one is set (met / close / off)", () => {
     expect(kpis.some((kpi) => kpi.goal)).toBe(false);
-    const withGoals = boardKpis(report({ deploysPerBusinessDay: 1, releaseSuccessRate: 70, leadTimeHours: 48 }));
+    const withGoals = boardKpis(report({ deploysPerBusinessDay: 1, releaseSuccessRate: 80, leadTimeHours: 48 }));
     expect(withGoals.find((kpi) => kpi.key === "deployFrequency")!.goal).toEqual({ target: "≥ 1/dia útil", status: "close" });
-    expect(withGoals.find((kpi) => kpi.key === "successRate")!.goal).toEqual({ target: "≥ 70%", status: "close" });
+    expect(withGoals.find((kpi) => kpi.key === "successRate")!.goal).toEqual({ target: "≥ 80%", status: "close" });
     expect(withGoals.find((kpi) => kpi.key === "leadTime")!.goal).toEqual({ target: "≤ 48 h", status: "met" });
   });
 
@@ -139,7 +139,7 @@ describe("executive summary", () => {
       "Vazão: 5 PRs mergeadas (anterior: 0) e 2 issues resolvidas (anterior: 0), 1 bug e 1 P0/P1.",
       "Lead time issue até produção: mediana 43 h, p90 2,6 d (n=2; sem base comparável); merge até produção 1,8 h.",
       "Backlog agora: 2 issues abertas; P1 1 e P0 1 (1 ainda com o rótulo antigo); a mais antiga #104, 22 d; 1 PR esperando o gate.",
-      "Releases: sucesso 60%, 3 de 5 que rodaram; 1 recusado. Fora da conta: 1 trocado por um commit mais novo e 1 abortado antes de rodar. Pipeline parado 5 h com produção no ar, 0 min em fim de semana.",
+      "Releases: sucesso 75%, 3 de 4 commits que rodaram; 1 recusado. Fora da conta: 1 trocado por um commit mais novo e 1 abortado sem veredito. Pipeline parado 5 h com produção no ar, 0 min em fim de semana.",
       "Bots: 3 turnos em 4,5 dias registrados; custo US$ 0,75 (engenharia US$ 0,00, operação US$ 0,75); custo de engenharia: — (nenhum custo de bot de engenharia registrado).",
     ]);
   });
@@ -200,13 +200,13 @@ describe("Markdown", () => {
     expect(markdown).toContain("| Pipeline de release parado | 5 h<br>produção no ar · 0 min em fim de semana | — | sem base comparável | — | 1ª falha que rodou após um sucesso até o próximo sucesso |");
     expect(markdown).toContain("## DORA");
     expect(markdown).toContain("| 29/09 | 1 | ≥0 |");
-    expect(markdown).toContain("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 trocado por um commit mais novo · 1 abortado antes de rodar · 1 recusado");
+    expect(markdown).toContain("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 trocado por um commit mais novo · 1 abortado sem veredito · 1 recusado");
     // the words the cards use, nowhere "run" nor "watcher" (INSP-R13VIS A5)
     expect(markdown).not.toMatch(/\bruns?\b|watcher|ubstituíd/);
     expect(markdown).toContain("| 01/10/2026 06:00 | `xxxxxxxxx` | falhou (2 tentativas) | PR #6 | — |");
     // commits whose runs never ran are counted in the header, not listed (INSP-V r2 #7)
     expect(markdown).not.toContain("`sssssssss`");
-    expect(markdown).toContain("2 commits só tiveram tentativas trocadas por um commit mais novo ou abortadas antes de rodar (nenhuma rodou): contados no cabeçalho, não listados.");
+    expect(markdown).toContain("2 commits só tiveram tentativas trocadas por um commit mais novo ou abortadas sem veredito (nenhuma julgou o commit): contados no cabeçalho, não listados.");
     expect(markdown).toContain("conteúdo desconhecido (primeiro release conhecido)");
     expect(markdown).not.toContain("sem release anterior para comparar");
     expect(markdown).toContain("- P1: 1\n");
@@ -339,7 +339,7 @@ describe("PDF", () => {
   });
 
   it("states the release counts as runs, the same numbers the screen shows (INSP-V r2 #6)", () => {
-    expect(releaseCounts(report())).toBe("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 trocado por um commit mais novo · 1 abortado antes de rodar · 1 recusado");
+    expect(releaseCounts(report())).toBe("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 trocado por um commit mais novo · 1 abortado sem veredito · 1 recusado");
   });
 
   it("is deterministic for the same report", () => {

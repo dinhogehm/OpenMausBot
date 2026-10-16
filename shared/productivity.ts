@@ -248,6 +248,8 @@ export interface ReportKpis {
   mergedPrs: number;
   /** Release-carrier PRs merged in the period (how the code is published, not new work). */
   carrierPrs: number;
+  /** PRs closed without merge whose work entered main through a lote merged in the period. */
+  batchedPrs: number;
   /** Issues closed in the period (any reason). */
   closedIssues: number;
   /** Of those, closed as not planned or duplicate. */
@@ -260,13 +262,19 @@ export interface ReportKpis {
   leadIssueToMerge: Distribution;
   /** PR merged → in production, for PRs delivered in the period (ms). */
   leadMergeToProd: Distribution;
-  /** Release runs that RAN (CI or deploy steps) and ended without advancing the tag. */
+  /** Commits whose release RAN (CI or deploy steps), failed on the change and never reached
+   * production — one per commit, however many tries. A run stopped by the machine or the
+   * snapshot (drift, disk, queue) or with no verdict is aborted, not failed. */
   failedReleases: number;
+  /** The tries behind failedReleases' commits and those retried into production: each run that failed on the change. */
+  failedAttempts: number;
   /** Runs the watcher dropped before they ran (a newer tip, the admission queue). Not failures. */
   supersededReleases: number;
-  /** Runs that stopped before running anything (stale lock, smart-deploy could not start). Not failures. */
+  /** Runs with no verdict on the change: stopped before running (stale lock, smart-deploy could not
+   * start, nothing to publish) or by the machine/snapshot (drift of the sealed snapshot, disk full,
+   * queue timeout, killed). Not failures. */
   abortedReleases: number;
-  /** deliveries ÷ (deliveries + failures): how often a release that ran reached production; null without attempts. */
+  /** deliveries ÷ (deliveries + failed commits), per commit: how often a commit whose release ran reached production; null without any. */
   releaseSuccessRate: number | null;
   /** Distinct commits the operator declined to publish. */
   declinedReleases: number;
@@ -350,7 +358,13 @@ export interface ReportBucket {
   usageCoverage: "full" | "partial" | "none";
 }
 
-export interface ReportReleaseItem { number: number; title: string; kind: "pr" | "issue"; type?: IssueType; priority?: IssuePriority; carrier?: boolean }
+export interface ReportReleaseItem {
+  number: number; title: string; kind: "pr" | "issue"; type?: IssueType; priority?: IssuePriority; carrier?: boolean;
+  /** A PR closed without merge that reached production through this lote. */
+  viaBatch?: number;
+  /** A lote whose PRs are listed (the vehicle, not counted as a delivery). */
+  batch?: boolean;
+}
 
 export interface ReportRelease {
   sha: string;
@@ -541,7 +555,7 @@ export function releaseCountParts(report: Pick<ProductivityReport, "releases" | 
   return {
     released: report.releases.filter((row) => row.outcome === "released").length,
     failedCommits: report.releases.filter((row) => row.outcome === "failed").length,
-    failedTries: report.kpis.failedReleases,
+    failedTries: report.kpis.failedAttempts ?? report.kpis.failedReleases,
     superseded: report.kpis.supersededReleases,
     aborted: report.kpis.abortedReleases,
     declined: report.kpis.declinedReleases,

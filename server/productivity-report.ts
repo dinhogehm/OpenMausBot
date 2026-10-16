@@ -21,7 +21,8 @@ import {
   type Granularity, type IssuePriority, type IssueType, type ProductivityReport, type ReportBacklog, type ReportBotEffort,
   type ReportBucket, type ReportCoverage, type ReportGoals, type ReportKpis, type ReportPeriod, type ReportRelease, type ReportReleaseItem, type ReportSyncState,
 } from "../shared/productivity.ts";
-import { isCarrier, issuePriority, issueType, type GhCache, type GhIssue, type GhPr } from "./productivity-github.ts";
+import { isBatch, isCarrier, issuePriority, issueType, type GhCache, type GhIssue, type GhPr } from "./productivity-github.ts";
+import { infrastructureCause } from "./release-watch.ts";
 import type { DeclineEvent, ReleaseRun } from "./productivity-release-log.ts";
 import { ownerResponseMs, type NeedsYouRecord } from "./productivity-local.ts";
 
@@ -77,6 +78,10 @@ export interface Timeline {
   issueDelivered: Map<number, { at: number; pr: GhPr }>;
   /** Release pipeline stopped (first failure that ran after a success → next success). */
   blocked: Array<{ from: number; to: number }>;
+  /** A PR closed without merge whose work a lote took to production → that lote. */
+  batchOf: Map<number, GhPr>;
+  /** Lotes that delivered other PRs: vehicles, like carriers — their origins are the work. */
+  vehicles: Set<number>;
 }
 
 const notPlanned = (issue: GhIssue) => issue.stateReason === "NOT_PLANNED" || issue.stateReason === "DUPLICATE";
@@ -89,6 +94,42 @@ export function issuesOfPr(pr: GhPr, issues: Record<string, GhIssue>): GhIssue[]
   return [...numbers]
     .map((number) => issues[String(number)])
     .filter((issue): issue is GhIssue => Boolean(issue) && issue!.state === "CLOSED" && !notPlanned(issue!));
+}
+
+/** A run as the report counts it: a failure is a run that RAN and got a verdict on the
+ * change. One that ran and stopped on the machine or the snapshot (drift of the sealed
+ * snapshot, git unreadable, disk full, queue timeout, nothing to publish) or with no
+ * verdict at all (killed, interrupted) is aborted: not a failure of the commit. */
+export function countedRun(run: ReleaseRun): ReleaseRun {
+  if (run.outcome !== "failed" || run.origin) return run;
+  // "Release abortado" with no [ERROR] before it says nothing about the change (15/10: a full disk)
+  const verdict = run.cause && !/^\s*Release abort(?:ado|ed)\.?\s*$/i.test(run.cause) ? run.cause : null;
+  if (verdict && !infrastructureCause(verdict)) return run;
+  return { ...run, outcome: "aborted" };
+}
+
+/** Lote origins: a PR closed WITHOUT merge, cited by a merged lote, closed after the lote
+ * merged (the lote's PRs are closed once it lands). When two lotes cite it, the last one
+ * merged before it was closed took it. Carriers and other lotes are never origins. */
+export function batchOrigins(github: GhCache): Map<number, GhPr> {
+  const lotes = Object.values(github.prs).filter((pr) => pr.mergedAt !== null && pr.base === "main" && pr.batch?.length);
+  const out = new Map<number, GhPr>();
+  for (const lote of lotes) {
+    for (const number of lote.batch!) {
+      const origin = github.prs[String(number)];
+      if (!origin || origin.state !== "CLOSED" || origin.mergedAt !== null || origin.closedAt === null) continue;
+      if (isCarrier(origin) || isBatch(origin) || origin.closedAt < lote.mergedAt!) continue;
+      const known = out.get(number);
+      if (!known || lote.mergedAt! > known.mergedAt!) out.set(number, lote);
+    }
+  }
+  return out;
+}
+
+/** When a PR's work entered main: its merge, or its lote's merge. */
+export function effectiveMergedAt(pr: GhPr | undefined, timeline: Pick<Timeline, "batchOf">): number | null {
+  if (!pr) return null;
+  return pr.mergedAt ?? timeline.batchOf.get(pr.number)?.mergedAt ?? null;
 }
 
 /** The log's runs plus the production deployments GitHub recorded before
@@ -105,7 +146,7 @@ export function allRuns(input: Pick<ReportInputs, "runs" | "github">): ReleaseRu
       ...(deployment.successAt === null ? { cause: "GitHub deployment failed" } : {}),
     }];
   });
-  return [...input.runs, ...fromGithub];
+  return [...input.runs.map(countedRun), ...fromGithub];
 }
 
 /** Two releases are compared only when one source covers the whole time
@@ -158,16 +199,27 @@ export function buildTimeline(input: Pick<ReportInputs, "runs" | "github" | "now
   const runs = allRuns(input);
   const events = successfulReleases(runs);
   const spans = releaseSourceSpans(input);
+  const batchOf = batchOrigins(github);
+  const originsOf = new Map<number, GhPr[]>();
+  for (const [number, lote] of batchOf) {
+    const origin = github.prs[String(number)];
+    if (origin) originsOf.set(lote.number, [...(originsOf.get(lote.number) ?? []), origin]);
+  }
+  const vehicles = new Set<number>();
   events.forEach((event, index) => {
     const previous = index > 0 ? events[index - 1]! : undefined;
     const joined = previous && contiguous(spans, previous.at, event.at);
     const base = joined ? previous!.sha : undefined;
     const commits = base ? github.compares[`${base}...${event.sha}`] : undefined;
-    const prs = (commits ?? []).map((sha) => byMergeSha.get(sha)).filter((pr): pr is GhPr => Boolean(pr)).sort((a, b) => a.number - b.number);
+    const merged = (commits ?? []).map((sha) => byMergeSha.get(sha)).filter((pr): pr is GhPr => Boolean(pr));
+    // a lote in the release brings the PRs it took (closed without merge): they are the delivery
+    const origins = merged.flatMap((pr) => originsOf.get(pr.number) ?? []);
+    for (const pr of merged) if (originsOf.has(pr.number)) vehicles.add(pr.number);
+    const prs = [...new Map([...merged, ...origins].map((pr) => [pr.number, pr])).values()].sort((a, b) => a.number - b.number);
     const issueMap = new Map<number, GhIssue>();
     for (const pr of prs) {
       if (!prDelivered.has(pr.number)) prDelivered.set(pr.number, event.at);
-      if (isCarrier(pr)) continue;
+      if (isCarrier(pr) || vehicles.has(pr.number)) continue;
       for (const issue of issuesOfPr(pr, github.issues)) {
         issueMap.set(issue.number, issue);
         if (!issueDelivered.has(issue.number)) issueDelivered.set(issue.number, { at: event.at, pr });
@@ -192,8 +244,11 @@ export function buildTimeline(input: Pick<ReportInputs, "runs" | "github" | "now
     if (attempt.ok && since !== null) { blocked.push({ from: since, to: attempt.at }); since = null; }
   }
   if (since !== null) blocked.push({ from: since, to: input.now });
-  return { releases, prDelivered, issueDelivered, blocked };
+  return { releases, prDelivered, issueDelivered, blocked, batchOf, vehicles };
 }
+
+/** A delivered PR that is work, not a vehicle (a carrier, or a lote whose PRs are counted). */
+const isWork = (pr: GhPr | undefined, timeline: Pick<Timeline, "vehicles">): pr is GhPr => Boolean(pr) && !isCarrier(pr!) && !timeline.vehicles.has(pr!.number);
 
 // ── the index: every time sorted once, counted by binary search ────────────
 
@@ -234,7 +289,12 @@ interface ReportIndex {
   releases: Series; // value: delivered non-carrier PRs first shipped there
   releaseList: ReleaseEvent[];
   unknownContent: Series;
+  /** Commits whose release RAN, failed on the change, and never reached production — one per commit. */
   failures: Series;
+  /** The tries behind them (each run that failed on the change). */
+  failedAttempts: Series;
+  /** PRs closed without merge that entered main through a lote (at the lote's merge). */
+  batched: Series;
   superseded: Series;
   aborted: Series;
   declines: Series;
@@ -259,7 +319,14 @@ function buildIndex(input: ReportInputs): ReportIndex {
   const deliveredNonCarrier = new Map<number, number>(); // release at → count
   for (const [number, at] of timeline.prDelivered) {
     const pr = github.prs[String(number)];
-    if (pr && !isCarrier(pr)) deliveredNonCarrier.set(at, (deliveredNonCarrier.get(at) ?? 0) + 1);
+    if (isWork(pr, timeline)) deliveredNonCarrier.set(at, (deliveredNonCarrier.get(at) ?? 0) + 1);
+  }
+  // a commit is one release: its failed tries count once, and not at all if it reached production
+  const releasedShas = new Set(runs.filter((run) => run.outcome === "released").map((run) => run.sha));
+  const failedCommits = new Map<string, number>();
+  for (const run of runs) {
+    if (run.outcome !== "failed" || run.endedAt === null || releasedShas.has(run.sha)) continue;
+    failedCommits.set(run.sha, Math.max(failedCommits.get(run.sha) ?? -Infinity, run.endedAt));
   }
   const issues = Object.values(github.issues);
   const prs = Object.values(github.prs).filter((pr) => pr.mergedAt !== null && pr.base === "main");
@@ -271,7 +338,9 @@ function buildIndex(input: ReportInputs): ReportIndex {
     releases: new Series(timeline.releases.map((release) => [release.at, deliveredNonCarrier.get(release.at) ?? 0])),
     releaseList: timeline.releases,
     unknownContent: series(timeline.releases.filter((release) => release.contentUnknown).map((release) => release.at)),
-    failures: series(runs.filter((run) => run.outcome === "failed").map((run) => run.endedAt)),
+    failures: series([...failedCommits.values()]),
+    failedAttempts: series(runs.filter((run) => run.outcome === "failed").map((run) => run.endedAt)),
+    batched: series([...timeline.batchOf.values()].map((lote) => lote.mergedAt)),
     superseded: series(runs.filter((run) => run.outcome === "superseded").map((run) => run.endedAt)),
     aborted: series(runs.filter((run) => run.outcome === "aborted").map((run) => run.endedAt)),
     declines: series([...new Map(input.declines.map((decline) => [decline.sha, decline.at])).values()]),
@@ -346,7 +415,7 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
   const { github } = input;
   const end = Math.min(to, input.now);
   const releases = index.releaseList.filter((release) => within(release.at, from, to));
-  const deliveredPrs = [...index.timeline.prDelivered].filter(([number, at]) => within(at, from, to) && !isCarrier(github.prs[String(number)]!));
+  const deliveredPrs = [...index.timeline.prDelivered].filter(([number, at]) => within(at, from, to) && isWork(github.prs[String(number)], index.timeline));
   const deliveredIssues = [...index.timeline.issueDelivered].filter(([, delivery]) => within(delivery.at, from, to));
   const closedIssues = Object.values(github.issues).filter((issue) => within(issue.closedAt, from, to));
   const closedByType = zeroByType();
@@ -361,9 +430,14 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
   for (const [number, delivery] of deliveredIssues) {
     const issue = github.issues[String(number)]!;
     leadIssueToProd.push(Math.max(0, delivery.at - issue.createdAt));
-    if (delivery.pr.mergedAt !== null) leadIssueToMerge.push(Math.max(0, delivery.pr.mergedAt - issue.createdAt));
+    const merged = effectiveMergedAt(delivery.pr, index.timeline);
+    if (merged !== null) leadIssueToMerge.push(Math.max(0, merged - issue.createdAt));
   }
-  const leadMergeToProd = deliveredPrs.map(([number, at]) => Math.max(0, at - (github.prs[String(number)]!.mergedAt ?? 0)));
+  // a lote's PR entered main with the lote: that is its merge
+  const leadMergeToProd = deliveredPrs.flatMap(([number, at]) => {
+    const merged = effectiveMergedAt(github.prs[String(number)], index.timeline);
+    return merged === null ? [] : [Math.max(0, at - merged)];
+  });
   const failed = index.failures.count(from, to);
   const blockedMs = index.timeline.blocked.reduce((sum, interval) => sum + overlap(interval, from, end), 0);
   const blockedWeekendMs = index.timeline.blocked.reduce((sum, interval) => {
@@ -402,6 +476,7 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
     unknownContentReleases: index.unknownContent.count(from, to),
     mergedPrs: index.merged.count(from, to),
     carrierPrs: index.carriers.count(from, to),
+    batchedPrs: index.batched.count(from, to),
     closedIssues: closedIssues.length,
     closedNotPlanned: closedIssues.filter(notPlanned).length,
     closedByType,
@@ -410,6 +485,7 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
     leadIssueToMerge: distribution(leadIssueToMerge),
     leadMergeToProd: distribution(leadMergeToProd),
     failedReleases: failed,
+    failedAttempts: index.failedAttempts.count(from, to),
     supersededReleases: index.superseded.count(from, to),
     abortedReleases: index.aborted.count(from, to),
     releaseSuccessRate: releases.length + failed ? releases.length / (releases.length + failed) : null,
@@ -495,7 +571,10 @@ function releaseRows(input: ReportInputs, index: ReportIndex, from: number, to: 
     ...head(release.headPr),
     ...(release.tagNotAdvanced ? { tagNotAdvanced: true } : {}),
     ...(release.postRelease ? { postRelease: release.postRelease } : {}),
-    prs: release.prs.map((pr) => ({ number: pr.number, title: pr.title, kind: "pr" as const, ...(isCarrier(pr) ? { carrier: true } : {}) })),
+    prs: release.prs.map((pr) => {
+      const lote = index.timeline.batchOf.get(pr.number);
+      return { number: pr.number, title: pr.title, kind: "pr" as const, ...(isCarrier(pr) ? { carrier: true } : {}), ...(lote ? { viaBatch: lote.number } : {}), ...(index.timeline.vehicles.has(pr.number) ? { batch: true } : {}) };
+    }),
     issues: release.issues.map(item),
     ...(release.contentUnknown ? { contentUnknown: true, contentUnknownReason: release.contentUnknownReason } : {}),
   }));
@@ -565,7 +644,9 @@ function backlogOf(input: ReportInputs): ReportBacklog {
   const p1 = open.filter((issue) => issuePriority(issue.labels) === "p1");
   const p0 = open.filter((issue) => issuePriority(issue.labels) === "p0");
   const oldestP1 = [...p0, ...p1].sort((a, b) => a.createdAt - b.createdAt)[0];
-  const waiting = input.github.openPrs.filter((pr) => !pr.draft && pr.base === "main" && pr.gate !== "success").sort((a, b) => a.createdAt - b.createdAt);
+  // a PR a merged lote already took is not waiting for the gate: its code is in main (it is closed later)
+  const absorbed = new Set(Object.values(input.github.prs).filter((pr) => pr.mergedAt !== null && pr.base === "main" && pr.batch?.length).flatMap((pr) => pr.batch!));
+  const waiting = input.github.openPrs.filter((pr) => !pr.draft && pr.base === "main" && pr.gate !== "success" && !absorbed.has(pr.number)).sort((a, b) => a.createdAt - b.createdAt);
   return {
     openIssues: open.length,
     openP1: p1.length,

@@ -29,8 +29,10 @@ export interface CollectorDeps {
   dataDir: string;
   gh?: GhRunner;
   now?: () => number;
-  /** The watcher's out log (and its rotated .gz) and its err log (read for "live without the tag"). */
-  logs: { gz: string; out: string; err?: string };
+  /** The watcher's out log (and its rotated .gz) and its err log (read for "live without the tag").
+   * `dir`: where the release logs live — a release run by hand (release-production.sh) logs to its
+   * own file there (<issue>-production-<stamp>.log, production-release-<n>.out.log), not to the watcher's. */
+  logs: { gz: string; out: string; err?: string; dir?: string };
   ownerPending: () => { open: readonly PendingLike[]; resolved: readonly ResolvedLike[] };
   botNames: () => ReadonlyMap<string, string>;
   usage: (range: { from: Date; to: Date }) => readonly UsageLike[];
@@ -39,6 +41,20 @@ export interface CollectorDeps {
   /** Oldest month file of the usage ledger, as an instant. */
   usageFrom: () => number | null;
   log?: (line: string) => void;
+}
+
+/** A release run by hand writes its own log next to the watcher's: "9580-production-20261015T0355.log",
+ * "production-release-9017.out.log". Its run is a release like any other (on 15/10 342236931 went to
+ * production this way and the report did not see it). The watcher's own files and CI logs are not these. */
+export const MANUAL_RELEASE_LOG = /^(?:[\w.-]+-production-\d{8}T\d{4,6}Z?\.log|production-release-[\w.-]+\.out\.log)$/;
+
+export function manualReleaseLogs(dir: string | undefined): string[] {
+  if (!dir) return [];
+  try {
+    return readdirSync(dir).filter((name) => MANUAL_RELEASE_LOG.test(name)).sort().map((name) => join(dir, name));
+  } catch {
+    return [];
+  }
 }
 
 /** Bumped when the release log's reading changes (v2: superseded/aborted runs,
@@ -95,6 +111,8 @@ export class ProductivityCollector {
   private gzParsed: { signature: FileSignature; state: ReleaseLogState } | null = null;
   private outSignature: FileSignature | null = null;
   private errSignature: FileSignature | null = null;
+  /** Hand-run release logs, parsed once per change of each file. */
+  private manual = new Map<string, { signature: FileSignature; runs: ReleaseRun[]; from: number | null; to: number | null }>();
   private inflight: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sync: ReportSyncState = { state: "idle", lastSyncAt: null, lastAttemptAt: null, nextSyncAt: null, error: null, rateLimit: null };
@@ -197,10 +215,27 @@ export class ProductivityCollector {
       this.gzParsed = null;
     }
     const err = this.deps.logs.err ? fileSignature(this.deps.logs.err) : null;
-    if (out && sameSignature(out, this.outSignature) && sameSignature(err, this.errSignature) && this.gzParsed?.signature && sameSignature(gz, this.gzParsed.signature)) return;
+    let manualChanged = false;
+    for (const path of manualReleaseLogs(this.deps.logs.dir)) {
+      const signature = fileSignature(path);
+      if (!signature || sameSignature(signature, this.manual.get(path)?.signature)) continue;
+      const own = emptyReleaseLogState();
+      await feedReleaseLogFile(own, path);
+      // still being written: its open run is running; an old file's open run was cut off
+      const result = finishReleaseLog(own, { endOfStream: this.now() - signature.mtimeMs < 30 * 60_000 });
+      this.manual.set(path, { signature, runs: result.runs, from: result.from, to: result.to });
+      manualChanged = true;
+    }
+    if (!manualChanged && out && sameSignature(out, this.outSignature) && sameSignature(err, this.errSignature) && this.gzParsed?.signature && sameSignature(gz, this.gzParsed.signature)) return;
     const state: ReleaseLogState = this.gzParsed ? structuredClone(this.gzParsed.state) : emptyReleaseLogState();
     if (out) await feedReleaseLogFile(state, out.path);
-    const parsed = finishReleaseLog(state, { endOfStream: true });
+    const watcher = finishReleaseLog(state, { endOfStream: true });
+    const manual = [...this.manual.values()];
+    const parsed = {
+      ...watcher,
+      runs: [...watcher.runs, ...manual.flatMap((file) => file.runs)],
+      // a hand-run log only adds runs; the coverage stays the watcher's (it is the continuous source)
+    };
     // deploys that went live while the tag push was refused (err log only), kept across its truncation
     const liveWithoutTag = new Set(this.history.liveWithoutTag ?? []);
     if (err) for (const sha of liveWithoutTagShas(await readFile(err.path, "utf8"))) liveWithoutTag.add(sha);
@@ -210,7 +245,8 @@ export class ProductivityCollector {
     for (const run of applyLiveWithoutTag(merged, liveWithoutTag)) runs[run.key] = run;
     // a run seen running before and gone from the files now (rotated away mid-run) is not left running
     for (const [key, run] of Object.entries(runs)) {
-      if (run.outcome === "running" && !parsed.runs.some((each) => each.key === key)) runs[key] = { ...run, outcome: "failed", interrupted: true };
+      // gone from the files (rotated away mid-run) or cut off: no verdict on the change
+      if (run.outcome === "running" && !parsed.runs.some((each) => each.key === key)) runs[key] = { ...run, outcome: "aborted", interrupted: true };
     }
     const declines = { ...this.history.declines };
     for (const decline of parsed.declines) if (!declines[decline.sha]) declines[decline.sha] = decline;

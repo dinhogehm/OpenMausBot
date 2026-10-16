@@ -48,6 +48,10 @@ export interface GhPr {
   fixes?: number[];
   /** Its title or text says it ships a part ("Fase 0 do #9071", "parte 2", "entrega parcial"). */
   partial?: true;
+  /** A batch ("lote") PR only: the PRs it says it took (batchMembers). The lote merges the
+   * work of other PRs, which are then closed WITHOUT merge: their code reaches production
+   * through the lote (lot AA — #9604 took 12 such PRs to production on 16/10). */
+  batch?: number[];
   labels: string[];
 }
 
@@ -81,7 +85,7 @@ export interface WalkState { watermark: number | null; cursor: string | null; co
 
 /** Bumped whenever what a sync stores changes: an older cache is migrated
  * (see migrateGhCache) so a parser or filter fix reaches data already saved. */
-export const GH_CACHE_VERSION = 3;
+export const GH_CACHE_VERSION = 4;
 
 export interface GhCache {
   version: number;
@@ -110,7 +114,7 @@ export function emptyGhCache(repo = PRODUCTION_REPO): GhCache {
 /** Bring a cache saved by an older version up to date, keeping what is still
  * valid: compares are immutable facts (kept); PRs and issues are kept but the
  * walks start over so every item is read again with the current fields
- * (v2: explicit issue references; v3: the Portuguese ones, "Fecha #N"); deployments whose final state was saved
+ * (v2: explicit issue references; v3: the Portuguese ones, "Fecha #N"; v4: the PRs a lote cites); deployments whose final state was saved
  * without the fields the current filter needs (failedAt, creator) are read again. */
 export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: boolean } {
   if (cache.version === GH_CACHE_VERSION) return { cache, migrated: false };
@@ -202,6 +206,29 @@ export function issuePriority(labels: readonly string[]): IssuePriority {
 export const isCarrier = (pr: Pick<GhPr, "head" | "title">): boolean =>
   /(^|\/)release-carrier/i.test(pr.head) || /^chore\(release\):\s*carrier/i.test(pr.title);
 
+/** A batch PR ("lote"): it merges the work of other PRs into main in one gate — "fix(lote): Lote B",
+ * "chore(lote): …", "chore(release): lote 24/09 — 7 PRs", a lote/… branch. Not "ações em lote" (a feature). */
+export const isBatch = (pr: Pick<GhPr, "head" | "title">): boolean =>
+  !isCarrier(pr) && (/^\w+\(lote\)/i.test(pr.title) || /^\w+\(release\):\s*lote\b/i.test(pr.title) || /(^|\/)lote[/-]/i.test(pr.head));
+
+/** Every "#N" a text cites. */
+export function citedNumbers(text: string | null | undefined, self?: number): number[] {
+  if (!text) return [];
+  return [...new Set([...text.matchAll(/#(\d{1,7})\b/g)].map((match) => Number(match[1])))].filter((n) => n !== self);
+}
+
+/** The PRs a lote says it took: those its title names, the first cell of its table
+ * ("| #9570 | e0c5d6094 | …", "| 1 | #9431 | …") and its "**PR #9409 — …**" headings.
+ * Not every number its text mentions: "#9575/#9576 ficam na etapa de scripts" is a PR the
+ * lote left out, and "no formato do Lote Foco (#9506)" another lote. */
+export function batchMembers(title: string | null | undefined, body: string | null | undefined, self?: number): number[] {
+  const found = new Set(citedNumbers(title, self));
+  for (const line of (body ?? "").split("\n")) {
+    const row = /^\s*\|\s*(?:\d+\s*\|\s*)?#(\d+)\b/.exec(line) ?? /^\s*(?:[-*]\s+)?\*\*PR #(\d+)\b/.exec(line);
+    if (row && Number(row[1]) !== self) found.add(Number(row[1]));
+  }
+  return [...found];
+}
 
 // ── GraphQL ─────────────────────────────────────────────────────────────────
 
@@ -256,6 +283,7 @@ export function parsePr(node: Json): GhPr | null {
     refs: [...new Set([...explicitReferences(node.body), ...explicitReferences(node.mergeCommit?.message)])].filter((n) => n !== node.number),
     fixes: [...new Set([...explicitReferences(node.body, { closing: true }), ...explicitReferences(node.mergeCommit?.message, { closing: true })])].filter((n) => n !== node.number),
     ...(partialDelivery(`${node.title ?? ""}\n${node.body ?? ""}\n${node.mergeCommit?.message ?? ""}`) ? { partial: true as const } : {}),
+    ...(isBatch({ head: String(node.headRefName ?? ""), title: String(node.title ?? "") }) ? { batch: batchMembers(node.title, node.body, node.number) } : {}),
     labels: (node.labels?.nodes ?? []).map((label: Json) => String(label?.name ?? "")).filter(Boolean),
   };
 }

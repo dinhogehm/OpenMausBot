@@ -11,7 +11,7 @@ import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ToolResults, TOOL_RESULT_MAX_CHARS } from "./tool-results.ts";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { homedir } from "node:os";
 import { authorizeExternalRuntime, externalRuntimeIsActive, type ExternalRuntimeGrant } from "./external-runtime.ts";
 
@@ -8771,7 +8771,7 @@ const autonomyDispatching = new Set<string>();
 const productivityEnabled = process.env.OMB_PRODUCTIVITY === "1" || (process.env.OMB_PRODUCTIVITY !== "0" && existsSync(join(homedir(), ".nuria")));
 const productivity = new ProductivityCollector({
   dataDir: DATA_DIR,
-  logs: { gz: `${RELEASE_OUT_LOG}.1.gz`, out: RELEASE_OUT_LOG, err: RELEASE_ERR_LOG },
+  logs: { gz: `${RELEASE_OUT_LOG}.1.gz`, out: RELEASE_OUT_LOG, err: RELEASE_ERR_LOG, dir: dirname(RELEASE_OUT_LOG) },
   ownerPending: () => ({ open: autonomy.allOwnerPending(), resolved: autonomy.resolvedOwnerPendingOf() }),
   botNames: () => new Map(store.bots.map((bot) => [bot.id, bot.name])),
   usage: (range) => readUsage(DATA_DIR, range),

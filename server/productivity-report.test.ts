@@ -93,7 +93,7 @@ describe("month buckets (São Paulo)", () => {
 
   it("counts deliveries, merges and closures by their own dates; unknown contents are flagged", () => {
     expect(september).toMatchObject({ deliveredPrs: 1, unknownContentReleases: 1, mergedPrs: 1, closedIssues: 1, closedBugs: 1, failedReleases: 0 });
-    expect(october).toMatchObject({ deliveredPrs: 3, unknownContentReleases: 0, mergedPrs: 4, closedIssues: 1, closedBugs: 0, failedReleases: 2 }); // the one closed as not planned stays out (report-fixes)
+    expect(october).toMatchObject({ deliveredPrs: 3, unknownContentReleases: 0, mergedPrs: 4, closedIssues: 1, closedBugs: 0, failedReleases: 1 }); // the one closed as not planned stays out (report-fixes)
   });
 
   it("knows where no release source existed, and where the bots were not recorded (unknown, not zero)", () => {
@@ -126,7 +126,8 @@ describe("KPIs", () => {
   });
 
   it("a failure is a run that ran; superseded and aborted runs are apart and out of the success rate (INSP-V r1 #1)", () => {
-    expect(k).toMatchObject({ failedReleases: 2, supersededReleases: 1, abortedReleases: 1, declinedReleases: 1, releaseSuccessRate: 3 / 5 });
+    // x1 and x2 are two tries of ONE commit (sha x): one failed commit, two failed tries
+    expect(k).toMatchObject({ failedReleases: 1, failedAttempts: 2, supersededReleases: 1, abortedReleases: 1, declinedReleases: 1, releaseSuccessRate: 3 / 4 });
   });
 
   it("the release pipeline stopped 5 h (production up), none of it on a weekend (INSP-V r1 #2)", () => {
@@ -221,7 +222,7 @@ describe("release rows", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ outcome: "failed", attempts: 2, supersededRuns: 1, abortedRuns: 1, cause: "Local CI failed at tests" });
     // the counts stay runs: 2 failures that ran, 1 superseded, 1 aborted
-    expect(report.kpis).toMatchObject({ failedReleases: 2, supersededReleases: 1, abortedReleases: 1 });
+    expect(report.kpis).toMatchObject({ failedReleases: 1, failedAttempts: 2, supersededReleases: 1, abortedReleases: 1 });
   });
 
   it("keeps the backlog snapshot at the end of a closed period apart from now (INSP-V r2 #2, #7)", () => {

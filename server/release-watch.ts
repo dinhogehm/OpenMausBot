@@ -145,6 +145,20 @@ export function nothingToPublish(cause: string | null): boolean {
   return Boolean(cause && /sem alvo de runtime|n[ãa]o publica nada|nothing to (?:publish|release)|no runtime target/i.test(cause));
 }
 
+/** A verdict about the machine or the release snapshot, not about the commit: the sealed
+ * snapshot drifted (another process touched the release worktree, or origin/main moved
+ * under it), git could not be read, the disk filled, the admission queue timed out or was
+ * stopped by the owner, or there was nothing to publish. Such a run did not judge the
+ * change: it is counted apart (aborted), never as a failed release. On 15/10 four of the
+ * five tries of 9cd34d947 ended like this and the report showed 14 failures in a week
+ * that had 4 failed commits. */
+export function infrastructureCause(cause: string | null | undefined): boolean {
+  if (!cause) return false;
+  if (nothingToPublish(cause)) return true;
+  return /Integridade do snapshot Git|drift detectado|Release snapshot changed|snapshot mudou durante o release|falha operacional ao consultar|No space left on device|GiB livres|ADMISSION_(?:TIMEOUT|STOPPED|NESTED_REFUSED)\b/i.test(cause);
+}
+
+
 /** The full sha of a failed short one, from the release's own admission
  * line in the out log ("label=release:production:<40 hex>"). */
 export function fullReleaseSha(outTail: string, short: string): string | null {

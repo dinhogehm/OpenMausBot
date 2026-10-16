@@ -265,7 +265,7 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
           comparison={compareKpi(k.leadIssueToProd.median, p.leadIssueToProd.median, { comparable: release, samples: { current: k.leadIssueToProd.n, previous: p.leadIssueToProd.n } })} polarity="down" kind="span"
           goal={goalOf(report, "leadTimeHours", k.leadIssueToProd.median === null ? null : k.leadIssueToProd.median / 3_600_000, (goal) => `≤ ${decimals(goal)} h`)} />
         <KpiCard label={t("report.kpi.mergedPrs")} value={formatCount(k.mergedPrs)} definition={t("report.kpi.mergedPrs.def")} short={t("report.kpi.mergedPrs.short")}
-          detail={t("report.kpi.mergedPrs.detail", { carriers: formatCount(k.carrierPrs) })}
+          detail={t("report.kpi.mergedPrs.detail", { carriers: formatCount(k.carrierPrs), batched: formatCount(k.batchedPrs ?? 0) })}
           comparison={compareKpi(k.mergedPrs, p.mergedPrs, { beforeRepo: oldRepo })} polarity="up" />
         <KpiCard label={t("report.kpi.closedIssues")} value={formatCount(resolved)} definition={t("report.kpi.closedIssues.def")} short={t("report.kpi.closedIssues.short")}
           detail={t("report.kpi.closedIssues.detail", { bugs: formatCount(k.closedByType.bug), improvements: formatCount(k.closedByType.improvement), p1: formatCount(k.closedByPriority.p0 + k.closedByPriority.p1), p2: formatCount(k.closedByPriority.p2) })}
@@ -436,7 +436,8 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const approximate = release.timeSource !== "log";
-  const prs = release.prs.filter((pr) => !pr.carrier);
+  // the work: not the carriers, nor a lote whose PRs are listed (lot AA)
+  const prs = release.prs.filter((pr) => !pr.carrier && !pr.batch);
   const expandable = release.outcome === "released" ? release.prs.length > 0 || release.issues.length > 0 : Boolean(release.cause);
   const outcome = t(`report.outcome.${release.outcome}` as LocaleKey);
   return (
@@ -485,7 +486,7 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
               <div className="grid gap-3 md:grid-cols-2">
                 <div>
                   <h4 className="mb-1 text-[12px] font-medium text-ink-secondary">{t("report.releases.prs")}</h4>
-                  <ul className="space-y-0.5">{release.prs.map((pr) => <li key={pr.number} className="text-ink"><span className="tabular-nums">#{pr.number}</span> {pr.title}{pr.carrier ? <span className="text-ink-secondary"> · {t("report.releases.carrierTag")}</span> : null}</li>)}</ul>
+                  <ul className="space-y-0.5">{release.prs.map((pr) => <li key={pr.number} className="text-ink"><span className="tabular-nums">#{pr.number}</span> {pr.title}{pr.carrier ? <span className="text-ink-secondary"> · {t("report.releases.carrierTag")}</span> : null}{pr.batch ? <span className="text-ink-secondary"> · {t("report.releases.batchTag")}</span> : null}{pr.viaBatch ? <span className="text-ink-secondary"> · {t("report.releases.viaBatch", { number: String(pr.viaBatch) })}</span> : null}</li>)}</ul>
                 </div>
                 <div>
                   <h4 className="mb-1 text-[12px] font-medium text-ink-secondary">{t("report.releases.issues")}</h4>
