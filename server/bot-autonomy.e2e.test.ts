@@ -334,7 +334,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     ] });
     // while it works, its conversation's row says it runs headless, out of the Claude app
     const rowSessions = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ccSessions ?? []);
-    // the bot typed "#9999 teste": the session is titled the owner's way, without "#" (H7)
+    // the bot typed "#N teste": the session is titled the owner's way, without "#" (H7)
     await expect.poll(rowSessions, { timeout: 10_000 }).toEqual([expect.objectContaining({ sessionId: id, title: "9999 teste", surface: "cli" })]);
     // the running turn's claude is on the ledger with its start time (a restart can tell if it survived)
     await expect.poll(() => ccLedger()[0].proc?.lstart ?? "", { timeout: 3_000 }).toMatch(/\d{4}$/);

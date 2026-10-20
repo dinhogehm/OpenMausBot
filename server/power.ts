@@ -223,7 +223,7 @@ export function carrierBatteryCheck(power: PowerState | null, intent: "order" | 
 
 // A message or brief that starts a carrier, as the Chief writes them: the
 // script with --execute (flags in any order), a colloquial order whose object
-// is the carrier itself ("roda o carrier da #9330", "Publicar: carrier"), or
+// is the carrier itself ("roda o carrier da #N", "Publicar: carrier"), or
 // the /cpd skill (which ends in the carrier). Not one that negates it ("não
 // rode o carrier ainda"), nor one whose object is something else about the
 // carrier (its tests, a review, a PR), nor across a clause ("Rode ci:local;
@@ -238,7 +238,7 @@ const CARRIER_VERB = String.raw`(?:rod(?:a|e|ar)|liber(?:a|e|ar)|toc(?:a|ar)|toq
 const CARRIER_FILLER = String.raw`(?:o|a|os|as|um|uma|ess[ea]|est[ea]|aquel[ea]|seu|sua|teu|tua|meu|minha|nosso|nossa|com|de|do|da|no|na|em|via|pelo|pela|ver|j[áa]|agora|logo|the|an|this|that|our|your|with)`;
 /** Verb, then at most three small words, then the carrier: "roda o carrier", "manda ver no carrier", "Publicar: carrier". */
 const ORDER_BEFORE = new RegExp(String.raw`(?<![\p{L}\p{N}_/-])${CARRIER_VERB}(?:\s*[:\-–—])?(?:\s+${CARRIER_FILLER}){0,3}\s+(?:release-)?carrier\b`, "giu");
-/** The carrier, then the order: "Agora o carrier: execute", "carrier da #9330 liberado, pode rodar". */
+/** The carrier, then the order: "Agora o carrier: execute", "carrier da #N liberado, pode rodar". */
 const ORDER_AFTER = /\bcarrier\b[^:,;]{0,40}[:,]\s*(?:pode\s+|j[áa]\s+)?(rod\w*|execut\w*|solt\w*|dispar\w*|public\w*|mand\w*|run|go)\b/giu;
 /** The script and, after it, --execute with only flags (and their values)
  * between: anywhere in a clause ("cd ~/x && ./scripts/release-carrier.sh

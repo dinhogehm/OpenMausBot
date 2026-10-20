@@ -148,8 +148,8 @@ const REFS_FIRST = /^((?:(?:PR|issue|sess[ãa]o)\s*)?#\d+(?:\s*(?:[/·,&+]|e)\s*
  * aside by the server's rule ("@Osvaldo aprovar o deploy" → "Aprovar o
  * deploy"); a title that is ONLY a mention becomes the bot's question
  * (`ask`, never the item's "why") or "<bot> precisa de uma resposta sua".
- * A title that starts with references ("#9052 / PR #9332: confirmar…")
- * starts with the action, references after ("Confirmar… (#9052 / PR #9332)"). */
+ * A title that starts with references ("#N / PR #M: confirmar…")
+ * starts with the action, references after ("Confirmar… (#N / PR #M)"). */
 export function needsYouTitle(title: string, opts: { ask?: string; botName: string; botNames?: readonly string[] }): string {
   const rest = stripLeadingMentions(title, opts.botNames);
   if (isMentionOnly(title, opts.botNames)) {

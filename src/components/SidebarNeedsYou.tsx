@@ -1,3 +1,4 @@
+import { copyText } from "@/lib/copy-text";
 import { Check, ChevronRight, CircleAlert, Clock, Copy, ExternalLink, ListChecks, ListTodo, ShieldQuestion } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
@@ -12,7 +13,7 @@ export const NEEDS_YOU_SIDEBAR_ROWS = 6;
  * how long it has waited — one place to answer from. Absent when nothing
  * waits. Each row opens the resolution screen on that item; "Ver todos"
  * opens it on the whole list. */
-export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, onOpenLink = (url) => void openExternalLink(url), onCopy = (text) => void navigator.clipboard?.writeText(text).catch(() => {}) }: {
+export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, onOpenLink = (url) => void openExternalLink(url), onCopy = (text) => void copyText(text) }: {
   items: NeedsYouItem[];
   density: SidebarDensity;
   now?: number;

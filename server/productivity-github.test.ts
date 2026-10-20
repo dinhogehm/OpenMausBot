@@ -76,7 +76,7 @@ describe("labels and links", () => {
     expect(explicitReferences("veja a tabela #3 e o épico #8750")).toEqual([]);
     expect(explicitReferences(null)).toEqual([]);
     const node = { number: 100, title: "t", body: "Corrige o fluxo.\n\nCloses #8986", createdAt: at(1), updatedAt: at(2), mergedAt: at(2), state: "MERGED", baseRefName: "main", headRefName: "perf/8750-epico", mergeCommit: { oid: "m", message: "fix: x (#100)\n\nRefs #8751" }, closingIssuesReferences: { nodes: [] }, labels: { nodes: [] } };
-    // the epic number in the branch (#8750) is not a reference
+    // the epic number in the branch (#N) is not a reference
     expect(parsePr(node)!.refs).toEqual([8986, 8751]);
   });
 

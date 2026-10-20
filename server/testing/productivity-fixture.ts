@@ -43,9 +43,9 @@ export function fixtureGithub(): GhCache {
     pull(3, "2026-10-01T08:00:00", { head: "fix/102-melhoria", refs: [102] }), // "Refs #102" in its body
     pull(4, "2026-10-01T12:00:00"), // merged after the last release: not in production yet
     pull(5, "2026-10-01T12:30:00", { base: "develop" }), // not main: not counted
-    // an epic's slice: names open issue #104 explicitly and in its branch — still not delivered (open)
+    // an epic's slice: names open issue #N explicitly and in its branch — still not delivered (open)
     pull(6, "2026-10-01T08:30:00", { head: "perf/104-epico", refs: [104] }),
-    // a branch that names #103 (not planned) and nothing else: no reference, nothing delivered
+    // a branch that names #M (not planned) and nothing else: no reference, nothing delivered
     pull(7, "2026-10-01T08:40:00", { head: "fix/103-tentativa" }),
   ];
   for (const each of prs) github.prs[String(each.number)] = each;

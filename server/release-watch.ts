@@ -137,7 +137,7 @@ export function fullReleaseSha(outTail: string, short: string): string | null {
 }
 
 /** How the watcher retries, said right: never "every 2 min", and never "no limit" — since
- * lot P (nuria-platform #9342) the installed watcher halts a commit by itself on the 2nd
+ * lot P (nuria-platform #N) the installed watcher halts a commit by itself on the 2nd
  * identical failure after the CI (lot T: same step and same failing tests), and on the
  * 1st tenant-drift failure; a different failure is tried again. */
 export function releaseRetryText(input: { halted: boolean; haltCode?: string; cycleMs: number | null; nothingToPublish: boolean }): string {
@@ -158,7 +158,7 @@ export function releaseRetryText(input: { halted: boolean; haltCode?: string; cy
 
 /** Production as it is right now, read in the same check that writes the alert (`git
  * ls-remote` of the tag): the Chief told the owner twice on 02/10 that the tag was at
- * a9e4b93ca and #9295 was not live, from memory, hours after the tag had moved to 09d832f4b
+ * a9e4b93ca and #M was not live, from memory, hours after the tag had moved to 09d832f4b
  * and the clients had been told (R10-release #3). Null tag: not readable now — said so. */
 export function productionStateLine(tagSha: string | null): string {
   return tagSha
@@ -199,7 +199,7 @@ export function releaseLoopPending(input: { short: string; full: string | null; 
  * loop (≥ RELEASE_FAILURES_ALERT failures with one cause), the owner has the
  * item to refuse it open, or already refused it. Stopping a session's gate
  * for it only feeds the loop — and the gate may be the very fix (R10-release
- * #1: the CI of #9348 killed for d5bb1f70b, then failing for the 5th time).
+ * #1: the CI of #K killed for d5bb1f70b, then failing for the 5th time).
  * Null when it is a release that may still go through. */
 export function releaseInLoop(input: { sha: string; failures: { sha: string; count: number } | null; seen: ReleaseLoopSeen | undefined; itemOpen: boolean; declined: string }): string | null {
   const sha = input.sha.trim();
@@ -354,7 +354,7 @@ export class ReleaseWatchState {
 // A release can reach production and still leave the certification tag
 // where it was (01/10: GH013, a ruleset blocked the watcher's push): every
 // watch on the tag goes blind and no client hears the delivery. And the
-// watcher can halt a tip for good (nuria-platform #9328: after N content
+// watcher can halt a tip for good (nuria-platform #P: after N content
 // failures it writes ~/.nuria/halted-production-release.{sha,reason} and
 // ~/.nuria/escalations/production-release-halted.json); from then on it does
 // NOT retry, and saying "it retries every 2 min" would be false.
@@ -621,9 +621,9 @@ export function releaseAttentionAlert(attention: ReleaseAttention, logs: { err: 
 /** The watcher's reason codes, said in pt-BR (unknown codes are kept as they are). */
 const HALT_REASONS: Record<string, string> = {
   "content-failure-limit": "limite de falhas de conteúdo atingido",
-  // nuria-platform #9319 (watch-production-release.sh): the post-deploy health halt
+  // nuria-platform #Q (watch-production-release.sh): the post-deploy health halt
   "post-release-health": "checagem de saúde pós-deploy",
-  // lot P (#9342): the same failure twice after the CI
+  // lot P (#N): the same failure twice after the CI
   "repeated-failure": "a mesma falha 2× seguidas depois da CI",
 };
 

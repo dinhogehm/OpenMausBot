@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 // "Relatório" (lot V): what the Nuria team put IN PRODUCTION — per hour, day
 // or month in São Paulo — for the owner to take to the board. KPI cards with
 // their trend against the previous period and their exact definition, charts
@@ -81,18 +82,18 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
       </fieldset>
       <label className="flex flex-col gap-1 text-[12px] font-medium text-ink-secondary">
         {t("report.window")}
-        <select value={isClosed ? "closed" : custom ? "custom" : String(query.count ?? PRESETS[query.granularity][0]!.count)}
+        <Select value={isClosed ? "closed" : custom ? "custom" : String(query.count ?? PRESETS[query.granularity][0]!.count)}
           onChange={(event) => {
             const value = event.target.value;
             if (value === "closed") onChange({ granularity: query.granularity, from: closed.from, to: closed.to });
             else if (value === "custom") onChange({ granularity: query.granularity, from: normalize(report ? new Date(report.period.from).toISOString().slice(0, 10) : today), to: normalize(today) });
             else onChange({ granularity: query.granularity, count: Number(value) });
           }}
-          className="h-9 rounded-lg border border-hairline/60 bg-panel px-2.5 text-[13px] font-normal text-ink">
+          size="md">
           {PRESETS[query.granularity].map((preset) => <option key={preset.count} value={preset.count}>{t(preset.label)}</option>)}
           {query.granularity !== "hour" && <option value="closed">{t("report.preset.closedMonth")}</option>}
           <option value="custom">{t("report.preset.custom")}</option>
-        </select>
+        </Select>
       </label>
       {custom && (
         <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); if (from && to) onChange({ granularity: query.granularity, from: normalize(from), to: normalize(to) }); }}>

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { FolderPlus, X } from "lucide-react";
 import type { CloudLendingBridge, CloudLendingSnapshot, SharedFolder } from "../../electron/computer-sharing.mjs";
-import { t } from "@/lib/i18n";
+import { activeLocale, t } from "@/lib/i18n";
+import { localizedRelativeTime } from "@/lib/memory";
 import type { LocaleKey } from "@/locales";
 import { LendingActivityList } from "./LendingActivity";
 import { Switch } from "./SettingsPrimitives";
@@ -11,28 +12,47 @@ const PROBLEMS: Partial<Record<string, LocaleKey>> = {
   "not-cloud": "lending.status.notCloud",
   waiting: "lending.status.waiting",
   paused: "lending.status.paused",
+  asleep: "lending.status.asleep",
   "signed-out": "lending.status.signedOut",
   "account-changed": "lending.status.accountChanged",
   "machine-changed": "lending.status.machineChanged",
+  "access-off": "lending.status.accessOff",
 };
 
-/** One line saying where lending stands. Pure, for the card and its tests. */
+const STOPPED: Partial<Record<string, LocaleKey>> = {
+  you: "lending.stopped.you",
+  "signed-out": "lending.stopped.signedOut",
+  "account-changed": "lending.stopped.accountChanged",
+  "machine-changed": "lending.stopped.machineChanged",
+};
+
+/** Why it is off and since when, kept across restarts: an off switch never hides that it was on. */
+export function lendingStoppedLine(state: CloudLendingSnapshot["state"]): string | null {
+  if (!state || state.enabled || !state.stopped) return null;
+  const date = new Intl.DateTimeFormat(activeLocale(), { dateStyle: "medium", timeStyle: "short" }).format(new Date(state.stopped.at));
+  return t(STOPPED[state.stopped.reason] ?? "lending.stopped.other", { date });
+}
+
+/** What My Cloud last did here, from this computer's own record of every request. */
+export function lendingLastUsedLine(snapshot: CloudLendingSnapshot | null): string | null {
+  if (!snapshot?.state?.enabled && !snapshot?.activity?.length) return null;
+  const last = snapshot?.activity?.find((entry) => entry.ok);
+  return last ? t("lending.lastUsed", { when: localizedRelativeTime(last.at, activeLocale()) }) : t("lending.neverUsed");
+}
+
 export function lendingStatusKey(snapshot: CloudLendingSnapshot | null, switchedOn: boolean): LocaleKey | null {
   const state = snapshot?.state;
+  if (state?.enabled && state.problem === "access-off") return "lending.status.accessOff";
   if (state?.enabled) {
     if (state.busy) return "lending.status.busy";
     if (state.connected) return "lending.status.lent";
     return PROBLEMS[state.problem ?? ""] ?? "lending.status.starting";
   }
   if (switchedOn) return "lending.status.chooseSomething";
-  // Off by an event the person should know about (signed out, another account).
   return state?.problem && state.problem !== "paused" ? PROBLEMS[state.problem] ?? null : null;
 }
 
-/** "Let my Cloud use this Mac": a switch, the scopes it lends, and this Mac's
- * own log. Every change applies at once; there is no confirmation, because
- * the switch and the chosen scopes are the consent. Main decides which Cloud
- * from the verified sign-in; nothing here names a server. */
+/** Security: main picks the Cloud from the verified sign-in; nothing here names a server. */
 export function CloudLending({ bridge }: { bridge: CloudLendingBridge }) {
   const [snapshot, setSnapshot] = useState<CloudLendingSnapshot | null>(null);
   const [draftOn, setDraftOn] = useState(false);
@@ -44,8 +64,6 @@ export function CloudLending({ bridge }: { bridge: CloudLendingBridge }) {
   const accept = (next: CloudLendingSnapshot) => {
     if (!mounted.current) return;
     setSnapshot(next);
-    // The saved grant is the truth for what is lent (it keeps its folders
-    // while off, so turning it back on lends the same things again).
     if (!pending.current && next.state) { setFolders(next.state.folders); setScreen(next.state.screen); }
   };
   useEffect(() => {
@@ -62,7 +80,6 @@ export function CloudLending({ bridge }: { bridge: CloudLendingBridge }) {
     catch { if (mounted.current) setFailed(true); }
     finally { pending.current = false; if (mounted.current) setWorking(false); }
   };
-  /** Lend exactly this selection now; an empty one lends nothing. */
   const lend = (nextFolders: SharedFolder[], nextScreen: boolean) => {
     setFolders(nextFolders); setScreen(nextScreen);
     void perform(() => nextFolders.length || nextScreen ? bridge.save({ folders: nextFolders, screen: nextScreen }) : bridge.stop());
@@ -76,6 +93,9 @@ export function CloudLending({ bridge }: { bridge: CloudLendingBridge }) {
   };
   if (!snapshot?.available) return null;
   const status = lendingStatusKey(snapshot, on);
+  const stopped = on ? null : lendingStoppedLine(snapshot.state);
+  const lastUsed = lendingLastUsedLine(snapshot);
+  const via = snapshot.state?.via === "access" ? t(snapshot.state.terminal ? "lending.viaAccessTerminal" : "lending.viaAccess") : null;
   return <div data-cloud-lending={enabled ? "on" : "off"} className="mt-2 flex w-full flex-col gap-3 border-t border-hairline/40 pt-4">
     <div className="flex items-start justify-between gap-3">
       <div className="min-w-0">
@@ -85,6 +105,12 @@ export function CloudLending({ bridge }: { bridge: CloudLendingBridge }) {
       <Switch checked={on} disabled={working} aria-label={t("lending.title")} onClick={toggle} />
     </div>
     {status && <p role="status" className={`text-[13px] ${enabled && snapshot.state?.busy ? "font-medium text-ink" : "text-ink-secondary"}`}>{t(status)}</p>}
+    {stopped && <div data-lending-stopped={snapshot.state?.stopped?.reason} className="flex flex-wrap items-center gap-2">
+      <p className="text-[13px] text-ink-secondary">{stopped}</p>
+      {(folders.length > 0 || screen) && <button type="button" disabled={working} className="ui-button" onClick={() => { setDraftOn(true); lend(folders, screen); }}>{t("lending.lendAgain")}</button>}
+    </div>}
+    {via && <p data-lending-via="access" className="text-[12px] text-ink-secondary">{via}</p>}
+    {lastUsed && <p data-lending-last-used className="text-[12px] text-ink-secondary">{lastUsed}</p>}
     {on && <>
       <fieldset disabled={working} className="flex flex-col gap-2 disabled:opacity-60">
         <legend className="mb-1 text-[13px] font-medium text-ink">{t("lending.folders")}</legend>

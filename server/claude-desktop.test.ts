@@ -160,7 +160,7 @@ function swap(screen: Real[], changes: Record<string, string | null>): Real[] {
 
 /** server.log 01/10, sends to 36300f35 ("Guarda de release sem commit
  * anterior"), "field not found" 4 times: "nuria-platform
- * fix/9326-guard-previous-commit | qual o status do gate da #9330? | + O v
+ * fix/9326-guard-previous-commit | qual o status do gate da #N? | + O v
  * Ignorar permissões | +114 - 4 | • CI | X | Opus 5.5 | Médio" — the last 8
  * lower lines, in the very order and layout of R7 (whose last 8 are the same
  * kinds of line). The header is the app's title for that session. */
@@ -971,7 +971,7 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(queued).toContain("veio da fila de sessões e continua nela");
     expect(queued).not.toMatch(/descartado|chame cc_session_start de novo/);
     // both ways in (the tool call and the queue) go through startCcSession with this text
-    const index = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
+    const index = ["index.ts", "cc-runtime.ts"].map((file) => readFileSync(join(import.meta.dirname, file), "utf8")).join("\n");
     expect(index).toContain("reusedFolderRefusal(block.last, basename(input.repo), fromQueue)");
     expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true)");
     expect(index).not.toMatch(/6 de 7 creates|fechá-la sem enviar/);

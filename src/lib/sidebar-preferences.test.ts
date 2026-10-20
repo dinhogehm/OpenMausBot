@@ -1,25 +1,46 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  PINNED_CIRCLES_KEY,
+  PINNED_CIRCLE_ORDER_KEY,
   SIDEBAR_ATTENTION_PINNED_KEY,
+  UNIVERSAL_PINS_KEY,
   SIDEBAR_COLLAPSED_SECTIONS_KEY,
   SIDEBAR_DENSITY_KEY,
+  SIDEBAR_TOOLS_LAYOUT_KEY,
   SIDEBAR_WIDTH_KEY,
   SIDEBAR_SECTION_ORDER_KEY,
+  SIMPLE_SIDEBAR_WIDTH_KEY,
+  clampSidebarWidth,
+  loadPinnedCircles,
+  loadPinnedCircleOrder,
+  loadUniversalPins,
   loadSidebarAttentionPinned,
   loadCollapsedSections,
   loadSectionOrder,
   loadSidebarDensity,
+  loadSidebarToolsLayout,
   loadSidebarWidth,
-  clampSidebarWidth,
+  parsePinnedCircles,
+  parseUniversalPins,
   parseSidebarAttentionPinned,
   parseSidebarDensity,
+  parseSidebarToolsLayout,
   saveCollapsedSections,
+  savePinnedCircles,
+  setPinnedCircleOrder,
+  saveUniversalPins,
   saveSectionOrder,
   saveSidebarAttentionPinned,
   saveSidebarDensity,
+  saveSidebarToolsLayout,
   saveSidebarWidth,
+  setSidebarToolsLayout,
+  subscribeSidebarToolsLayout,
   toggleCollapsedSection,
+  usePinnedCircleOrder,
 } from "./sidebar-preferences";
 import { userSectionId } from "./sidebar-layout";
 
@@ -58,6 +79,17 @@ describe("sidebar width preference", () => {
     expect(setItem).toHaveBeenCalledWith(SIDEBAR_WIDTH_KEY, "360");
     expect(loadSidebarWidth({ getItem: () => { throw new Error("blocked"); } })).toBeNull();
     expect(() => saveSidebarWidth(360, { setItem: () => { throw new Error("blocked"); } })).not.toThrow();
+  });
+
+  it("keeps Simple mode's width under its own key, so resizing one mode leaves the other alone", () => {
+    const setItem = vi.fn();
+    saveSidebarWidth(300, { setItem }, SIMPLE_SIDEBAR_WIDTH_KEY);
+    expect(setItem).toHaveBeenCalledExactlyOnceWith(SIMPLE_SIDEBAR_WIDTH_KEY, "300");
+    const saved: Record<string, string> = { [SIDEBAR_WIDTH_KEY]: "360", [SIMPLE_SIDEBAR_WIDTH_KEY]: "300" };
+    const storage = { getItem: (key: string) => saved[key] ?? null };
+    expect(loadSidebarWidth(storage)).toBe(360);
+    expect(loadSidebarWidth(storage, SIMPLE_SIDEBAR_WIDTH_KEY)).toBe(300);
+    expect(loadSidebarWidth({ getItem: (key) => key === SIDEBAR_WIDTH_KEY ? "360" : null }, SIMPLE_SIDEBAR_WIDTH_KEY)).toBeNull();
   });
 });
 
@@ -124,6 +156,66 @@ describe("sidebar section preferences", () => {
   });
 });
 
+describe("pinned circles preference", () => {
+  it("defaults off, stores the exact flag, and survives blocked storage", () => {
+    expect(parsePinnedCircles("true")).toBe(true);
+    expect(parsePinnedCircles("false")).toBe(false);
+    expect(parsePinnedCircles("yes")).toBe(false);
+    expect(parsePinnedCircles("1")).toBe(false);
+    expect(parsePinnedCircles(null)).toBe(false);
+
+    const setItem = vi.fn();
+    savePinnedCircles(true, { setItem });
+    savePinnedCircles(false, { setItem });
+    expect(setItem).toHaveBeenNthCalledWith(1, PINNED_CIRCLES_KEY, "true");
+    expect(setItem).toHaveBeenNthCalledWith(2, PINNED_CIRCLES_KEY, "false");
+    expect(loadPinnedCircles({ getItem: () => "true" })).toBe(true);
+    expect(loadPinnedCircles({ getItem: () => "false" })).toBe(false);
+    expect(loadPinnedCircles({ getItem: () => "untrusted" })).toBe(false);
+    expect(loadPinnedCircles({ getItem: () => { throw new Error("blocked"); } })).toBe(false);
+    expect(loadPinnedCircles(null)).toBe(false);
+    expect(() => savePinnedCircles(true, { setItem: () => { throw new Error("blocked"); } })).not.toThrow();
+    expect(() => savePinnedCircles(true, null)).not.toThrow();
+  });
+});
+
+describe("pinned circle order", () => {
+  it("keeps one deduplicated order, ignores a malformed list, and keeps the order for the session when storage is blocked", () => {
+    const setItem = vi.fn();
+    setPinnedCircleOrder(["b", "a", "a"], { setItem });
+    expect(setItem).toHaveBeenCalledWith(PINNED_CIRCLE_ORDER_KEY, JSON.stringify(["b", "a"]));
+    expect(loadPinnedCircleOrder({ getItem: () => JSON.stringify(["b", "a"]) })).toEqual(["b", "a"]);
+    expect(loadPinnedCircleOrder({ getItem: () => "nope" })).toEqual([]);
+    expect(loadPinnedCircleOrder({ getItem: () => { throw new Error("blocked"); } })).toEqual([]);
+    expect(() => setPinnedCircleOrder(["c", "b"], { setItem: () => { throw new Error("blocked"); } })).not.toThrow();
+    function Probe() { return createElement("i", null, usePinnedCircleOrder().join(",")); }
+    expect(renderToStaticMarkup(createElement(Probe))).toBe("<i>c,b</i>");
+  });
+});
+
+describe("universal pins preference", () => {
+  it("defaults off, stores the exact flag, and survives blocked storage", () => {
+    expect(parseUniversalPins("true")).toBe(true);
+    expect(parseUniversalPins("false")).toBe(false);
+    expect(parseUniversalPins("yes")).toBe(false);
+    expect(parseUniversalPins(null)).toBe(false);
+
+    const setItem = vi.fn();
+    saveUniversalPins(true, { setItem });
+    saveUniversalPins(false, { setItem });
+    expect(setItem).toHaveBeenNthCalledWith(1, UNIVERSAL_PINS_KEY, "true");
+    expect(setItem).toHaveBeenNthCalledWith(2, UNIVERSAL_PINS_KEY, "false");
+    expect(loadUniversalPins({ getItem: () => "true" })).toBe(true);
+    expect(loadUniversalPins({ getItem: () => "false" })).toBe(false);
+    expect(loadUniversalPins({ getItem: () => "untrusted" })).toBe(false);
+    expect(loadUniversalPins({ getItem: () => { throw new Error("blocked"); } })).toBe(false);
+    expect(loadUniversalPins(null)).toBe(false);
+    expect(() => saveUniversalPins(true, { setItem: () => { throw new Error("blocked"); } })).not.toThrow();
+    expect(() => saveUniversalPins(true, null)).not.toThrow();
+  });
+});
+
+
 describe("sidebar attention pin preference", () => {
   it("round-trips the pinned flag and defaults to the popover", () => {
     expect(parseSidebarAttentionPinned("true")).toBe(true);
@@ -137,5 +229,45 @@ describe("sidebar attention pin preference", () => {
     expect(loadSidebarAttentionPinned({ getItem: () => "true" })).toBe(true);
     expect(loadSidebarAttentionPinned({ getItem: () => "untrusted" })).toBe(false);
     expect(loadSidebarAttentionPinned({ getItem: () => { throw new Error("blocked"); } })).toBe(false);
+  });
+});
+
+describe("sidebar tools layout preference", () => {
+  it("tools layout defaults to rows and ignores malformed values", () => {
+    expect(parseSidebarToolsLayout("rows")).toBe("rows");
+    expect(parseSidebarToolsLayout("toolbar")).toBe("toolbar");
+    expect(parseSidebarToolsLayout("icons")).toBe("rows");
+    expect(parseSidebarToolsLayout("")).toBe("rows");
+    expect(parseSidebarToolsLayout(null)).toBe("rows");
+    expect(loadSidebarToolsLayout({ getItem: () => null })).toBe("rows");
+    expect(loadSidebarToolsLayout({ getItem: () => "menu" })).toBe("rows");
+    expect(loadSidebarToolsLayout({ getItem: () => { throw new Error("blocked"); } })).toBe("rows");
+
+    const setItem = vi.fn();
+    saveSidebarToolsLayout("toolbar", { setItem });
+    expect(setItem).toHaveBeenCalledWith(SIDEBAR_TOOLS_LAYOUT_KEY, "toolbar");
+    expect(loadSidebarToolsLayout({ getItem: (key) => (key === SIDEBAR_TOOLS_LAYOUT_KEY ? "toolbar" : null) })).toBe("toolbar");
+  });
+
+  it("setSidebarToolsLayout notifies subscribers and persists", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+    });
+    const listener = vi.fn();
+    const unsubscribe = subscribeSidebarToolsLayout(listener);
+    try {
+      setSidebarToolsLayout("toolbar");
+      expect(listener).toHaveBeenCalledOnce();
+      expect(values.get(SIDEBAR_TOOLS_LAYOUT_KEY)).toBe("toolbar");
+      expect(loadSidebarToolsLayout()).toBe("toolbar");
+      setSidebarToolsLayout("rows");
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(values.get(SIDEBAR_TOOLS_LAYOUT_KEY)).toBe("rows");
+    } finally {
+      unsubscribe();
+      vi.unstubAllGlobals();
+    }
   });
 });

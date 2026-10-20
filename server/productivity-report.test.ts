@@ -21,7 +21,7 @@ describe("release timeline", () => {
     expect(timeline.releases.map((release) => [release.sha[0], release.prs.map((pr) => pr.number), release.issues.map((each) => each.number), release.contentUnknownReason ?? null])).toEqual([
       ["a", [], [], "first"], // the first release: nothing before it to compare with
       ["b", [1, 2], [101], null],
-      // #6 names open issue #104 (and its branch says 104): not delivered; #7's branch says 103: no reference
+      // #6 names open issue #N (and its branch says N): not delivered; #7's branch says 103: no reference
       ["c", [3, 6, 7], [102], null],
     ]);
     expect(timeline.issueDelivered.has(104)).toBe(false);
@@ -109,7 +109,7 @@ describe("KPIs", () => {
   });
 
   it("lead times: issue → merge → production", () => {
-    // #101: created 09-28 09:00, merged 09-30 20:00, live 09-30 23:30; #102: 09-30 10:00 → 10-01 08:00 → 10-01 10:00
+    // #M: created 09-28 09:00, merged 09-30 20:00, live 09-30 23:30; #K: 09-30 10:00 → 10-01 08:00 → 10-01 10:00
     expect(k.leadIssueToProd).toEqual({ n: 2, median: ((62.5 + 24) / 2) * HOUR, p90: 62.5 * HOUR });
     expect(k.leadIssueToMerge).toEqual({ n: 2, median: ((59 + 22) / 2) * HOUR, p90: 59 * HOUR });
     // PRs 1, 3, 6, 7: 3,5 h, 2 h, 1,5 h, 1 h 20
@@ -204,7 +204,7 @@ describe("release rows", () => {
 
   it("keeps the backlog snapshot at the end of a closed period apart from now (INSP-V r2 #2, #7)", () => {
     const september = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") } });
-    // at 30/09 23:59 #101, #102, #104 and #105 were open (#103 was created then and closed later)
+    // at 30/09 23:59 #M, #K, #N and #P were open (#Q was created then and closed later)
     expect(september.backlog.periodEnd).toEqual({ at: brt("2026-10-01T00:00:00"), openIssues: 4, openP0P1: 2, oldestOpen: { number: 104, createdAt: brt("2026-09-10T10:00:00") } });
     expect(september.kpis.openP1AtEnd).toBe(2);
     // a period that runs to now has no separate snapshot

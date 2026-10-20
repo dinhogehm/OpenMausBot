@@ -114,7 +114,7 @@ export interface DesktopWorkDeps {
 }
 
 /** The issue a session is about: the number its title opens with ("9311 …",
- * or "#9311 …" from before the owner's no-"#" rule), else a "#NNNN" further
+ * or "#N …" from before the owner's no-"#" rule), else a "#NNNN" further
  * in its title, else the first "#NNNN" or issue/PR link in its brief. */
 export function issueNumber(title: string, brief = ""): string | undefined {
   return /^\s*#?(\d{3,6})\b/.exec(title)?.[1]
@@ -131,7 +131,7 @@ export function desktopBriefText(title: string, marker: string, brief: string, f
   const number = issueNumber(title, brief);
   const named = issueTitle(title);
   // One "NNNN" at the start, never twice ("9311 9311 Chat…"); a title that
-  // already names its issue further in ("Chat #9311 …") is left as it is.
+  // already names its issue further in ("Chat #N …") is left as it is.
   const first = !number || titleOpensWithIssue(named, number) || new RegExp(`#${number}(?!\\d)`).test(named) ? named : `${number} ${named}`;
   return `${first}\n[${marker}]\n\n${folderSince !== undefined ? `${folderGuard(folderSince)}\n\n` : ""}${brief}${footer}`;
 }
@@ -418,7 +418,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       } else {
         session.archivedOutsideAt = now;
         deps.ledger.save();
-        deps.chip(session, "arquivada no app Claude por alguém, sem pedido do OMB", false);
+        deps.chip(session, "arquivada no app Claude por alguém, sem pedido do OpenMausBot", false);
         deps.chip(session, `abrir no app: claude://code/continue?session=${desktop.localId}`, false);
         deps.report(session, `Claude Code session "${session.title}" (${session.id}) was archived in the Claude app by someone, not through cc_session_archive (claude://code/continue?session=${desktop.localId}). Whatever it was still doing stopped there. The server checks whether a PR of it is still open and tells you; meanwhile check its last report (cc_session_list with its id) and decide who carries the work on.`);
       }

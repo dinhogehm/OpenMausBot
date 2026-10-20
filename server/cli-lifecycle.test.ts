@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isWorkspaceRunning, qrToString, runOnboardingCommand, runServe, type CliOptions } from "./cli.ts";
+import { isWorkspaceRunning, runOnboardingCommand, runServe, type CliOptions } from "./cli.ts";
+import { qrToString } from "./cli-pairing.ts";
 
 const mocks = vi.hoisted(() => ({
   // the fleet path is off in these tests: no credential in the environment
@@ -83,7 +84,7 @@ beforeEach(() => {
   mocks.tailscaleStatus.mockResolvedValue({ status: { cli: "/fixture/tailscale", dnsName: "fixture.tail.test", addresses: [], backendState: "Running" } });
   mocks.tailscaleServe.mockResolvedValue({ origin: "https://fixture.tail.test" });
   mocks.tailscaleServeOff.mockResolvedValue(undefined);
-  mocks.createTunnelAccount.mockReturnValue({ credentials: { status: "available", read: () => ({}) }, service: { retry: async () => ({}) } });
+  mocks.createTunnelAccount.mockReturnValue({ credentials: { status: "available", read: () => ({}) }, service: { retry: async () => ({}), restore: async () => ({}), dispose: vi.fn() } });
   mocks.describeTunnelAccount.mockReturnValue({ email: "fixture@example.test" });
   mocks.tunnelAccess.mockReturnValue({ endpoint: "https://fixture.openmausbot.test" });
   mocks.ensureCloudflared.mockResolvedValue("/fixture/cloudflared");
@@ -164,6 +165,35 @@ describe("CLI startup lifecycle", () => {
     expect(mocks.cleanupTunnelOrigin).toHaveBeenCalledOnce();
   });
 
+  it("hands the running tunnel to background endpoint recovery and takes it back on stop", async () => {
+    let healthRequests = 0;
+    // Nothing answers before serve starts its server; then it is up.
+    vi.stubGlobal("fetch", vi.fn(async () => (++healthRequests === 1
+      ? Response.json({}, { status: 503 })
+      : Response.json({ app: "openmausbot", pid: childPid }))));
+    const service = { retry: vi.fn(async () => ({})), restore: vi.fn(), dispose: vi.fn() };
+    mocks.createTunnelAccount.mockReturnValue({ credentials: { status: "available", read: () => ({}) }, service });
+    const running = { started: Promise.resolve(), stop: vi.fn().mockResolvedValue(undefined) };
+    mocks.startTunnel.mockImplementation(() => {
+      setTimeout(interrupt, 10);
+      return running;
+    });
+    let servingAtRestore: unknown = "not called";
+    service.restore.mockImplementation(async () => {
+      servingAtRestore = recovery().running();
+      return {};
+    });
+    const recovery = () => mocks.createTunnelAccount.mock.calls[0]![0].recovery as { running(): unknown };
+
+    expect(await runServe({ ...options, tunnel: true }, vi.fn())).toBe(0);
+    expect(mocks.startTunnel).toHaveBeenCalledOnce();
+    expect(service.restore).toHaveBeenCalledOnce();
+    expect(servingAtRestore).toBe(running);
+    expect(recovery().running()).toBeNull();
+    expect(service.dispose).toHaveBeenCalled();
+    expect(running.stop).toHaveBeenCalledOnce();
+  });
+
   it("reopens a matching desktop workspace even when its server PID differs from the lease owner", async () => {
     writeFileSync(join(dataDir, "environment-id"), workspaceId);
     writeFileSync(join(dataDir, "openmausbot-server.lease"), JSON.stringify({
@@ -188,6 +218,29 @@ describe("CLI startup lifecycle", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ app: "openmausbot", pid: childPid }))
       .mockResolvedValueOnce(Response.json({ environmentId: "different-workspace" })));
     expect(await isWorkspaceRunning(options)).toBe(false);
+  });
+
+  it.each([true, false])("prints a sign-in link for a browser on this computer (guided: %s)", async (guided) => {
+    let healthRequests = 0;
+    const code = "ABCD-EFGH-JKLM";
+    const pairings: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const address = String(url);
+      if (address.endsWith("/api/health")) {
+        return ++healthRequests === 1 ? Response.json({}, { status: 503 }) : Response.json({ app: "openmausbot", pid: childPid });
+      }
+      expect(address).toBe(`http://127.0.0.1:${options.port}/api/auth/pairing`);
+      expect(init?.method).toBe("POST");
+      pairings.push(JSON.parse(String(init?.body)));
+      return Response.json({ code, url: null, expiresAt: Date.now() + 120_000, hint: "set OMB_PUBLIC_URL" });
+    }));
+    const log = vi.fn((line: string) => { if (line.includes(guided ? "Keep this terminal open" : "stop with Ctrl+C")) interrupt(); });
+    expect(await runServe({ ...options, guided, pair: true }, log)).toBe(0);
+    const output = log.mock.calls.map(([line]) => line).join("\n");
+    expect(pairings).toEqual([{}]);
+    expect(output).toContain(`http://127.0.0.1:${options.port}/pair#code=${code}`);
+    expect(output.includes("Sign in from a browser on this computer")).toBe(guided);
+    expect(output.includes("pairing code:")).toBe(!guided);
   });
 
   it.each(["mismatched", "unreachable"])("never mints a phone code for a %s public endpoint", async (failure) => {
@@ -218,8 +271,7 @@ describe("CLI startup lifecycle", () => {
     const code = "ABCD-EFGH-JKLM";
     const expiresAt = Date.now() + 300_000;
     const pairingUrl = `${origin}/pair#code=${code}`;
-    // A real server mints both encodings of one window; Android can only scan
-    // the openmausbot:// one (android/core Connection.kt).
+    // A real server mints both encodings of one window; Android can only scan the openmausbot:// one.
     const credential = `omb_pair_${"a".repeat(43)}`;
     const inviteUrl = `openmausbot://pair?address=${encodeURIComponent(origin)}&token=${credential}&name=fixture`;
     let healthRequests = 0;
@@ -257,8 +309,6 @@ describe("CLI startup lifecycle", () => {
     expect(output).toMatch(/[▀▄█]/);
     expect(output).toContain(`Or open ${origin}/pair on your phone and enter the code.`);
     expect(output).toContain("On Android, open the OpenMausBot app and scan the QR with its pairing scanner.");
-    // The QR rendered for an Android phone must be the app-scheme invite, not
-    // the https link its scanner rejects.
     expect(output).toContain(qrToString(inviteUrl));
     expect(output).not.toContain(qrToString(pairingUrl));
     expect(output).toContain("client access: chat and approvals, not settings or pairing administration");

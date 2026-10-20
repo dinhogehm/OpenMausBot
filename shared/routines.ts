@@ -1,8 +1,6 @@
-/** Routine wire shapes — the routine and run records as they ride the REST
- * snapshot and the `routine` / `routine.run` live frames. Moved verbatim
- * from the client's hand-maintained mirrors (src/lib/routines.ts) so the
- * frame union and every client consumer share one home; the client file
- * re-exports these under the same names. */
+/** Routine wire shapes: the routine and run records as they ride the REST
+ * snapshot and the `routine` / `routine.run` live frames. */
+import type { LimitResetSchedule, LimitResetScheduleInput } from "./limit-reset.ts";
 import type { RoutineCronSchedule } from "./routine-schedule.ts";
 
 export interface RoutineIntervalWindow {
@@ -12,6 +10,7 @@ export interface RoutineIntervalWindow {
 
 export type RoutineSchedule =
   | RoutineCronSchedule
+  | LimitResetSchedule
   | { type: "once"; at: number }
   | { type: "daily"; time: string; weekdays: number[] }
   | {
@@ -28,6 +27,7 @@ export type RoutineSchedule =
 
 export type RoutineScheduleInput =
   | Extract<RoutineSchedule, { type: "once" | "daily" | "cron" }>
+  | LimitResetScheduleInput
   | {
     type: "interval";
     everyMinutes: number;
@@ -60,7 +60,7 @@ export interface RoutineContextAttachment {
   size: number;
 }
 
-export type RoutineRunTrigger = "schedule" | "manual" | "webhook";
+export type RoutineRunTrigger = "schedule" | "manual" | "webhook" | "startup";
 
 export type RoutineRunStatus =
   | "queued"
@@ -71,9 +71,13 @@ export type RoutineRunStatus =
   | "cancelled"
   | "missed";
 
+/** Why a run started a second time by itself: its engine stalled, OpenMausBot
+ * restarted while it ran, the provider rate-limited it or failed for a moment,
+ * or it waited for its engine's usage limit to reset. A run gets one. */
+export type RoutineRetryCause = "stalled" | "restarted" | "rate_limited" | "provider" | "usage_limit";
+
 /** The statuses both failure indicators count: a run that went wrong and has
- * not been acknowledged. One home so the sidebar dot, the errors pill, the
- * logs filter and the bulk-seen sweep cannot drift apart. */
+ * not been acknowledged. */
 export const ROUTINE_PROBLEM_STATUSES: readonly RoutineRunStatus[] = ["failed", "missed"];
 
 export function isRoutineProblemRun(run: { status: RoutineRunStatus }): boolean {
@@ -98,9 +102,17 @@ export interface Routine {
   /** Optional wall-clock safety limit. Missing means the run is unlimited. */
   timeoutMinutes?: number;
   overlap?: "skip" | "queue";
+  /** Each run starts with the previous run's report. */
+  continuity?: boolean;
+  /** Also run once each time OpenMausBot starts. */
+  runOnStartup?: boolean;
   skippedRuns?: number;
   lastSkippedAt?: number;
   failureStreak?: number;
+  /** Runs that finished in the last seven days, and how many of them completed. */
+  weekRuns?: { ok: number; total: number };
+  /** A plain sentence when the routine names a path that cannot exist on the computer that runs it. */
+  warning?: string;
   attachments?: RoutineContextAttachment[];
   sourceThreadId?: string;
   resultsThreadId?: string;
@@ -126,6 +138,8 @@ export interface RoutineRun {
   status: RoutineRunStatus;
   manual: boolean;
   triggerSource?: RoutineRunTrigger;
+  /** "app": a connected-app event started it; triggerSource is then "webhook" (an outside event). */
+  eventSource?: "app";
   webhookId?: string;
   deliveryId?: string;
   /** Room task created for a team-goal run. */
@@ -137,7 +151,10 @@ export interface RoutineRun {
   finishedAt?: number;
   output?: string;
   error?: string;
-  /** Concise, redacted question or approval reason while status is waiting. */
+  /** Set when the run used its one automatic second start, and why. */
+  retried?: RoutineRetryCause;
+  /** Concise, redacted question or approval reason while status is waiting,
+   * or why a queued run starts later. */
   attention?: string;
   cost?: number | null;
   denials?: string[];
@@ -158,7 +175,10 @@ export interface RoutineInput {
   /** `null` explicitly removes the limit; omission preserves it on updates. */
   timeoutMinutes?: number | null;
   overlap?: "skip" | "queue";
+  /** Each run starts with the previous run's report. */
+  continuity?: boolean;
+  runOnStartup?: boolean;
   attachments?: RoutineContextAttachment[];
-  /** Omission preserves routing; null creates a new dedicated results task. */
+  /** Omission preserves routing; null resets it to the bot's main thread. */
   resultsThreadId?: string | null;
 }

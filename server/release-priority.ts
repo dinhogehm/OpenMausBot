@@ -412,7 +412,7 @@ export async function preemptCiForRelease(env: PreemptEnv, state: PreemptState):
   const waits = `O release de produção (${blocked.label}) espera há ${minutes} min`;
   // a release in a loop fails again whatever it is given: stopping a gate for
   // it only feeds the loop, and that gate may be its fix (R10-release #1:
-  // the CI of the fix #9348 killed for d5bb1f70b at its 4th failure).
+  // the CI of the fix #N killed for d5bb1f70b at its 4th failure).
   // Logged and told once per release, whichever CI it waits on.
   const loop = env.looping?.(blocked.label) ?? null;
   if (loop) {

@@ -178,7 +178,7 @@ describe("archiving before delivery", () => {
     const { deps } = fakeDeps();
     deps.gh = ghByNumber({ 9329: "MERGED", 9330: "OPEN" });
     expect(await archiveBlockers(listReport, deps)).toEqual({ blockers: ["a PR #9330 ainda está aberta"], unknown: [] });
-    // the issue is not even a candidate: "#9326" is not in a PR list
+    // the issue is not even a candidate: "#N" is not in a PR list
     deps.gh = ghByNumber({ 9329: "MERGED" });
     const issueListed = { ...session(), lastReport: "PRs #9329 e #9326 (a #9326 é a issue, não PR)" };
     expect(await archiveBlockers(issueListed, deps)).toEqual({ blockers: [], unknown: [] });
@@ -210,9 +210,9 @@ describe("a repository whose GitHub address cannot be read", () => {
   });
 });
 
-// R9-followup #2, the real case redacted: the session of #9052 (its PR #9332 on
+// R9-followup #2, the real case redacted: the session of #M (its PR #K on
 // its own branch) reported "A trava que limitaria as tentativas … está na PR
-// #9328, que ainda não está em main" — and #9328, another session's, became
+// #P, que ainda não está em main" — and #P, another session's, became
 // its PR: its archiving held, its "em produção" in the wrong conversation, a
 // false live owner.
 describe("whose PR it is", () => {
@@ -234,7 +234,7 @@ describe("whose PR it is", () => {
     expect(Object.values(s.delivery!.prs)).toEqual([expect.objectContaining({ number: 9332, owned: "branch", state: "open" })]);
     expect(s.delivery!.notOwned).toEqual([9328]);
     expect(prsOfSession(s)).toEqual([9332]);
-    // a later pass does not bring #9328 back, nor ask GitHub about it
+    // a later pass does not bring #P back, nor ask GitHub about it
     f.advance(DELIVERY_CHECK_MS + 1);
     const asked: string[] = [];
     const gh = f.deps.gh;
@@ -311,9 +311,9 @@ describe("whose PR it is", () => {
 
 // INSP-H r1 #1, the real 29da943f of 01/10 (redacted): its worktree on a
 // detached HEAD, its work in worktrees nested inside it — `.worktrees/9328`
-// (pr/9328, head = #9328's headRefOid) and `.worktrees/9340` (fix/9340 =
-// #9341) — #9330 recorded and found merged by the earlier build (waiting for
-// production), and the hand-over "assuma a PR #9328" of 18:13, before the lot.
+// (pr/P, head = #P's headRefOid) and `.worktrees/9340` (fix/9340 =
+// #Q) — #R recorded and found merged by the earlier build (waiting for
+// production), and the hand-over "assuma a PR #P" of 18:13, before the lot.
 describe("the PRs of a session that works in nested worktrees", () => {
   const CWD = "/p/.claude/worktrees/9330-gate-2a8f5c";
   const DETACHED = "1bbd5c2a7".padEnd(40, "1");
@@ -361,19 +361,19 @@ describe("the PRs of a session that works in nested worktrees", () => {
     expect(s29.delivery.notOwned ?? []).toEqual([]);
     expect(prsOfSession(s29).sort()).toEqual([9328, 9341]);
     expect((await archiveBlockers(s29, f.deps)).blockers.sort()).toEqual(["a PR #9328 ainda está aberta", "a PR #9330 foi mergeada mas ainda não está em nuria-production-deployed", "a PR #9341 ainda está aberta"]);
-    // the #9052 session, in its own worktree, still does not own #9328
+    // the #M session, in its own worktree, still does not own #P
     const g = fakeDeps({ state: "OPEN", head: "fix/9319-reconciler-contract" });
     const s52 = { ...session(), id: "35787b0f", lastReport: "A trava está na PR #9328, que ainda não está em main." };
     await watchProductionDelivery([s52], g.deps, newDeliveryCache());
     expect(s52.delivery!.notOwned).toEqual([9328]);
   });
 
-  // R10-followup #3, the real 35787b0f of 02/10 (redacted): #9328 recorded
+  // R10-followup #3, the real 35787b0f of 02/10 (redacted): #P recorded
   // as "legacy" (owned: legacy, state: merged) though its head is
   // fix/9319-unified-schema-reconciler-contract and the session's worktree is
-  // 9052-tempo-de-reabertura-configuravel-35787b (its own PR: #9332). It held
-  // the archive ("a PR #9328 foi mergeada mas ainda não está em produção") and
-  // would have announced "em produção (PR #9328)" in its conversations.
+  // M-tempo-de-reabertura-configuravel-35787b (its own PR: #K). It held
+  // the archive ("a PR #P foi mergeada mas ainda não está em produção") and
+  // would have announced "em produção (PR #P)" in its conversations.
   it("re-checks a \"legacy\" PR by branch and worktree: not the session's, it no longer holds it nor is announced for it", async () => {
     const WT = "/p/.claude/worktrees/9052-tempo-de-reabertura-configuravel-35787b";
     const git: DeliveryDeps["git"] = async (repo, args) => {
@@ -402,16 +402,16 @@ describe("the PRs of a session that works in nested worktrees", () => {
       "9328": { url: "u", number: 9328, state: "merged" as const, mergeSha: MERGE, owned: "legacy" as const },
       "9332": { url: "u", number: 9332, state: "merged" as const, mergeSha: "f".repeat(40), owned: "legacy" as const },
     } } as CcDelivery };
-    // archiving: "legacy" is checked by branch like a mere mention, so #9328 no longer holds it
+    // archiving: "legacy" is checked by branch like a mere mention, so #P no longer holds it
     expect((await archiveBlockers({ ...s52, delivery: { ...s52.delivery, prs: { "9328": { ...s52.delivery.prs["9328"]!, owned: "legacy" as const } } } }, { gh: async () => JSON.stringify({ state: "MERGED", mergeCommit: { oid: MERGE }, headRefName: "fix/9319-unified-schema-reconciler-contract" }), git })).blockers).toEqual([]);
     await watchProductionDelivery([s52], f.deps, newDeliveryCache());
-    // #9328: not its own, for good; #9332: its own by branch, announced
+    // #P: not its own, for good; #K: its own by branch, announced
     expect(s52.delivery.prs["9328"]).toBeUndefined();
     expect(s52.delivery.notOwned).toEqual([9328]);
     expect(s52.delivery.prs["9332"]).toMatchObject({ owned: "branch" });
     expect(f.chips).toEqual([expect.stringMatching(/^em produção desde .* \(PR #9332\)$/)]);
     expect(logs).toEqual(["[delivery] session 35787b0f: PR #9328 (head fix/9319-unified-schema-reconciler-contract) was \"legacy\" and is not its own (branches: feat/9052-tempo-de-reabertura): no longer followed for it"]);
-    // the next pass does not ask GitHub about #9328 again
+    // the next pass does not ask GitHub about #P again
     const before = asked.length;
     await watchProductionDelivery([s52], f.deps, newDeliveryCache());
     expect(asked.slice(before).some((args) => args[2] === "9328")).toBe(false);
@@ -461,8 +461,8 @@ describe("a session idle with its PR still open", () => {
   });
 });
 
-// S-retomar, the line on 02/10 (redacted): 9052 (#9332) failed, 8204 (#9350)
-// and 9195 (#9280) idle, each holding its own PR open — nobody resumed them.
+// S-retomar, the line on 02/10 (redacted): M (#K) failed, 8204 (#S)
+// and 9195 (#T) idle, each holding its own PR open — nobody resumed them.
 describe("sessions to resume", () => {
   const now = Date.parse("2026-10-02T18:00:00Z");
   const pr = (number: number, extra: object = {}) => ({ [String(number)]: { url: `https://github.com/${SLUG}/pull/${number}`, number, state: "open" as const, owned: "branch" as const, ...extra } });

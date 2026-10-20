@@ -11,8 +11,8 @@ const SLUG = "owner/platform";
 /** The shape of the real case (ffd6ee1a on 01/10, redacted): an app session
  * archived in the app by someone, with no delivered PRs, its issue 9319 on
  * record, a worktree named after another branch, and a last report that
- * names its PR only as "o ci:local da #9328" — never "PR #9328" — next to
- * an issue (#9323). GitHub: #9328 is OPEN and found by searching 9319. */
+ * names its PR only as "o ci:local da #N" — never "PR #N" — next to
+ * an issue (#M). GitHub: #N is OPEN and found by searching 9319. */
 const ffd6ee1a = (): CcSession => ({
   id: "ffd6ee1a-0000-4000-8000-000000000000",
   ownerBotId: "chief-0000",
@@ -99,8 +99,8 @@ describe("a session archived in the app by someone (INSP-F F1)", () => {
 
   it("counts only the PRs that are its own (by its branch, or handed over), never one its report merely names (R9-followup #2)", async () => {
     const gh = fakeGithub({ byIssue: {}, states: { 9328: "OPEN", 9341: "OPEN", 9319: "NOT_PR" } });
-    // its report names #9328 (another session's) and an issue; a candidate #9319 was never checked;
-    // #9341 was handed to it ("assuma a PR #9341")
+    // its report names #N (another session's) and an issue; a candidate #K was never checked;
+    // #P was handed to it ("assuma a PR #P")
     const session = { ...ffd6ee1a(), lastReport: "PR #9319 (issue) e a PR #9328 seguem", claimedPrs: [9341], delivery: { prs: { 9319: { number: 9319, url: "", state: "open" as const } } } };
     await checkArchivedOutside([session], gh.deps);
     expect(gh.calls).toEqual(["list issue 9319", "view 9341"]);
@@ -149,7 +149,7 @@ describe("a session archived in the app by someone (INSP-F F1)", () => {
  * on (redacted titles and ids): the search finds PRs that only cite the
  * issue, and PRs another session still alive carries on. */
 describe("PRs the issue search finds that are not left without a session (INSP-F r2 #2)", () => {
-  // #9332 is the PR of #9052: its title and branch name 9052; its body cites 9307
+  // #Q is the PR of #R: its title and branch name R; its body cites 9307
   const PR_9332: FoundPr = { number: 9332, title: "Exportação do relatório (#9052)", headRefName: "feat/9052-report-export" };
   const PR_9330: FoundPr = { number: 9330, title: "Gate do reconciliador (#9326)", headRefName: "fix/9326-reconciler-gate" };
   const archivedFor = (id: string, issue: string): CcSession => ({ ...ffd6ee1a(), id, title: `${issue} sessão anterior`, desktop: { ...ffd6ee1a().desktop!, issue }, lastReport: "Parei aqui." });
@@ -179,12 +179,12 @@ describe("PRs the issue search finds that are not left without a session (INSP-F
   it("issue 9319 → #9328: the live session of #9052 that only cites #9328 is not its owner — no false comfort (R9-followup #2)", async () => {
     const gh = fakeGithub({ byIssue: { 9319: [PR_9328] } });
     const archived = archivedFor("29da943f-0000-4000-8000-000000000000", "9319");
-    // its report: "A trava … está na PR #9328, que ainda não está em main"; the candidate was checked: another branch
+    // its report: "A trava … está na PR #N, que ainda não está em main"; the candidate was checked: another branch
     const session9052 = live("35787b0f-0000-4000-8000-000000000000", "9052", { lastReport: "A trava que limitaria as tentativas está na PR #9328, que ainda não está em main.", delivery: { prs: { 9332: { number: 9332, url: "", state: "open", owned: "branch" } }, notOwned: [9328] } });
     await checkArchivedOutside([archived, session9052], gh.deps);
     expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328"]);
     expect(gh.pending.map((each) => each.item.key)).toEqual([`cc-orphan-pr:${archived.id}:9328`]);
-    // handed over to it ("assuma a PR #9328"), it carries it on
+    // handed over to it ("assuma a PR #N"), it carries it on
     const handed = fakeGithub({ byIssue: { 9319: [PR_9328] } });
     await checkArchivedOutside([archivedFor("29da943f-0000-4000-8000-000000000001", "9319"), { ...session9052, claimedPrs: [9328] }], handed.deps);
     expect(handed.chips.map((chip) => chip.text)).toEqual(['a PR #9328 segue com a sessão "9052 sessão viva" (35787b0f)']);
@@ -234,13 +234,13 @@ describe("PRs the issue search finds that are not left without a session (INSP-F
     expect(prOfIssue({ number: 9052, title: "#9052" }, "9052")).toBe(false);
   });
 
-  it("words a failed session the person archived as such, never as \"sem pedido do OMB\" (INSP-F r2 #4)", async () => {
+  it("words a failed session the person archived as such, never as \"sem pedido do OpenMausBot\" (INSP-F r2 #4)", async () => {
     const gh = fakeGithub();
     const session = { ...ffd6ee1a(), archivedAfterFailure: true };
     await checkArchivedOutside([session], gh.deps);
     expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328"]);
     expect(gh.reports[0]!.text).toContain("foi arquivada no app Claude depois de falhar");
-    expect(gh.reports[0]!.text).not.toContain("sem pedido do OMB");
+    expect(gh.reports[0]!.text).not.toContain("sem pedido do OpenMausBot");
     expect(gh.pending[0]!.item.title).toContain("falhou e foi arquivada no app");
   });
 });

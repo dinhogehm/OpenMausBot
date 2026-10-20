@@ -117,7 +117,7 @@ export interface CcSession {
   archivedOutsideTriedAt?: number;
   /** Its PRs on the way to production (server/prod-delivery.ts). */
   delivery?: CcDelivery;
-  /** PRs it was told to take over ("assuma a PR #9328"): its own, though
+  /** PRs it was told to take over ("assuma a PR #N"): its own, though
    * their branch is not its worktree's (prod-delivery.ts claimedPrNumbers). */
   claimedPrs?: number[];
   /** The orders it was given before claimedPrs existed were read back (once). */
@@ -404,7 +404,7 @@ export class CcSessionLedger {
         }
         // Archived before archiving cleared it: an old error only misleads.
         if (session.status === "archived") delete session.lastError;
-        // Titled "#9058 …" by a build before the owner's no-"#" rule: said the owner's way (INSP-H r1 #11)
+        // Titled "#M …" by a build before the owner's no-"#" rule: said the owner's way (INSP-H r1 #11)
         if (session.status !== "archived" && typeof session.title === "string") session.title = issueTitle(session.title);
         // Older ledgers queued bare strings, with no age: treat them as old.
         session.queued = Array.isArray(session.queued)
@@ -811,13 +811,13 @@ export function useRepoScripts(text: string, manager: ReturnType<typeof repoPack
   return { text: out, changed };
 }
 
-/** "#9286 #9303 Merge…" → "9286 9303 Merge…": the owner's rule (the Chief's
+/** "#K #P Merge…" → "K P Merge…": the owner's rule (the Chief's
  * SOUL) is that a session's name opens with the number of its issue WITHOUT
- * "#" — "9052 tempo de reabertura", never "#9052 …" (R9-dispatch R9-4). Only
- * the numbers the title opens with lose it (each said once); a "#9330"
+ * "#" — "Q tempo de reabertura", never "#Q …" (R9-dispatch R9-4). Only
+ * the numbers the title opens with lose it (each said once); a "#R"
  * further in stays. */
 export function issueTitle(title: string): string {
-  // numbers apart, or glued by their "#" ("#9058#9059", INSP-H r1 #11)
+  // numbers apart, or glued by their "#" ("#M#9059", INSP-H r1 #11)
   return title.replace(/^\s*(?:#?\d{3,6}(?!\d)(?:[\s,]+|(?=#)))*#?\d{3,6}(?!\d)(?=[\s,:—-]|$)/, (run) => [...new Set(run.match(/\d{3,6}/g))].join(" "));
 }
 

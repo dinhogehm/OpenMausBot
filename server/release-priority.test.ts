@@ -456,7 +456,7 @@ describe("stopping a session's CI for the release (fake kill, real table)", () =
 // 02/10 (R10-release #1, R10-resilience PRIO-LOOP): the carrier d5bb1f70b
 // failed 10× at script-contracts (Node 22's ExperimentalWarning in stderr).
 // At its 4th failure the server killed the ci:local of the session fixing it
-// (#9348), then twice the CI of a P1 — for a release that failed again each
+// (#N), then twice the CI of a P1 — for a release that failed again each
 // time — and both sessions waited for a tag that never moved.
 describe("a release in a loop never takes a session's CI (02/10, d5bb1f70b)", () => {
   const FULL = "d5bb1f70bea397bdd937d02148c685e406985ba0";
@@ -646,7 +646,7 @@ describe("a release on its way holds every session's RETOMAR (INSP-S r1 S-1)", (
 });
 
 describe("the turn's cut waits out a ci:local queued behind a release (lote W1, server/index.ts)", () => {
-  const source = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
+  const source = ["index.ts", "cc-runtime.ts"].map((file) => readFileSync(join(import.meta.dirname, file), "utf8")).join("\n");
   it("the timer adds the queued time to the limit and never cuts while queued", () => {
     expect(source).toMatch(/const due = turnStartedAt \+ ccTurnTimeoutMs \+ queuedMs \+ \(queuedSince \? now - queuedSince : 0\);\n\s+if \(queuedSince \|\| now < due\)/);
     expect(source).toContain("ccChip(session, ciQueuedText(queued));");

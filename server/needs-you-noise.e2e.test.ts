@@ -78,7 +78,7 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
   }
 }, 90_000);
 
-// J17 (the owner, 02/10): "Planilha linha 169 (#9295)" and other older items
+// J17 (the owner, 02/10): "Planilha linha 169 (#N)" and other older items
 // had no steps, and he does not want to click "Pedir o passo a passo". The
 // server asks the bot once per item — a report, so it waits for the
 // conversation to be free — never with ~/.nuria/stop, never twice.

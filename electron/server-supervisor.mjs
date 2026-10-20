@@ -20,6 +20,7 @@ export function createServerSupervisor({
   let current = null;
   let readySince = null;
   let stopped = false;
+  let paused = false;
   let attempts = 0;
   let timer = null;
   let shutdownPromise = null;
@@ -34,7 +35,7 @@ export function createServerSupervisor({
   }
 
   function schedule() {
-    if (stopped) return;
+    if (stopped || paused) return;
     if (attempts === retryDelaysMs.length) onExhausted();
     if (attempts >= retryDelaysMs.length && !slowRetryDelaysMs.length) return;
     const slow = attempts - retryDelaysMs.length;
@@ -43,16 +44,16 @@ export function createServerSupervisor({
     log(slow < 0 ? `server recovery attempt ${attempts}/${retryDelaysMs.length} in ${delay}ms` : `server recovery: slow retry ${slow + 1} in ${Math.round(delay / 1000)}s`);
     timer = setTimeout(async () => {
       timer = null;
+      if (paused) return;
       let result;
       try {
         result = await restart();
       } catch (error) {
         log(`server recovery failed: ${error?.message ?? error}`);
-        // A thrown start with a still-owned child is not permission to fork
-        // a sibling. The caller must reap failed probes before returning.
+        // A thrown start with a still-owned child is not permission to fork a sibling.
         result = { abort: current !== null };
       }
-      if (stopped) return;
+      if (stopped || paused) return;
       if (result?.proc && ready(result.proc)) return;
       if (result?.abort) onExhausted();
       else schedule();
@@ -75,6 +76,18 @@ export function createServerSupervisor({
     });
   }
 
+  // Pause drops any queued retry and holds recovery until resume(); exits and onUnavailable still publish.
+  function pause() {
+    if (stopped || paused) return;
+    paused = true;
+    clearTimeout(timer);
+    timer = null;
+  }
+
+  function resume() {
+    paused = false;
+  }
+
   function shutdown() {
     if (shutdownPromise) return shutdownPromise;
     stopped = true;
@@ -88,5 +101,5 @@ export function createServerSupervisor({
     return shutdownPromise;
   }
 
-  return { watch, ready, isCurrent, shutdown };
+  return { watch, ready, isCurrent, pause, resume, shutdown };
 }

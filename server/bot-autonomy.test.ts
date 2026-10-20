@@ -490,7 +490,7 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
 
   it("takes the bot's own comment as the new baseline instead of waking it", () => {
     const autonomy = make();
-    // a watch on the comments of #9307, as its --jq prints them: "#N login id: <end of the body>"
+    // a watch on the comments of #N, as its --jq prints them: "#N login id: <end of the body>"
     const old = "#9307 fulana 4400: O login ainda falha";
     const mine = "#9307 bot-user 4401: Publicado em produção, pode testar";
     const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh api repos/o/r/issues/9307/comments", argv: ["gh", "api", "repos/o/r/issues/9307/comments"], standing: true, label: "issues", baseline: old, baselineFingerprint: "a" });
@@ -970,7 +970,7 @@ describe("a bot waiting on the person, in plain words", () => {
   });
 });
 
-// J18 (the owner, 02/10): after choosing "Já colei" on o12 (#9331/#9334)
+// J18 (the owner, 02/10): after choosing "Já colei" on o12 (#M/#9334)
 // the screen showed nothing; the item, resolved by the click, left no trace.
 describe("what the person answered stays with the item (J18)", () => {
   it("keeps the answers in order, waits on the bot until it rewrites or resolves, and keeps them after it is resolved", () => {

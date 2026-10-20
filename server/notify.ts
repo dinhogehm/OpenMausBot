@@ -1,32 +1,11 @@
-// Notifications — what is worth interrupting someone for.
-//
-// `BotRecord.notifications` has been a switch in the settings panel that
-// nothing read. This is the thing that reads it. The rule it encodes is
-// small and deliberate: a bot that is *blocked on you* is worth a buzz, and
-// a bot that *finished* is worth one if you asked for it; everything else a
-// bot does while it works is not.
-//
-// A turn that dies before it starts is the first case, not the last: the
-// bot is not working, and the fix is usually a setting only a person can
-// change, so a retry cannot clear it. A routine failure already buzzed;
-// this makes an interactive turn behave the same way.
-// A routine parked behind a busy target earns one notice after half an
-// hour: from outside the schedule looks broken, and only a person can
-// decide whether the busy work or the routine matters more.
-//
-// Delivery is a separate concern. The harness emits a frame; whoever is
-// listening decides what to do with it — desktop and paired-phone local
-// notifications today, and closed-app APNs delivery once a relay exists.
-
 import type { Notification, NotifyKind } from "../shared/notification.ts";
+import { personMentionExcerpt } from "../shared/person-mention.ts";
 
-// The notification wire shape lives in shared/notification.ts now (part of
-// the wire model); re-exported here so existing importers keep working.
 export type { Notification, NotifyKind } from "../shared/notification.ts";
 
 /** A model's markdown as the plain text a notification banner can show:
  * no fences, headings, emphasis markers, link syntax, bullets, quotes or
- * table pipes. "#9311" and snake_case words stay as they are. */
+ * table pipes. "#N" and snake_case words stay as they are. */
 export function plainNotificationText(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, " ")
@@ -61,31 +40,6 @@ export interface NotifyBot {
   notifications?: boolean;
 }
 
-/** The room a bot is holding while it works, as this module needs it. */
-export interface NotifyRoom {
-  id: string;
-  name: string;
-  threadId: string;
-  busyBotId?: string | null;
-}
-
-/** Where a "blocked on you" notification has to open. A bot speaking in a
- * room is not reachable in its own 1:1 thread — the turn, its screen and the
- * card all live in the room — so the room wins while it owns that bot. A
- * room it merely belongs to, or one another member is speaking in, is not
- * where this bot is: those fall back to its own thread. */
-export function blockedTarget(
-  bot: NotifyBot,
-  room?: NotifyRoom | null,
-): { threadId: string; group?: { id: string; name: string } } {
-  if (!room || room.busyBotId !== bot.id) return { threadId: bot.threadId };
-  return { threadId: room.threadId, group: { id: room.id, name: room.name } };
-}
-
-/** A workspace spend notice (server/spend.ts decides when). It opens the
- * thread whose turn crossed the line, so clicking it lands somewhere real,
- * but it is the workspace's news, not that bot's: the bot's notification
- * toggle does not silence it. */
 export function buildSpendNotification(
   bot: Pick<NotifyBot, "id" | "name">,
   threadId: string,
@@ -94,20 +48,13 @@ export function buildSpendNotification(
   return { kind: "spend", botId: bot.id, botName: bot.name, threadId, title: text.title, body: summarize(text.body, 200) };
 }
 
-/** Build the frame for one event, or null when it should stay quiet.
- *
- * Kept pure and separate from the event fold so the policy — which is the
- * part people will argue about — can be read and tested on its own. */
 export function buildNotification(
   kind: NotifyKind,
   bot: NotifyBot,
   threadId: string,
   detail: string,
-  extra?: { avatarUrl?: string; group?: { id: string; name: string } },
+  extra?: { avatarUrl?: string; group?: { id: string; name: string }; site?: string },
 ): Notification | null {
-  // The toggle means what it says: off is off, including for approvals.
-  // A bot whose notifications you turned off can still block waiting for
-  // you — that is the choice you made, and the chat still shows the card.
   if (bot.notifications === false) return null;
 
   const body = summarize(detail);
@@ -121,8 +68,8 @@ export function buildNotification(
       ? `${who} precisa de aprovação`
       : kind === "question"
         ? `${who} tem uma pergunta`
-        : kind === "takeover"
-          ? `${who} precisa das suas mãos`
+        : kind === "sign-in"
+          ? `${who} precisa que você entre em ${extra?.site ?? "um site"}`
           : kind === "routine-failed"
             ? `A rotina de ${who} falhou`
             : kind === "routine-deferred"
@@ -133,14 +80,40 @@ export function buildNotification(
                 ? `${who} teve um problema`
                 : kind === "delegation-settled"
                   ? `${who} retomou com os resultados`
-                  : `${who} terminou`;
+                  : kind === "mention"
+                    ? `${who} mencionou você`
+                    : `${who} terminou`;
 
-  // A "finished" with nothing to say is not worth a notification — the
-  // badge in the sidebar already carries that much.
-  if (kind === "done" && !body) return null;
+  if ((kind === "done" || kind === "mention") && !body) return null;
 
   const notification: Notification = { kind, botId: bot.id, botName: bot.name, threadId, title, body };
   if (extra?.avatarUrl) notification.avatarUrl = extra.avatarUrl;
   if (extra?.group) notification.groupId = extra.group.id;
   return notification;
+}
+
+type MentionSource = {
+  activePath(threadId: string): readonly { role: string; kind: string; text?: string; turnId?: string; from?: { botId: string } }[];
+  bot(id: string): { name: string; hidden?: boolean } | null | undefined;
+};
+
+export function buildMentionNotification(
+  source: MentionSource,
+  bot: Omit<NotifyBot, "threadId"> & { avatarUrl?: string },
+  room: { id: string; name: string; dm?: boolean; memberIds: readonly string[] },
+  turn: { threadId: string; turnId?: string; reply: string; profileName?: string },
+): Notification | null {
+  if (room.dm) return null;
+  const texts = turn.turnId
+    ? source.activePath(turn.threadId).filter((m) => m.role === "bot" && m.kind === "text" && m.turnId === turn.turnId && m.from?.botId === bot.id).map((m) => m.text ?? "")
+    : [turn.reply];
+  const botNames = room.memberIds.flatMap((id) => {
+    const member = source.bot(id);
+    return member && !member.hidden ? [member.name] : [];
+  });
+  for (const text of texts) {
+    const excerpt = personMentionExcerpt(text, { profileName: turn.profileName, botNames });
+    if (excerpt) return buildNotification("mention", { ...bot, threadId: turn.threadId }, turn.threadId, excerpt, { avatarUrl: bot.avatarUrl, group: room });
+  }
+  return null;
 }

@@ -423,7 +423,7 @@ describe("archiving", () => {
     expect(session.archivedOutsideAt).toBe(h.now);
     // short, in Portuguese, no tool name, and a separate chip with the link to it (INSP-F F1-d)
     expect(h.chips.slice(-2)).toEqual([
-      { id: "f", text: "arquivada no app Claude por alguém, sem pedido do OMB", ok: false },
+      { id: "f", text: "arquivada no app Claude por alguém, sem pedido do OpenMausBot", ok: false },
       { id: "f", text: `abrir no app: claude://code/continue?session=${LOCAL}`, ok: false },
     ]);
     expect(h.reports.at(-1)!.text).toContain("not through cc_session_archive");
@@ -476,7 +476,7 @@ describe("archiving", () => {
     });
     const texts = h.chips.filter((chip) => chip.id === "h").map((chip) => chip.text);
     expect(texts).toContain("PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328");
-    expect(texts.some((text) => text.includes("sem pedido do OMB"))).toBe(false);
+    expect(texts.some((text) => text.includes("sem pedido do OpenMausBot"))).toBe(false);
     expect(h.reports.at(-1)!.text).toContain("depois de falhar");
   });
 

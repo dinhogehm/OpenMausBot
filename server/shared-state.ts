@@ -199,7 +199,7 @@ const oneLine = (text: string, max: number) => {
   return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
 };
 
-/** Markdown marks out, "#9311" kept: only a heading's leading #s go. */
+/** Markdown marks out, "#N" kept: only a heading's leading #s go. */
 const plain = (text: string) => text.replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/[*_`>]+/g, "").replace(/\s+/g, " ").trim();
 
 export function firstSentence(text: string, max = 160): string {

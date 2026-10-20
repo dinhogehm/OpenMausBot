@@ -1,13 +1,13 @@
 // A session archived in the Claude app by someone, not by an order of the
 // server (desktop-work.ts marks it archivedOutsideAt): the PRs it still had
 // open are left without anyone working on them. This finds them and tells
-// the owner, once per session (INSP-F F1: ffd6ee1a / #9328).
+// the owner, once per session (INSP-F F1: ffd6ee1a / #N).
 //
 // Where the PRs come from, because a session rarely writes "PR #N":
 //   1. its delivered PRs and the "PR #N" its last report names (prsOfSession);
 //   2. the open PRs GitHub finds by its issue (`gh pr list --search <issue>`):
-//      ffd6ee1a's report only says "o ci:local da #9328", and its issue 9319
-//      finds #9328 in one call — kept only when the PR's title or branch
+//      ffd6ee1a's report only says "o ci:local da #N", and its issue 9319
+//      finds #N in one call — kept only when the PR's title or branch
 //      names the issue (the search also finds PRs that merely cite it);
 //   3. the open PRs whose head is its worktree's branch.
 // A PR another session still alive carries on (its PRs, or the same issue)
@@ -100,7 +100,7 @@ const MAIN_BRANCHES = new Set(["main", "master", "develop", "HEAD"]);
 
 /** A PR found by searching an issue's number is that issue's only when its
  * title or its branch names the number: `gh pr list --search 9307` also
- * finds the PR of #9052 that merely cites 9307 in its body. */
+ * finds the PR of #M that merely cites 9307 in its body. */
 export function prOfIssue(pr: FoundPr, issue: string): boolean {
   const named = new RegExp(`(?<!\\d)${issue}(?!\\d)`);
   return pr.number !== Number(issue) && (named.test(pr.title ?? "") || named.test(pr.headRefName ?? ""));
@@ -198,7 +198,7 @@ function tell(session: CcSession, slug: string | null, open: number[], carried: 
   if (!open.length && !notChecked.length) return;
   const prs = open.map((number) => `#${number}`).join(", ");
   // a failed session the person archived was not archived "behind the server's back"
-  const how = session.archivedAfterFailure ? "foi arquivada no app Claude depois de falhar" : "foi arquivada no app Claude por alguém, sem pedido do OMB";
+  const how = session.archivedAfterFailure ? "foi arquivada no app Claude depois de falhar" : "foi arquivada no app Claude por alguém, sem pedido do OpenMausBot";
   deps.report(session, [
     open.length ? `PR ${prs} ficou sem sessão: "${session.title}" (${session.id}) ${how}. Open PR(s) with nobody working on them now: ${open.map(link).join(", ")}. Start a session for them (cc_session_start), hand them to someone, or close them — and tell the owner which.` : `"${session.title}" (${session.id}) ${how}.`,
     notChecked.length ? `GitHub did not answer after ${ARCHIVED_OUTSIDE_MAX_TRIES} tries for ${notChecked.join(", ")}: check by hand whether a PR of it is still open.` : "",

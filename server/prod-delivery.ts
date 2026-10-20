@@ -57,15 +57,15 @@ interface DeliverySession {
   cwd?: string;
   lastReport?: string;
   delivery?: CcDelivery;
-  /** PRs the session was told to take over ("assuma a PR #9328"). */
+  /** PRs the session was told to take over ("assuma a PR #N"). */
   claimedPrs?: number[];
 }
 
 // ── whose PR it is ───────────────────────────────────────────────────────
-// 01/10: the session of #9052 wrote "a trava … está na PR #9328, que ainda
-// não está em main", and #9328 (another session's) became its PR: its
+// 01/10: the session of #M wrote "a trava … está na PR #N, que ainda
+// não está em main", and #N (another session's) became its PR: its
 // archiving was held by it, its "em produção" would have gone to the wrong
-// conversation, and liveOwnerOf would have named it #9328's live owner
+// conversation, and liveOwnerOf would have named it #N's live owner
 // (R9-followup #2). A PR is a session's only by its head branch (the
 // worktree's branch or the branch it pushed to) or by an explicit hand-over.
 
@@ -77,7 +77,7 @@ const NOT_A_WORK_BRANCH = new Set(["main", "master", "develop", "HEAD", ""]);
 /** The PRs handed to a session by the orders it was given before claimedPrs
  * existed, read from the bots' tool calls in the history (cc_session_send
  * to its id, or the cc_session_start that opened it, by its title): the
- * real "assuma a PR #9328" of 18:13 to the 29da943f (INSP-H r1 #1). */
+ * real "assuma a PR #N" of 18:13 to the 29da943f (INSP-H r1 #1). */
 export function claimsInToolCalls(calls: ReadonlyArray<{ tool: string; input: string }>, sessionId: string, startedAs: (title: string) => boolean): number[] {
   const found = new Set<number>();
   for (const call of calls) {
@@ -124,7 +124,7 @@ export function reflogBranches(output: string): string[] {
  * - its worktree's checkout and the branch it pushed to (`git push -u
  *   origin HEAD:fix/…` sets the upstream);
  * - the worktrees nested INSIDE its folder (`git worktree list`): on 01/10
- *   the 29da943f sat on a detached HEAD and worked on #9328 and #9341 in
+ *   the 29da943f sat on a detached HEAD and worked on #N and #K in
  *   `.worktrees/9328` and `.worktrees/9340` (INSP-H r1 #1);
  * - the branches its HEAD checked out (reflog).
  * Null when its worktree cannot be read (none yet, or gone). */
@@ -157,16 +157,16 @@ export function prOwnership(pr: { number: number; headRefName?: string; headRefO
   if (!branches) return null;
   if (pr.headRefName && branches.names.includes(pr.headRefName)) return "branch";
   if (pr.headRefOid && branches.heads.includes(pr.headRefOid)) return "branch";
-  // the worktree was made for this very PR ("9330-gate-…" gating #9330)
+  // the worktree was made for this very PR ("P-gate-…" gating #P)
   if (branches.folderNumber === pr.number) return "branch";
   return null;
 }
 
 /** The PRs an order HANDS to the session it is sent to: an imperative to
- * it ("assuma a PR #9328", "assuma as PRs #9328 e #9341", "você assume a PR
- * órfã https://…/pull/9289", "fique com a #9314") or "a PR #9328 é sua".
+ * it ("assuma a PR #N", "assuma as PRs #N e #K", "você assume a PR
+ * órfã https://…/pull/9289", "fique com a #Q") or "a PR #N é sua".
  * Not under a negation ("não assuma"), not about someone else ("a 29da943f
- * assume a PR #9328"), not a question ("a PR #9328 é sua?") (INSP-H r1 #7). */
+ * assume a PR #N"), not a question ("a PR #N é sua?") (INSP-H r1 #7). */
 export function claimedPrNumbers(text: string): number[] {
   const found = new Set<number>();
   const numbersIn = (span: string) => [...span.matchAll(/(?<!issue\s{0,3})#(\d{2,6})\b|\/pull\/(\d{1,7})\b/giu)].map((match) => Number(match[1] ?? match[2]));
@@ -176,7 +176,7 @@ export function claimedPrNumbers(text: string): number[] {
     for (const clause of sentence.split(/;\s*/)) {
       const take = /(?<![\p{L}])(?:(?:voc[êe]s?\s+)?(?:assuma|assumam)|voc[êe] assume|voc[êe]s assumem|pode assumir|fique com|fiquem com|pegue|toma conta d[ao]|take over|take ownership of)(?![\p{L}])/iu.exec(clause);
       if (take && !/(?<![\p{L}])(?:n[ãa]o|nunca|jamais)\s+(?:\S+\s+){0,1}$/iu.test(clause.slice(0, take.index))) {
-        // what it takes: the list right after the verb ("#9328 e a #9341"), not "… e rode o gate da #9330"
+        // what it takes: the list right after the verb ("#N e a #K"), not "… e rode o gate da #P"
         const span = clause.slice(take.index).split(/,\s+|\s+e\s+(?!(?:a|as|o|os|the)?\s*(?:PRs?\s*)?(?:#|https?:))/iu)[0]!;
         for (const number of numbersIn(span)) found.add(number);
       }
@@ -197,13 +197,13 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
     const number = Number(match[2]);
     if (!found.has(number)) found.set(number, `https://github.com/${match[1]}/pull/${number}`);
   }
-  // sessions often report a PR only as "PR #9315", or a list after the
-  // plural: "PRs #9329 e #9330", "PRs #1, #2 and #3". A bare "#N" may be an
-  // issue, so only the number right after a singular "PR" counts ("PR #9328,
-  // #9319 (issue)", "PR #9328/#9319" name an issue second), and a number in
-  // a list tagged as an issue right after it ("#9319 (issue)", "#9319 é a
-  // issue") leaves it. An issue named elsewhere in the sentence ("PRs #9329 e
-  // #9330 fecham a issue #9326") does not cut the list: these are candidates,
+  // sessions often report a PR only as "PR #R", or a list after the
+  // plural: "PRs #S e #P", "PRs #1, #2 and #3". A bare "#N" may be an
+  // issue, so only the number right after a singular "PR" counts ("PR #N,
+  // #T (issue)", "PR #N/#9319" name an issue second), and a number in
+  // a list tagged as an issue right after it ("#T (issue)", "#T é a
+  // issue") leaves it. An issue named elsewhere in the sentence ("PRs #S e
+  // #P fecham a issue #U") does not cut the list: these are candidates,
   // and whoever uses them asks GitHub — a number that is no PR answers "Could
   // not resolve to a PullRequest" (notAPullRequest) and is dropped there.
   // Missing a PR is worse than checking one too many: archiveBlockers would
@@ -218,7 +218,7 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
 }
 
 /** The PR numbers of a list that followed "PRs": a number tagged as an issue
- * right after it ("#9319 (issue)", "#9319 é a issue") leaves it. */
+ * right after it ("#T (issue)", "#T é a issue") leaves it. */
 function listedPrs(list: string, after: string): number[] {
   const numbers = [...list.matchAll(/#(\d{2,6})/g)].map((each) => Number(each[1]));
   const issueTagged = (rest: string) => /^\s*(?:\(\s*(?:a\s+|the\s+)?issue\s*\)|(?:é|e|is)\s+(?:a\s+|the\s+|uma\s+|an\s+)?issue\b)/i.test(rest);
@@ -326,7 +326,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
   for (const session of sessions) {
     if (session.status === "archived") continue;
     if (!session.delivery) {
-      // "PRs #9329 e #9330" too: a plural report used to start no delivery at all
+      // "PRs #S e #P" too: a plural report used to start no delivery at all
       if (!/\/pull\/|\b(?:PRs?|pull requests?)\s*#\d/i.test(session.lastReport ?? "")) continue;
       session.delivery = { prs: {} };
     }
@@ -354,7 +354,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     if (added) deps.save();
     let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
     // "legacy" (recorded merged before ownership existed) is proof of nothing:
-    // the real #9328 stayed the 9052 session's that way, holding its archive
+    // the real #N stayed the M session's that way, holding its archive
     // and due to announce "em produção" in its conversations (R10-followup
     // #3). Each one is checked once by its head branch against the session's
     // branches, worktrees and reflog; without that proof (or a hand-over) it
@@ -507,7 +507,7 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
         state = view.state ?? "";
         mergeSha = view.mergeCommit?.oid ?? undefined;
       } catch (error) {
-        // an issue named in the report ("fecham a issue #9326"): nothing to hold
+        // an issue named in the report ("fecham a issue #U"): nothing to hold
         if (!notAPullRequest(error)) unknown.push(`PR #${number}`);
         continue;
       }

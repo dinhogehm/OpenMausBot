@@ -1,7 +1,6 @@
 import { useLayoutEffect, useState, type RefObject } from "react";
 
-/** Same as Tailwind `gap-3` on the transcript stack. The last bubble sits
- * this far above the composer when the pane is scrolled to the end. */
+/** Must equal Tailwind `gap-3` on the transcript stack. */
 export const TRANSCRIPT_GAP = "0.75rem";
 
 /** The "jump to the end" pill floats this far above the composer. */
@@ -18,9 +17,6 @@ export function transcriptEndPad(composerHeightPx: number): string {
   return `calc(${height}px + ${TRANSCRIPT_GAP})`;
 }
 
-/** Pad the transcript so rest-at-bottom leaves one inter-bubble gap of
- * black above the docked composer. Tracks composer resizes (multiline,
- * queued chip, approval takeover). */
 export function useComposerDockPad(ref: RefObject<HTMLElement | null>) {
   const [height, setHeight] = useState(0);
   useLayoutEffect(() => {

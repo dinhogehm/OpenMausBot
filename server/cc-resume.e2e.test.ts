@@ -9,8 +9,8 @@ import { request } from "../scripts/mcp-server.ts";
 import { waitForExit } from "./testing/cleanup.ts";
 
 // S-retomar and R8-dispatch D6, through the real server, with the line of
-// 02/10 (redacted): 9052 (#9332) failed hours ago and 9195 (#9280) idle, each
-// holding its own PR open; 8204 (#9350) idle too, but parked by the server
+// 02/10 (redacted): 9052 (#N) failed hours ago and 9195 (#M) idle, each
+// holding its own PR open; 8204 (#K) idle too, but parked by the server
 // behind a release (resumeAfterTag, INSP-S r1 S-1); and a message for an app
 // session waiting for the Mac (screen locked). While a release is on its way
 // (the fixture's own deploy lease, held by this test's pid) nobody is told
