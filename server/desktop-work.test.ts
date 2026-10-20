@@ -10,6 +10,12 @@ import {
   DESKTOP_DRAFT_RECHECK_MS,
   DESKTOP_ARCHIVE_MAX_TRIES,
   DESKTOP_MAX_MISSES,
+  DESKTOP_PARK_BASE_MS,
+  DESKTOP_PARK_MAX_MS,
+  DESKTOP_SEND_MAX_PARKS,
+  DESKTOP_SEND_PARK_MISSES,
+  desktopParkMs,
+  parkedPending,
   DESKTOP_SEND_CONFIRM_MS,
   DESKTOP_SUMMARY_WAIT_MS,
   DESKTOP_SEND_MAX_DELIVERIES,
@@ -625,10 +631,11 @@ describe("round 3: screen failures, questions, old queues, names", () => {
     const session = h.opened("a");
     session.status = "idle";
     session.desktop!.pending = { kind: "send", text: "OK do gerente: siga com o push", since: h.now, attempts: 0 };
-    for (let i = 0; i < DESKTOP_MAX_MISSES; i++) {
+    // parked after every DESKTOP_SEND_PARK_MISSES misses, given up at the last park
+    for (let i = 0; i < DESKTOP_SEND_PARK_MISSES * DESKTOP_SEND_MAX_PARKS; i++) {
       h.results.push({ ok: false, reason: "the session is not the one on screen", retry: true, miss: true, touched: true });
       await h.tick();
-      h.advance(10 * 60_000);
+      h.advance(DESKTOP_PARK_MAX_MS + 60_000);
     }
     expect(session.status).toBe("idle");
     expect(session.desktop!.pending).toBeUndefined();
@@ -1129,5 +1136,66 @@ describe("a new session the app lands in a folder that is not its own", () => {
     expect(session.lastError).toContain("New sessions wait until the owner unblocks the app (the 409 says how — where the server makes the sessions' worktrees, the option stays off)");
     expect(session.lastError).not.toMatch(/turns? the worktree (?:back )?on/);
     expect(sessionErrorPt(session.lastError!)).toContain("a sessão abriu na raiz, sem worktree");
+  });
+});
+
+describe("a send that keeps missing its session is parked (19/10 send loop)", () => {
+  const miss: DesktopStep = { ok: false, reason: 'the session "8128 Respeitar indisponibilidade" is not the one on screen', retry: true, miss: true, touched: true, seen: "A rotina de Chief of Staff está esperando" };
+
+  it("parks after 3 misses in a row: clear error, backoff, and the owner's conversation is let go", async () => {
+    const h = harness();
+    const session = h.opened("a");
+    session.status = "running";
+    session.desktop!.pending = { kind: "send", text: "segue", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_SEND_PARK_MISSES; i++) {
+      h.results.push(miss);
+      await h.tick();
+      h.advance(desktopBackoffMs(i + 1) + 1_000);
+    }
+    const pending = session.desktop!.pending!;
+    expect(pending).toMatchObject({ kind: "send", text: "segue", parks: 1, misses: 0 });
+    expect(parkedPending(session)).toBe(true);
+    expect(pending.lastReason).toMatch(/^parked after 3 misses in a row \(1 of 3\); next try in 5 min/);
+    expect(session.lastError).toContain("message parked");
+    // it no longer holds the owner's conversation (nor the Chief of Staff's intake behind it)
+    expect(session.status).toBe("idle");
+    expect(ccSessionActive(session, h.now)).toBe(false);
+    expect(h.reports.at(-1)!.text).toMatch(/PARKED, not delivered[\s\S]*nothing waits on it/);
+    // and nothing is tried during the backoff
+    const calls = h.steps.send.mock.calls.length;
+    await h.tick();
+    expect(h.steps.send.mock.calls.length).toBe(calls);
+  });
+
+  it("backs off exponentially between parks and gives up after the last one", async () => {
+    expect(desktopParkMs(1)).toBe(DESKTOP_PARK_BASE_MS);
+    expect(desktopParkMs(2)).toBe(2 * DESKTOP_PARK_BASE_MS);
+    expect(desktopParkMs(3)).toBe(4 * DESKTOP_PARK_BASE_MS);
+    expect(desktopParkMs(10)).toBe(DESKTOP_PARK_MAX_MS);
+    const h = harness();
+    const session = h.opened("a");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "segue", since: h.now, attempts: 0 };
+    let tries = 0;
+    for (let i = 0; i < DESKTOP_SEND_PARK_MISSES * DESKTOP_SEND_MAX_PARKS + 5 && session.desktop!.pending; i++) {
+      h.results.push(miss);
+      await h.tick();
+      tries += 1;
+      h.advance(DESKTOP_PARK_MAX_MS + 60_000);
+    }
+    expect(tries).toBe(DESKTOP_SEND_PARK_MISSES * DESKTOP_SEND_MAX_PARKS);
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(h.reports.at(-1)!.text).toContain("was NOT delivered");
+  });
+
+  it("a parked send that gets through runs as usual", async () => {
+    const h = harness();
+    const session = h.opened("a");
+    session.desktop!.pending = { kind: "send", text: "segue", since: h.now, attempts: 0, parks: 1, parkedAt: h.now, nextAttemptAt: h.now };
+    session.status = "idle";
+    h.results.push({ ok: true });
+    await h.tick();
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(session.status).toBe("running");
   });
 });

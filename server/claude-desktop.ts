@@ -1215,6 +1215,29 @@ async function typeBrief(screen: Screen, text: string, size: { h: number }, repo
   return { ok: true };
 }
 
+/** The session's header (the top of the main area) names `title`. */
+export function sessionHeaderShown(lines: OcrLine[], title: string): boolean {
+  const top = lines.filter((line) => line.y < 140 && line.x >= SIDEBAR_MAX_X);
+  return headerNames(top, title) || top.some((line) => isHeaderOf(line, title));
+}
+
+/** Open a session by its one unambiguous entry in the app's sidebar (the
+ * search a person would do when the link leaves another session open). */
+async function openBySidebar(screen: Screen, title: string): Promise<{ clicked: boolean; stop?: DesktopStep }> {
+  const driver = screen.driver;
+  const sidebar = (await driver.ocr()).filter((line) => line.x < SIDEBAR_MAX_X && line.y >= 140);
+  const matches = sidebar.filter((line) => sidebarMatch(line.text, title));
+  const exact = matches.filter((line) => sameTitle(line.text, title));
+  const entry = matches.length === 1 ? matches[0]! : exact.length === 1 ? exact[0]! : null;
+  if (!entry) return { clicked: false };
+  const stop = await guard(screen, "open session from sidebar");
+  if (stop) return { clicked: false, stop };
+  await act(screen, () => driver.click(entry.x + Math.min(entry.w / 2, 120), entry.y + entry.h / 2));
+  await driver.sleep(2_000);
+  const after = await guard(screen, "opened from sidebar");
+  return after ? { clicked: true, stop: after } : { clicked: true };
+}
+
 /**
  * Reopen a session with the app's own link and send `text` into it. The
  * session's title must be on screen, the text must show up in its field,
@@ -1228,9 +1251,22 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     let stop = await guard(screen, "open session");
     if (stop) return stop;
     const size = await driver.screenSize();
-    const lines = mainArea(await driver.ocr());
-    if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!)) && !headerNames(lines.filter((line) => line.y < 140), input.title)) {
-      return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) };
+    let lines = mainArea(await driver.ocr());
+    if (input.title) {
+      // Only the session's own header proves it is the one on screen: a line
+      // of the conversation, a notification banner or the sidebar naming the
+      // title does not (19/10 22:30: "QA Produção"/"Chief of Staff" was open
+      // and the send kept retrying into it). The link did not bring it up:
+      // open it by its entry in the sidebar (one unambiguous entry), then
+      // look again — nothing is typed until its header is there.
+      if (!sessionHeaderShown(lines, input.title)) {
+        const opened = await openBySidebar(screen, input.title);
+        if (opened.stop) return opened.stop;
+        lines = mainArea(await driver.ocr());
+        if (!sessionHeaderShown(lines, input.title)) {
+          return { ok: false, reason: `the session "${input.title}" is not the one on screen (opened by its id${opened.clicked ? " and by its sidebar entry" : ""}; its header is not there); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) };
+        }
+      }
     }
     const composer = findComposer(lines, size, input.repoName);
     if (!composer) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };

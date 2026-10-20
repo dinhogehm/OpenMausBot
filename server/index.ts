@@ -389,6 +389,7 @@ import {
   uniqueSessionTitle,
   reviveScreenFailures,
   screenWaitOf,
+  parkedPending,
   reportFor as desktopReportFor,
   takeFreshQueued,
   runDesktopWork as runDesktopWorkFlow,
@@ -21899,7 +21900,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (routineHold.hold && routineHold.reason === "running") return json(res, 200, routineHold);
       const now = Date.now();
       // a background job the server resumes a session after counts too
-      const ccBusy = ccLedger.all().some((session) => ccSessionActive(session, now) || Boolean(session.desktop?.pending) || (Boolean(session.bgJob) && session.status !== "archived" && session.status !== "stopped"));
+      const ccBusy = ccLedger.all().some((session) => ccSessionActive(session, now) || (Boolean(session.desktop?.pending) && !parkedPending(session)) || (Boolean(session.bgJob) && session.status !== "archived" && session.status !== "stopped"));
       if (ccBusy) return json(res, 200, { hold: true, reason: "running" });
       const selfPaced = autonomy.wakeHold(AUTONOMY_WAKE_HOLD_MS);
       if (selfPaced.hold && selfPaced.reason === "running") return json(res, 200, selfPaced);

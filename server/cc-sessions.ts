@@ -301,6 +301,10 @@ export interface CcDesktopPending {
   trustClicks?: number;
   /** archive: clicks that the app's record did not confirm. */
   archiveTries?: number;
+  /** send: times it was parked after DESKTOP_SEND_PARK_MISSES misses in a row (each park backs off longer). */
+  parks?: number;
+  /** send: parked since then — it no longer holds the owner's conversation or the Mac awake. */
+  parkedAt?: number;
 }
 
 export function slugify(text: string): string {

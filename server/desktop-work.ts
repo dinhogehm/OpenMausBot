@@ -50,6 +50,20 @@ export const DESKTOP_HELPER_MAX_TRIES = 3;
 /** Screens that did not show what was expected (unlocked, Claude in front) before giving up. */
 export const DESKTOP_MAX_MISSES = 5;
 export const DESKTOP_RENAME_MAX_MISSES = 3;
+/** A send whose session is not on screen this many times in a row is parked (19/10: 50+ silent tries held the Chief of Staff). */
+export const DESKTOP_SEND_PARK_MISSES = 3;
+/** Parks before the send gives up for good (the owner is told). */
+export const DESKTOP_SEND_MAX_PARKS = 3;
+export const DESKTOP_PARK_BASE_MS = 5 * 60_000;
+export const DESKTOP_PARK_MAX_MS = 60 * 60_000;
+
+/** Wait after the n-th park (1-based): 5 min, 10 min, 20 min… up to an hour. */
+export function desktopParkMs(parks: number): number {
+  return Math.min(DESKTOP_PARK_BASE_MS * 2 ** Math.max(0, parks - 1), DESKTOP_PARK_MAX_MS);
+}
+
+/** A parked send: it waits out its backoff without holding anything. */
+export const parkedPending = (session: Pick<CcSession, "desktop">): boolean => session.desktop?.pending?.parkedAt !== undefined;
 export const DESKTOP_BACKOFF_BASE_MS = 30_000;
 export const DESKTOP_BACKOFF_MAX_MS = 10 * 60_000;
 /** After the Archive click, the app's record must say archived within this... */
@@ -117,6 +131,8 @@ export interface DesktopWorkDeps {
   folderBornAt?: (path: string) => number | null;
   /** One line per screen action (server.log). */
   log?: (line: string) => void;
+  /** A send was parked (parkSend): let go of what waits on the session (the owner's hold). */
+  onParked?: (session: CcSession) => void;
   /** The app confirmed the session archived (remove its worktree if asked). */
   onArchived?: (session: CcSession) => void;
   /** The worktrees the server makes for its app sessions (lote X). */
@@ -1012,6 +1028,18 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         fallBackToNewSession(deps, next, `o app não abriu a sessão na worktree criada pelo OMB em ${pending.misses} tentativas (${step.reason.slice(0, 160)})`);
         return;
       }
+    } else if (step.miss && pending.kind === "send") {
+      pending.misses = (pending.misses ?? 0) + 1;
+      if (pending.misses >= DESKTOP_SEND_PARK_MISSES) {
+        const why = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`;
+        pending.parks = (pending.parks ?? 0) + 1;
+        if (pending.parks >= DESKTOP_SEND_MAX_PARKS) {
+          giveUpPending(deps, next, `could not send the message after ${pending.parks} parks of ${DESKTOP_SEND_PARK_MISSES} misses each with the screen unlocked and the Claude app in front: ${why}`);
+          return;
+        }
+        parkSend(deps, next, why, at);
+        return;
+      }
     } else if (step.miss) {
       pending.misses = (pending.misses ?? 0) + 1;
       // a rename is cosmetic: three misses and the person is asked instead (01/10: 29 silent tries)
@@ -1039,6 +1067,31 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
   } finally {
     state.busy = false;
   }
+}
+
+/** A send that missed its session DESKTOP_SEND_PARK_MISSES times in a row:
+ * parked with a clear error and a longer wait each time (desktopParkMs). It
+ * lets go of what it held — the session goes idle, so its owner's
+ * conversation (and the bot's intake lock, the Chief of Staff's routines
+ * behind it) is free, and the Mac is no longer kept awake for it. */
+export function parkSend(deps: DesktopWorkDeps, session: CcSession, why: string, at: number): void {
+  const desktop = session.desktop!;
+  const pending = desktop.pending!;
+  const parks = pending.parks ?? 1;
+  const wait = desktopParkMs(parks);
+  const minutes = Math.round(wait / 60_000);
+  const misses = pending.misses ?? DESKTOP_SEND_PARK_MISSES;
+  pending.misses = 0;
+  pending.parkedAt = at;
+  pending.nextAttemptAt = at + wait;
+  pending.lastReason = `parked after ${misses} misses in a row (${parks} of ${DESKTOP_SEND_MAX_PARKS}); next try in ${minutes} min: ${why}`.slice(0, 1_000);
+  session.lastError = `message parked: the session was not on screen ${misses} times in a row (${why})`.slice(0, 1_000);
+  if (session.status === "running" && !desktop.sent) session.status = "idle";
+  deps.ledger.save();
+  deps.log?.(`send parked: session ${session.id} — ${misses} misses in a row, park ${parks} of ${DESKTOP_SEND_MAX_PARKS}, next try in ${minutes} min — ${why}`);
+  deps.chip(session, `a mensagem ficou estacionada: a sessão não apareceu na tela ${misses} vezes seguidas; nova tentativa em ${minutes} min`, false);
+  deps.onParked?.(session);
+  deps.report(session, `Claude Code session "${session.title}" (${session.id}): your message is PARKED, not delivered — the Claude app did not show this session on screen ${misses} times in a row (${why.slice(0, 300)}). It is tried again by itself in ${minutes} min (park ${parks} of ${DESKTOP_SEND_MAX_PARKS}); meanwhile nothing waits on it, so go on with other work.`);
 }
 
 const trustKey = (session: CcSession) => `cc-trust:${session.id}`;

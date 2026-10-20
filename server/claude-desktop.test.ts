@@ -405,6 +405,32 @@ describe("sendToDesktopSession", () => {
     expect(app.actions).toContain(`type  ${DESKTOP_MESSAGE_NOTE}`);
   });
 
+  it("does not take the title in a notification or the conversation for the session's header (19/10 send loop)", async () => {
+    const other = { text: "• QA Produção v (nuria-platform", y: 23 };
+    const banner = { text: "Automação inatividade não dispara: target busy", y: 300 };
+    const app = fakeApp({ screen: [other, banner, field, bar] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "y", title: open.text })).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("nothing was typed") });
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("key") || action.startsWith("click"))).toBe(false);
+  });
+
+  it("opens the session by its sidebar entry when the link left another one on screen, and types only once its header is there", async () => {
+    const other = { text: "• Chief of Staff v (nuria-platform", y: 23 };
+    const entry = { text: "Automação inatividade não dispara", x: 120, y: 300, w: 200 };
+    const typed = { text: "follow-up now", y: 820 };
+    const app = fakeApp({ screens: [[other, entry, field, bar], [other, entry, field, bar], [open, entry, field, bar], [open, typed, bar], [open, { text: "follow-up now", y: 400 }, field, bar]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: open.text })).toEqual({ ok: true });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 220,308", "click 620,828", "paste(all) follow-up now", "key 36"]);
+  });
+
+  it("types nothing when the sidebar entry does not bring the session up either", async () => {
+    const other = { text: "• Chief of Staff v (nuria-platform", y: 23 };
+    const entry = { text: "Automação inatividade não dispara", x: 120, y: 300, w: 200 };
+    const app = fakeApp({ screen: [other, entry, field, bar] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "y", title: open.text })).toMatchObject({ ok: false, miss: true, reason: expect.stringContaining("and by its sidebar entry") });
+    expect(app.actions.filter((action) => action.startsWith("click"))).toEqual(["click 220,308"]);
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("key"))).toBe(false);
+  });
+
   it("refuses an id that is not the app's", async () => {
     const app = fakeApp();
     expect(await sendToDesktopSession(app.driver, { localId: "../../x", text: "y" })).toMatchObject({ ok: false, retry: false });
