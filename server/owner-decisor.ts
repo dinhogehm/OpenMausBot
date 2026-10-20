@@ -57,6 +57,17 @@ export interface HardStop {
   anyOf?: string[];
   /** …and every one of these matches (co-occurrence anywhere in the text). */
   allOf?: string[];
+  /** Exceptions from the policy's `allow`: the stop is waived when any of these matches the same text. */
+  unless?: string[];
+}
+
+/** An owner-approved exception: waives the named hard stops when its patterns match. */
+export interface AllowRule {
+  id: string;
+  /** Ids of the hard stops this exception waives (never all of them implicitly). */
+  stops: string[];
+  anyOf?: string[];
+  allOf?: string[];
 }
 
 export interface DecisorPolicy {
@@ -198,6 +209,24 @@ export function parseDecisorPolicy(raw: unknown): { policy: DecisorPolicy } | { 
     if (typeof extra === "string") return { error: extra.replace(/^hardStops/, "extraHardStops") };
     hardStops = [...hardStops, ...extra];
   }
+  if (input.allow !== undefined) {
+    if (!Array.isArray(input.allow)) return { error: "allow must be a list" };
+    const rules = hardStopsOf(input.allow);
+    if (typeof rules === "string") return { error: rules.replace(/^hardStops/, "allow") };
+    const known = new Set(hardStops.map((stop) => stop.id));
+    const waivers = new Map<string, string[]>();
+    for (const [index, raw] of (input.allow as Record<string, unknown>[]).entries()) {
+      const stops = Array.isArray(raw.stops) ? raw.stops.filter((each): each is string => typeof each === "string") : [];
+      if (!stops.length) return { error: `allow[${index}] needs stops (the hard stop ids it waives)` };
+      const unknown = stops.find((id) => !known.has(id));
+      if (unknown) return { error: `allow[${index}]: unknown hard stop ${JSON.stringify(unknown)}` };
+      const rule = rules[index]!;
+      // allOf becomes one lookahead pattern so a single "unless" source carries the whole rule
+      const source = [...(rule.allOf ?? []).map((each) => `(?=[\\s\\S]*?(?:${each}))`), rule.anyOf?.length ? `[\\s\\S]*?(?:${rule.anyOf.join("|")})` : ""].join("");
+      for (const id of stops) waivers.set(id, [...(waivers.get(id) ?? []), `^${source}`]);
+    }
+    hardStops = hardStops.map((stop) => (waivers.has(stop.id) ? { ...stop, unless: [...(stop.unless ?? []), ...waivers.get(stop.id)!] } : stop));
+  }
   const d = DEFAULT_DECISOR_POLICY;
   return {
     policy: {
@@ -251,7 +280,7 @@ export function hardStopHit(text: string, stops: readonly HardStop[]): HardStop 
   for (const stop of stops) {
     const any = !stop.anyOf?.length || stop.anyOf.some(test);
     const all = !stop.allOf?.length || stop.allOf.every(test);
-    if (any && all) return stop;
+    if (any && all && !stop.unless?.some(test)) return stop;
   }
   return null;
 }

@@ -345,3 +345,45 @@ describe("through the panel's own reply route", () => {
     expect(autonomy.ownerPendingById("chief", item.id)!.history?.at(-1)?.decisor).toBeUndefined();
   });
 });
+
+describe("allow: owner-approved exceptions to a hard stop", () => {
+  const cloudflare = {
+    id: "cloudflare-producao",
+    stops: ["dados-producao"],
+    anyOf: ["\\bcloudflare\\b", "\\bd1\\b", "\\bworkers?\\b", "\\bkv\\b", "\\br2\\b", "\\bdns\\b", "\\bwrangler\\b", "dash\\.cloudflare\\.com"],
+  };
+  const policyWith = (allow: unknown) => {
+    const read = parseDecisorPolicy({ enabled: true, mode: "on", allow });
+    if ("error" in read) throw new Error(read.error);
+    return read.policy;
+  };
+
+  it("waives only the named stop, only when the text is about Cloudflare", () => {
+    const { hardStops } = policyWith([cloudflare]);
+    expect(hardStopHit("Migrar o banco de dados de produção no D1 com wrangler", hardStops)).toBeNull();
+    expect(hardStopHit("Alterar o DNS de produção em dash.cloudflare.com", hardStops)).toBeNull();
+    expect(hardStopHit("Migrar o banco de dados de produção no Postgres", hardStops)?.id).toBe("dados-producao");
+  });
+
+  it("keeps every other stop, Cloudflare or not", () => {
+    const { hardStops } = policyWith([cloudflare]);
+    expect(hardStopHit("Criar o token de API no Cloudflare e colar no wrangler", hardStops)?.id).toBe("credenciais");
+    expect(hardStopHit("Fazer upgrade de plano pago do Cloudflare Workers", hardStops)?.id).toBe("dinheiro");
+    expect(hardStopHit("Rodar wrangler d1 execute com DROP TABLE users", hardStops)?.id).toBe("dados-sql-destrutivo");
+    expect(hardStopHit("Desativar o firewall do Cloudflare", hardStops)?.id).toBe("seguranca");
+  });
+
+  it("allOf requires every pattern", () => {
+    const { hardStops } = policyWith([{ id: "x", stops: ["dados-producao"], allOf: ["\\bcloudflare\\b", "\\bd1\\b"] }]);
+    expect(hardStopHit("Migrar o banco de dados de produção no Cloudflare D1", hardStops)).toBeNull();
+    expect(hardStopHit("Migrar o banco de dados de produção no Cloudflare", hardStops)?.id).toBe("dados-producao");
+  });
+
+  it("fails closed on an exception without stops, with an unknown stop or a bad pattern", () => {
+    expect(parseDecisorPolicy({ allow: {} })).toEqual({ error: "allow must be a list" });
+    expect(parseDecisorPolicy({ allow: [{ anyOf: ["x"] }] })).toHaveProperty("error");
+    expect(parseDecisorPolicy({ allow: [{ stops: ["nope"], anyOf: ["x"] }] })).toHaveProperty("error");
+    expect(parseDecisorPolicy({ allow: [{ stops: ["dados-producao"], anyOf: ["("] }] })).toHaveProperty("error");
+    expect(parseDecisorPolicy({ allow: [{ stops: ["dados-producao"] }] })).toHaveProperty("error");
+  });
+});

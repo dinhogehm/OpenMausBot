@@ -58,6 +58,22 @@ quando não há opções).
 
 `hardStops` (em vez de `extraHardStops`) substitui a lista inteira.
 
+## Exceções aprovadas (`allow`)
+
+`allow` dispensa limites específicos (por `id`) quando os padrões casam com o mesmo texto.
+Cada regra precisa de `stops` com ids existentes; id desconhecido ou regex inválida desliga o Decisor (fail closed).
+Os demais limites continuam valendo. Ex.: dados de produção liberados só no Cloudflare:
+
+```json
+"allow": [
+  { "id": "cloudflare-producao", "stops": ["dados-producao"],
+    "anyOf": ["\\bcloudflare\\b", "\\bd1\\b", "\\bworkers?\\b", "\\bkv\\b", "\\br2\\b", "\\bdns\\b", "\\bwrangler\\b", "dash\\.cloudflare\\.com"] }
+]
+```
+
+Dinheiro, credenciais (o token é criado e colado pelo Osvaldo), mensagem externa, segurança e
+`dados-sql-destrutivo` (DROP/TRUNCATE/DELETE FROM, inclusive no D1) seguem com o dono.
+
 ## Onde ver
 
 - `~/Library/Logs/openmausbot/server.log`: linhas `[decisor] …`
