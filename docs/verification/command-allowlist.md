@@ -1,4 +1,14 @@
-# Exact command allowlist
+# Command allowlist
+
+**Always allow this type of command** saves program patterns (`cat *`,
+`git status *`, `gh pr view *`), one per part of a compound command
+(`;`, `&&`, `||`, `|`). A command is allowed when every part is covered by a
+saved pattern, by an exact saved string, or is read-only (`cat ls echo head
+tail grep rg wc stat pwd which date`, `find` without `-delete`/`-exec`).
+Redirection to files, `$(...)`/backticks, subshells, heredocs, env prefixes,
+and `rm mv chflags sudo kill` or a pipe into `sh`/`bash`/`zsh` always ask; for
+those only the exact string can be saved. Rules saved before patterns keep
+matching exactly. See `shared/command-pattern.ts`.
 
 Open **Command allowlist** from the composer's approval menu (after Full access)
 or a bot's Permissions settings. Save a complete command and working folder,

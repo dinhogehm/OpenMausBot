@@ -49,9 +49,9 @@ describe("command allowlist", () => {
       { cwd: join(directory, "other") },
       { providerInstanceId: "claude-other" },
     ]) expect(store.matches("bot-a", { ...candidate(), ...changed })).toBe(false);
-    store.add("bot-a", { ...candidate(), command: "echo *.ts" });
-    expect(store.matches("bot-a", { ...candidate(), command: "echo *.ts" })).toBe(true);
-    expect(store.matches("bot-a", { ...candidate(), command: "echo file.ts" })).toBe(false);
+    store.add("bot-a", { ...candidate(), command: "printf *.ts" });
+    expect(store.matches("bot-a", { ...candidate(), command: "printf *.ts" })).toBe(true);
+    expect(store.matches("bot-a", { ...candidate(), command: "printf file.ts" })).toBe(false);
   });
 
   it("persists revocations and cannot remove a different bot's rule", () => {
@@ -147,5 +147,35 @@ describe("command allowlist", () => {
     expect(store.matches("bot-a", candidate())).toBe(true);
     expect(readFileSync(filename, "utf8")).toBe(saved);
     expect(new CommandAllowlistStore(filename).list("bot-a")).toEqual([rule]);
+  });
+});
+
+describe("command allowlist patterns", () => {
+  it("keeps exact rules, saves program patterns and matches compound commands part by part", () => {
+    const store = new CommandAllowlistStore(filename);
+    store.add("bot-a", { ...candidate(), command: "/bin/zsh -lc 'make'" });
+    expect(store.matches("bot-a", { ...candidate(), command: "/bin/zsh -lc 'make'" })).toBe(true);
+    expect(store.matches("bot-a", { ...candidate(), command: "/bin/zsh -lc 'make x'" })).toBe(false);
+
+    expect(store.matches("bot-a", { ...candidate(), command: "df -h /" })).toBe(false);
+    expect(store.remember("bot-a", { ...candidate(), command: "df -h /" }).map((rule) => rule.command)).toEqual(["df *"]);
+    expect(store.matches("bot-a", { ...candidate(), command: "df -k ~ && ls -l" })).toBe(true);
+    expect(store.matches("bot-a", { ...candidate(), command: "df -k > out" })).toBe(false);
+    // Scoped to bot, folder and provider like exact rules.
+    expect(store.matches("bot-b", { ...candidate(), command: "df -k" })).toBe(false);
+    expect(store.matches("bot-a", { ...candidate(), command: "df -k", providerInstanceId: "codex" })).toBe(false);
+    expect(new CommandAllowlistStore(filename).matches("bot-a", { ...candidate(), command: "df" })).toBe(true);
+  });
+
+  it("remembers a dangerous command only as its exact string", () => {
+    const store = new CommandAllowlistStore(filename);
+    expect(store.remember("bot-a", { ...candidate(), command: "rm -rf build" }).map((rule) => rule.command)).toEqual(["rm -rf build"]);
+    expect(store.matches("bot-a", { ...candidate(), command: "rm -rf build" })).toBe(true);
+    expect(store.matches("bot-a", { ...candidate(), command: "rm -rf ~" })).toBe(false);
+  });
+
+  it("allows the read-only commands from the report without any rule", () => {
+    const store = new CommandAllowlistStore(filename);
+    expect(store.matches("bot-a", { ...candidate(), command: "cat ~/.nuria/halted-production-release.reason; echo; ls -l ~/.nuria/halted-production-release.* ~/.nuria/declined-production-release.sha" })).toBe(true);
   });
 });

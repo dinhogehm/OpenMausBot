@@ -329,8 +329,6 @@
   "approval.action.alwaysAllow": "Her zaman izin ver",
   "approval.action.alwaysAllowSession": "Bu oturumda her zaman izin ver",
   "approval.action.alwaysAllowSessionHint": "Sağlayıcı, oturum sona erene kadar bu eylem hakkında sormayı durdurur",
-  "approval.action.alwaysAllowCommand": "Bu komuta her zaman izin ver",
-  "approval.action.alwaysAllowCommandHint": "Bu klasörü kullanan diğer iş parçacıkları da dahil olmak üzere, {cwd} içindeki bu bot ve sağlayıcı için bu komutu tam olarak hatırla",
   "commandAllowlist.title": "Komut izin listesi",
   "commandAllowlist.manage": "Komut izin listesini yönet",
   "commandAllowlist.forBot": "{name} için kaydedilen komutlar",

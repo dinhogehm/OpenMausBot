@@ -9,6 +9,17 @@ import { APPROVAL_CODE_CHIP, toolLabel } from "./ApprovalCard";
 import { outboundSummary } from "@/lib/approval-summary";
 import { reviewedSkillSha256 } from "../../shared/skill-request";
 import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
+import { commandPatternLabel } from "../../shared/command-pattern";
+
+/** "Sempre permitir esse tipo de comando (`cat *`)": the pattern the server will save, when one is safe. */
+function rememberCommandLabel(command: string): string {
+  const pattern = commandPatternLabel(command);
+  return pattern ? `${t("approval.action.alwaysAllowCommand")} (${pattern})` : t("approval.action.alwaysAllowCommand");
+}
+
+function rememberCommandHint(candidate: { command: string; cwd: string }): string {
+  return t("approval.action.alwaysAllowCommandHint", { cwd: candidate.cwd, pattern: commandPatternLabel(candidate.command) ?? candidate.command });
+}
 
 interface ApprovalLabels {
   [tool: string]: LocaleKey;
@@ -294,7 +305,7 @@ export function approvalChoices(pending: Pending, opts: { bot?: Pick<Bot, "id" |
     choices.push({ id: "alwaysAllowSession", label: t("approval.action.alwaysAllowSession"), title: t("approval.action.alwaysAllowSessionHint"), look: "outline" });
   }
   if (canRememberCommand && pending.commandAllowlist) {
-    choices.push({ id: "rememberCommand", label: t("approval.action.alwaysAllowCommand"), title: t("approval.action.alwaysAllowCommandHint", { cwd: pending.commandAllowlist.cwd }), look: "outline" });
+    choices.push({ id: "rememberCommand", label: rememberCommandLabel(pending.commandAllowlist.command), title: rememberCommandHint(pending.commandAllowlist), look: "outline" });
   }
   choices.push({
     id: "allow",
@@ -376,7 +387,7 @@ export function PendingApprovalActions({
     : bot && pending.allowKey
       ? { name: t("approval.action.alwaysAllow"), hint: t("approval.action.stopAsking", { name: bot.name, key: pending.allowKey }), run: () => decide("allow", true) }
       : canRememberCommand && pending.commandAllowlist
-        ? { name: t("approval.action.alwaysAllowCommand"), hint: t("approval.action.alwaysAllowCommandHint", { cwd: pending.commandAllowlist.cwd }), run: () => decide("allow", false, true) }
+        ? { name: rememberCommandLabel(pending.commandAllowlist.command), hint: rememberCommandHint(pending.commandAllowlist), run: () => decide("allow", false, true) }
         : !pending.allowKey && pending.allowSession
           ? { name: t("approval.action.alwaysAllowSession"), hint: t("approval.action.alwaysAllowSessionHint"), run: () => decide("allow", true) }
           : null;

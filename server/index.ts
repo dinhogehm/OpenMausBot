@@ -5705,7 +5705,7 @@ async function answerRequest(
   if (remembered && outcome === "allowed-once" && behavior === "allow" && store.bot(remembered.botId)) {
     // Persist only after the provider accepted this exact live request.
     try {
-      commandAllowlist.add(remembered.botId, remembered.candidate);
+      commandAllowlist.remember(remembered.botId, remembered.candidate);
     } catch {
       store.appendMessage(threadId, { role: "bot", kind: "activity", tool: {
         name: "Command allowed once, but its allowlist rule could not be saved. Try again from the permissions menu.", ok: false,

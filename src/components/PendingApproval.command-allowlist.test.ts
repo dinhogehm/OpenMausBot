@@ -55,15 +55,15 @@ describe("remembering exact command approvals", () => {
   it("forwards eligibility supplied by the server without deriving a grant from the tool label", () => {
     expect(pendingApprovals([message()])[0]?.commandAllowlist).toEqual(commandAllowlist);
     expect(pendingApprovals([message({ commandAllowlist: undefined })])[0]?.commandAllowlist).toBeUndefined();
-    expect(view({ commandAllowlist: undefined }).html).not.toContain("Always allow this command");
+    expect(view({ commandAllowlist: undefined }).html).not.toContain("Always allow this type of command (git status *)");
   });
 
   it("answers and remembers in one action without a separate preference update", () => {
     const result = view();
-    expect(result.html).toContain("Always allow this command");
+    expect(result.html).toContain("Always allow this type of command (git status *)");
     expect(result.html).toContain("/work/project");
     expect(result.html).not.toContain("Always allow this session");
-    result.buttons.find((button) => button.props["aria-label"] === "Always allow this command")!.props.onClick!();
+    result.buttons.find((button) => button.props["aria-label"] === "Always allow this type of command (git status *)")!.props.onClick!();
     expect(fixture.dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       type: "decideRequest", threadId: "thread-1", requestId: "request-1", behavior: "allow", rememberCommand: true,
       alwaysAllow: undefined, always: undefined,
@@ -83,7 +83,7 @@ describe("remembering exact command approvals", () => {
   it.each([false, null])("keeps bot-wide grants unavailable without owner/admin authority (%s)", (admin) => {
     fixture.admin = admin;
     const result = view();
-    expect(result.html).not.toContain("Always allow this command");
+    expect(result.html).not.toContain("Always allow this type of command (git status *)");
     expect(result.html).toContain("Always allow this session");
     expect(result.html).toContain("Allow once");
   });
@@ -97,7 +97,7 @@ describe("remembering exact command approvals", () => {
 
   it("keeps peer grants separate from provider command rules", () => {
     const result = view({ allowKey: "peer:teammate" });
-    expect(result.html).not.toContain("Always allow this command");
+    expect(result.html).not.toContain("Always allow this type of command (git status *)");
     result.buttons.find((button) => button.props.children === "Always allow")!.props.onClick!();
     expect(fixture.dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       alwaysAllow: { botId: bot.id, key: "peer:teammate" }, always: undefined, rememberCommand: undefined,
@@ -122,7 +122,7 @@ describe("remembering exact command approvals", () => {
     const row = html.slice(0, details);
     expect(row).toContain(">Deny</button>");
     expect(row).toContain(">Allow once</button>");
-    expect(row).toContain('aria-label="Always allow this command"');
+    expect(row).toContain('aria-label="Always allow this type of command (git status *)"');
     expect(row).toContain(">Always allow</button>");
     expect(row).not.toContain("Cancel turn");
     expect(html.slice(details)).toContain("Cancel turn");
