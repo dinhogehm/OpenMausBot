@@ -9,7 +9,7 @@ import { APPROVAL_CODE_CHIP, toolLabel } from "./ApprovalCard";
 import { outboundSummary } from "@/lib/approval-summary";
 import { reviewedSkillSha256 } from "../../shared/skill-request";
 import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
-import { commandPatternLabel } from "../../shared/command-pattern";
+import { commandAlwaysAsks, commandPatternLabel } from "../../shared/command-pattern";
 
 /** "Sempre permitir esse tipo de comando (`cat *`)": the pattern the server will save, when one is safe. */
 function rememberCommandLabel(command: string): string {
@@ -288,7 +288,7 @@ export function approvalChoices(pending: Pending, opts: { bot?: Pick<Bot, "id" |
   const isProfileRequest = isProfileApproval(pending);
   const isTeamSetup = Boolean(pending.message.card?.teamSetupRequest);
   const durableRequest = durable(pending);
-  const canRememberCommand = opts.ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist);
+  const canRememberCommand = opts.ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist) && !commandAlwaysAsks(pending.commandAllowlist!.command);
   const reviewedSha256 = pending.message.card?.skillRequest ? reviewedSkillSha256(pending.message.card.skillRequest) : undefined;
   const choices: ApprovalChoice[] = [];
   if (!durableRequest) choices.push({ id: "cancelTurn", label: t("approval.action.cancelTurn"), look: "quiet" });
@@ -364,7 +364,7 @@ export function PendingApprovalActions({
   const isTeamSetup = Boolean(pending.message.card?.teamSetupRequest);
   const isSuggestion = Boolean(pending.message.card?.teamSetupRequest?.suggestion);
   const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest || isTeamSetup;
-  const canRememberCommand = ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist);
+  const canRememberCommand = ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist) && !commandAlwaysAsks(pending.commandAllowlist!.command);
   const reviewedSha256 = pending.message.card?.skillRequest
     ? reviewedSkillSha256(pending.message.card.skillRequest)
     : undefined;

@@ -29,6 +29,8 @@ const READ_ONLY = new Set(["cat", "ls", "echo", "head", "tail", "grep", "rg", "w
 
 const FIND_UNSAFE = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
 
+const SHELL_WRAPPERS = new Set(["sh", "bash", "zsh"]);
+
 const programName = (word: string) => word.slice(word.lastIndexOf("/") + 1);
 
 /**
@@ -36,7 +38,7 @@ const programName = (word: string) => word.slice(word.lastIndexOf("/") + 1);
  * command uses anything other than plain words, quotes, the separators
  * `; && || | &` and newline, and redirections to /dev/null or between fds.
  */
-export function splitCommand(command: string): CommandPart[] | null {
+export function splitCommand(command: string, depth = 0): CommandPart[] | null {
   const parts: CommandPart[] = [];
   let words: string[] = [];
   let word = "";
@@ -107,6 +109,11 @@ export function splitCommand(command: string): CommandPart[] | null {
   if (!parts.length) return null;
   // `FOO=bar cmd` changes what the program does; never pattern-matched.
   if (parts.some((part) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(part[0]!))) return null;
+  // A provider's own shell wrapper (`/bin/zsh -lc '<script>'`, codex.ts) is judged by the script it runs.
+  const only = parts.length === 1 ? parts[0]! : null;
+  if (only && only.length === 3 && SHELL_WRAPPERS.has(programName(only[0]!)) && /^-l?c$/.test(only[1]!)) {
+    if (depth < 1) return splitCommand(only[2]!, depth + 1);
+  }
   return parts;
 }
 
@@ -115,6 +122,31 @@ export function isDangerousPart(part: CommandPart): boolean {
   const program = programName(part[0]!);
   if (DANGEROUS.has(program)) return true;
   if (program === "find" && part.some((arg) => FIND_UNSAFE.has(arg))) return true;
+  // `rg --pre cmd` runs an arbitrary preprocessor.
+  if (program === "rg" && part.some((arg) => arg === "--pre" || arg.startsWith("--pre="))) return true;
+  return false;
+}
+
+/**
+ * Commands that must always ask: never saved (as a pattern or exact string)
+ * and never auto-approved, even by an exact rule saved earlier. Covers
+ * dangerous programs anywhere in the command (also inside substitutions or
+ * subshells), output redirection to a file, and pipes into a shell.
+ */
+export function commandAlwaysAsks(command: string): boolean {
+  const parts = splitCommand(command);
+  if (parts) return parts.some(isDangerousPart);
+  const wrapped = /^\s*(?:\S*\/)?(?:sh|bash|zsh) -l?c '([^']*)'\s*$/.exec(command);
+  if (wrapped) return commandAlwaysAsks(wrapped[1]!);
+  // Unparsable: be conservative. Output redirection to anything but /dev/null or an fd.
+  const withoutSafe = command.replace(/(?:[0-9]|&)?>>?\s*(?:\/dev\/null\b|&[0-9])/g, "");
+  if (/>/.test(withoutSafe.replace(/'[^']*'/g, ""))) return true;
+  // Any segment starting with a dangerous program (after separators, `(`, `{`, `$(`, backtick).
+  for (const segment of command.split(/[;&|\n(){}`]|\$\(/)) {
+    const words = segment.trim().split(/\s+/).filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+    const first = words[0]?.replace(/^['"]|['"]$/g, "");
+    if (first && isDangerousPart([first, ...words.slice(1)])) return true;
+  }
   return false;
 }
 

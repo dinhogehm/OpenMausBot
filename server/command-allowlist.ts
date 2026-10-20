@@ -3,7 +3,7 @@ import { lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, sep } from "node:path";
 
 import type { CommandAllowlistCandidate, CommandAllowlistRule } from "../shared/command-allowlist.ts";
-import { commandCoveredByPatterns, commandPatterns, isCommandPattern } from "../shared/command-pattern.ts";
+import { commandAlwaysAsks, commandCoveredByPatterns, commandPatterns, isCommandPattern } from "../shared/command-pattern.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { redactSecretsInText } from "./redact.ts";
 
@@ -136,6 +136,8 @@ export class CommandAllowlistStore {
     if (this.unreadable || typeof botId !== "string" || !BOT_ID.test(botId)) return false;
     const candidate = commandAllowlistCandidate(value);
     if (candidate === null) return false;
+    // rm, mv, sudo, kill, file redirection, pipes into a shell: always ask, whatever was saved.
+    if (commandAlwaysAsks(candidate.command)) return false;
     const scoped = this.rules.filter((rule) => rule.botId === botId && rule.cwd === candidate.cwd && rule.providerInstanceId === candidate.providerInstanceId);
     // Exact strings (every rule saved before patterns existed) keep working as they did.
     if (scoped.some((rule) => rule.command === candidate.command)) return true;
@@ -146,6 +148,7 @@ export class CommandAllowlistStore {
   /** "Always allow this type of command": save its program patterns, or the exact string when none is safe. */
   remember(botId: string, value: CommandAllowlistCandidate): CommandAllowlistRule[] {
     const candidate = validateCommandAllowlistCandidate(value);
+    if (commandAlwaysAsks(candidate.command)) return [];
     const patterns = commandPatterns(candidate.command);
     if (!patterns) return [this.add(botId, candidate)];
     return patterns.map((command) => this.add(botId, { ...candidate, command }));

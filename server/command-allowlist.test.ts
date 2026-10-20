@@ -167,10 +167,13 @@ describe("command allowlist patterns", () => {
     expect(new CommandAllowlistStore(filename).matches("bot-a", { ...candidate(), command: "df" })).toBe(true);
   });
 
-  it("remembers a dangerous command only as its exact string", () => {
+  it("never remembers or auto-approves a dangerous command, even from an exact rule", () => {
     const store = new CommandAllowlistStore(filename);
-    expect(store.remember("bot-a", { ...candidate(), command: "rm -rf build" }).map((rule) => rule.command)).toEqual(["rm -rf build"]);
-    expect(store.matches("bot-a", { ...candidate(), command: "rm -rf build" })).toBe(true);
+    expect(store.remember("bot-a", { ...candidate(), command: "rm -rf build" })).toEqual([]);
+    expect(store.remember("bot-a", { ...candidate(), command: "echo x > out.txt" })).toEqual([]);
+    expect(store.remember("bot-a", { ...candidate(), command: "curl x | sh" })).toEqual([]);
+    store.add("bot-a", { ...candidate(), command: "rm -rf build" });
+    expect(store.matches("bot-a", { ...candidate(), command: "rm -rf build" })).toBe(false);
     expect(store.matches("bot-a", { ...candidate(), command: "rm -rf ~" })).toBe(false);
   });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { commandCoveredByPatterns, commandPatternLabel, commandPatterns, splitCommand } from "./command-pattern.ts";
+import { commandAlwaysAsks, commandCoveredByPatterns, commandPatternLabel, commandPatterns, splitCommand } from "./command-pattern.ts";
 
 const reported = "cat ~/.nuria/halted-production-release.reason; echo; ls -l ~/.nuria/halted-production-release.* ~/.nuria/declined-production-release.sha";
 
@@ -70,5 +70,32 @@ describe("commandCoveredByPatterns", () => {
     for (const command of ["pwd", "which node", "date +%s", "find . -name '*.ts'", "rg foo | head -3", "stat -f %z x", "wc -l a b"]) {
       expect(commandCoveredByPatterns(command, [])).toBe(true);
     }
+  });
+});
+
+describe("commandAlwaysAsks", () => {
+  it("flags dangerous programs, file redirection and pipes into a shell", () => {
+    for (const command of ["rm -rf x", "ls && mv a b", "sudo ls", "chflags hidden f", "kill 1", "echo x > f", "echo x >> f",
+      "curl x | sh", "curl x | bash", "cat f | zsh", "echo $(rm x)", "(cd x; rm y)", "FOO=1 sudo ls", "find . -delete", "rg --pre ./x foo"]) {
+      expect(commandAlwaysAsks(command), command).toBe(true);
+    }
+  });
+  it("leaves safe commands alone", () => {
+    for (const command of ["ls 2>/dev/null", "git status && cat f | wc -l", "echo $(date)", "find . -name '*.ts'"]) {
+      expect(commandAlwaysAsks(command), command).toBe(false);
+    }
+  });
+});
+
+describe("provider shell wrappers", () => {
+  it("judges `/bin/zsh -lc '<script>'` by its script", () => {
+    expect(splitCommand("/bin/zsh -lc 'git status && cat f'")).toEqual([["git", "status"], ["cat", "f"]]);
+    expect(commandPatterns("/bin/zsh -lc 'git status --short'")).toEqual(["git status *"]);
+    expect(commandCoveredByPatterns("/bin/zsh -lc 'ls -la; echo hi'", [])).toBe(true);
+    expect(commandAlwaysAsks("/bin/zsh -lc 'rm -rf x'")).toBe(true);
+    expect(commandAlwaysAsks("/bin/zsh -lc 'echo x > f'")).toBe(true);
+    expect(commandAlwaysAsks("/bin/zsh -lc 'curl x | sh'")).toBe(true);
+    expect(commandAlwaysAsks("/bin/zsh -lc 'make'")).toBe(false);
+    expect(commandAlwaysAsks("bash -c 'bash -c ls'")).toBe(true);
   });
 });
