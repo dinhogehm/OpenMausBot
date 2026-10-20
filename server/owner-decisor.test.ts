@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AnswerDedupe } from "./answer-dedupe.ts";
 import { BotAutonomy, OWNER_PENDING_AWAIT_MS, type OwnerPending } from "./bot-autonomy.ts";
 import {
-  chooseOption, createDecisor, createPolicyReader, DECISOR_LINE, DECISOR_NOTE_PREFIX, DEFAULT_DECISOR_POLICY, hardStopHit, invokeRoute,
+  chooseOption, claimsOwnerAction, createDecisor, createPolicyReader, DECISOR_LINE, DECISOR_NOTE_PREFIX, DEFAULT_DECISOR_POLICY, hardStopHit, invokeRoute,
   parseDecisorPolicy, physicalItem, planDecision, type DecisorDeps, type DecisorPolicy, type PlanContext,
 } from "./owner-decisor.ts";
 import { createOwnerPendingRoutes, type OwnerPendingRouteDeps } from "./routes/owner-pending.ts";
@@ -343,5 +343,71 @@ describe("through the panel's own reply route", () => {
     expect(status).toBe(202);
     expect(String(sent.text)).not.toContain(DECISOR_LINE);
     expect(autonomy.ownerPendingById("chief", item.id)!.history?.at(-1)?.decisor).toBeUndefined();
+  });
+});
+
+// ── never a false "the owner did it" (20/10: o282, o281, o279, QA Produção o1/o2) ──
+describe("the Decisor never claims an owner action", () => {
+  const done = [{ label: "Já resolvi", reply: "Já resolvi essa pendência." }];
+  const routineAsk = (id: string, title: string, said: string) => base({
+    id, title, key: `routine-ask:${id}`,
+    why: `O bot Chief of Staff, na rotina "Esteira 24/7", escreveu: "${said}" Última vez dita às 02:20.`,
+    steps: [{ text: "Veja o contexto na conversa do bot Chief of Staff." }, { text: "Resolva o que o bot deixou com você." }, { text: 'Quando terminar, escolha "Já resolvi" ou diga aqui o que fez.' }],
+    options: done,
+  });
+
+  it("o282: merge authorization, SHA approval and swap relaxation stay with the owner, never 'Já resolvi'", () => {
+    const o282 = routineAsk("o282", "Ver: #9613/#9614 (aprovação do SHA e autorização de merge), #9676 (relaxamento do swap)…", "#9613/#9614 dependem da aprovação do SHA e da autorização de merge; #9676 do relaxamento do swap.");
+    expect(planDecision(o282, ctx())).toMatchObject({ action: "keep" });
+    // even with a real option beside the claim, these subjects are the owner's
+    const withChoice = { ...o282, options: [...done, { label: "Seguir sem merge", reply: "Siga sem merge por enquanto." }] };
+    expect(planDecision(withChoice, ctx())).toMatchObject({ action: "keep", why: expect.stringContaining("só o dono decide") });
+    // and a policy that replaces the hard stops cannot drop them
+    expect(planDecision(withChoice, ctx({ policy: policy({ hardStops: [] }) }))).toMatchObject({ action: "keep" });
+  });
+
+  it("o2 / o1 / o281: a routine 'Ver: …' item with only 'Já resolvi' stays with the owner", () => {
+    for (const item of [
+      routineAsk("o2", "Ver: #9310", "A #9310 continua com você."),
+      routineAsk("o1", "Ver: a #9310 permanece fora dessa autorização e", "a #9310 permanece fora dessa autorização e continua com você."),
+      routineAsk("o281", "Por último, ele vai listar o próximo passo e o responsável de cada outra PR parada…", "Por último, ele vai listar o próximo passo e o responsável de cada outra PR parada."),
+    ]) {
+      const plan = planDecision(item, ctx());
+      expect(plan.action, item.id).toBe("keep");
+      expect(plan.why).toContain("afirmam algo que o dono fez");
+    }
+    // a claim plus a postpone: the postpone, never the claim
+    const postpone = { ...routineAsk("o2", "Ver: #9310", "A #9310 continua com você."), options: [...done, { label: "Deixar para depois", reply: "Deixe para depois." }] };
+    expect(planDecision(postpone, ctx())).toMatchObject({ action: "option", label: "Deixar para depois" });
+  });
+
+  it("o279: a recommended 'Liberei' is never chosen; the real option is", () => {
+    const o279 = base({
+      id: "o279",
+      title: "Liberar os comandos de leitura da rotina Esteira 24/7 (gh, ls, ps)",
+      why: "Em duas passagens seguidas (23h05 e 23h20), meus comandos de leitura ficaram esperando uma aprovação que ninguém deu.",
+      options: [
+        { label: "Liberei", reply: "Liberei os comandos de leitura da rotina Esteira.", recommended: true },
+        { label: "Manter assim", reply: "Mantenha assim; use o Delivery para as conferências." },
+      ],
+    });
+    expect(planDecision(o279, ctx())).toMatchObject({ action: "option", index: 1, label: "Manter assim", why: expect.stringContaining("afirma algo que o dono fez") });
+    expect(planDecision(o279, ctx({ policy: policy({ noRecommended: "keep" }) }))).toMatchObject({ action: "keep" });
+    // only claims: kept
+    expect(planDecision({ ...o279, options: [o279.options![0]!] }, ctx())).toMatchObject({ action: "keep" });
+  });
+
+  it("recognizes claims in any case or accent, and not real decisions", () => {
+    for (const label of ["Já resolvi", "JA RESOLVI", "ja fiz", "Já fiz isso", "Liberei", "LIBEREI", "Feito", "feito!", "Concluí", "conclui", "Ajustei o hook", "Pronto", "Eu já conferi"]) {
+      expect(claimsOwnerAction({ label, reply: "" }), label).toBe(true);
+    }
+    expect(claimsOwnerAction({ label: "Ok", reply: "Já fiz o ajuste." })).toBe(true);
+    for (const label of ["Liberar triagem na esteira", "Manter assim", "Não limpar agora", "Pode limpar", "Retirar da fila autônoma", "Fechar a #9686", "Aprovar a recomendação consolidada", "Chief recupera a origem"]) {
+      expect(claimsOwnerAction({ label, reply: "Siga." }), label).toBe(false);
+    }
+  });
+
+  it("the items of 19/10 it decided right still go the same way", () => {
+    expect(chooseOption(ITEMS.o258, DEFAULT_DECISOR_POLICY)).toMatchObject({ index: 0, why: "a recomendada pelo bot" });
   });
 });

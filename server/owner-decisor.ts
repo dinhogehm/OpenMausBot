@@ -12,7 +12,9 @@
 //   disk checks, the spend cap, the answer dedupe, the queue and the
 //   superseded mark all still apply; the bot reads it marked as the Decisor's;
 // - the option marked RECOMENDADA, else the most conservative one that is
-//   not a hard stop; an item without options gets the policy's go-ahead text;
+//   not a hard stop — never one that says the owner did something ("Já
+//   resolvi", "Liberei"), and never on merge authorization, a SHA/commit
+//   approval or the app's swap (OWNER_ONLY_STOPS, not editable by the policy); an item without options gets the policy's go-ahead text;
 // - "Só você" (owner-delegate.ts's categories) is NOT a stop here: only the
 //   hard stops are — irreversible deletion/alteration of production data,
 //   real money, messages to people outside, credentials, disabling a
@@ -272,27 +274,80 @@ export function physicalItem(item: Pick<OwnerPending, "title" | "steps" | "key">
   return has(PHYSICAL_WORDS, [item.title, ...(item.steps ?? []).map((step) => step.text)].join("\n")) ? "bot" : null;
 }
 
-/** The Decisor's pick among an item's options, or why none. */
-export function chooseOption(item: Pick<OwnerPending, "title" | "options">, policy: Pick<DecisorPolicy, "noRecommended" | "hardStops">): { index: number; option: OwnerPendingOption; why: string } | { keep: string } {
+/** Never the Decisor's to answer, whatever the policy file says (it can replace
+ * the hard stops, not these): the owner has not delegated merge authorization,
+ * approving a commit/SHA, or swapping the app / relaxing its swap rules. Same
+ * form as a hard stop (regex sources on the text lowercased, no accents). */
+export const OWNER_ONLY_STOPS: HardStop[] = [
+  {
+    id: "merge",
+    label: "autorizar merge (GO de merge, mesclar uma PR)",
+    allOf: ["\\b(?:merge|merges|mesclar|mescle|mesclagem|mesclad\\w*)\\b", "\\b(?:autoriz|aprov|liber|permit|confirm)\\w*|\\bgo\\b|\\bok\\b"],
+  },
+  {
+    id: "sha",
+    label: "aprovar um SHA ou commit",
+    allOf: ["\\bsha\\b|\\bcommits?\\b|\\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\\d)[0-9a-f]{7,40}\\b", "\\baprov\\w*|\\bapprov\\w*"],
+  },
+  {
+    id: "swap",
+    label: "trocar o app (swap) ou relaxar as regras do swap",
+    anyOf: [
+      "\\b(?:relax|afrouxa|flexibiliz|suspend|ignor|pul)\\w*[^.\\n]{0,40}\\bswap\\b",
+      "\\bswap\\b[^.\\n]{0,40}\\b(?:do app|de app|o app|app|aplicativo|openmausbot|relax\\w*|regras?)\\b",
+      "\\b(?:app|aplicativo|openmausbot)\\b[^.\\n]{0,20}\\bswap\\b",
+      "\\btroc\\w* (?:d?o )?(?:app|aplicativo)\\b",
+    ],
+  },
+];
+
+/** An option that says the OWNER did something ("Já resolvi", "Liberei",
+ * "Já fiz", "Feito", "Concluí", "Ajustei o hook"): only the owner can say that;
+ * the Decisor answering it tells the bot a fact that is false. */
+const CLAIM_LABEL = [
+  // first person, past: "Liberei", "Ajustei o hook", "Já resolvi", "Eu já conferi" (and -i verbs: resolvi, conclui, corrigi, fiz, fiz isso)
+  /^(?:eu\s+)?(?:ja\s+)?(?:\p{L}{2,}ei|resolvi|conclui|corrigi|conferi|permiti|decidi|inclui|removi|mexi|atendi|cumpri|fiz|fizemos|terminei|instalei|conectei|reconectei|subi|abri|respondi|vi|li|bati)\b/u,
+  /^(?:ja\s+)?(?:feito|pronto|concluido|resolvido|ok,? feito|tudo certo|liberado|liberada|ajustado|ajustada|aprovado|aprovada)\b/u,
+];
+const CLAIM_ANYWHERE = /\bja (?:resolvi|fiz|liberei|conclui|corrigi|ajustei|aprovei|tratei|terminei|fiz isso)\b|\b(?:ja )?(?:esta|foi|ficou) (?:feito|resolvido|concluido|liberado|ajustado|corrigido)\b|\b(?:eu|o dono|osvaldo) (?:ja )?(?:resolvi|resolveu|fiz|fez|liberei|liberou|conclui|concluiu)\b/u;
+
+/** The option claims an owner action (case and accent insensitive). */
+export function claimsOwnerAction(option: Pick<OwnerPendingOption, "label" | "reply">): boolean {
+  const label = readings(option.label).map((form) => form.trim());
+  if (label.some((form) => CLAIM_LABEL.some((pattern) => pattern.test(form)) || CLAIM_ANYWHERE.test(form))) return true;
+  return readings(option.reply).some((form) => CLAIM_ANYWHERE.test(form.trim()) || CLAIM_LABEL.some((pattern) => pattern.test(form.trim())));
+}
+
+/** The Decisor's pick among an item's options, or why none. Never an option
+ * that claims the owner did something; never on an owner-only subject. */
+export function chooseOption(item: Pick<OwnerPending, "title" | "options"> & { why?: string }, policy: Pick<DecisorPolicy, "noRecommended" | "hardStops">): { index: number; option: OwnerPendingOption; why: string } | { keep: string } {
   const options = item.options ?? [];
-  const stopOf = (option: OwnerPendingOption) => hardStopHit([item.title, option.label, option.reply].join("\n"), policy.hardStops);
+  const ownerOnly = hardStopHit([item.title, item.why ?? ""].join("\n"), OWNER_ONLY_STOPS);
+  if (ownerOnly) return { keep: `só o dono decide: ${ownerOnly.label}` };
+  const stops = [...OWNER_ONLY_STOPS, ...policy.hardStops];
+  const stopOf = (option: OwnerPendingOption) => hardStopHit([item.title, option.label, option.reply].join("\n"), stops);
   const recommended = options.findIndex((option) => option.recommended);
-  if (recommended >= 0) {
+  const recommendedClaims = recommended >= 0 && claimsOwnerAction(options[recommended]!);
+  if (recommended >= 0 && !recommendedClaims) {
     const option = options[recommended]!;
     const stop = stopOf(option);
     // the bot's own pick is a hard stop: never overridden by another option, it is the owner's
     if (stop) return { keep: `a decisão recomendada cai num limite: ${stop.label}` };
     return { index: recommended, option, why: "a recomendada pelo bot" };
   }
-  if (policy.noRecommended === "keep") return { keep: "nenhuma decisão recomendada (a política deixa com você)" };
-  const safe = options.map((option, index) => ({ option, index })).filter(({ option }) => !stopOf(option));
-  if (!safe.length) return { keep: `todas as decisões caem num limite: ${stopOf(options[0]!)?.label ?? "?"}` };
-  if (policy.noRecommended === "first") return { ...safe[0]!, why: "nenhuma recomendada: a primeira fora dos limites" };
+  // the recommended (or every) option may say the owner did something: only the others are the Decisor's to pick
+  const real = options.map((option, index) => ({ option, index })).filter(({ option }) => !claimsOwnerAction(option));
+  if (!real.length) return { keep: "só há decisões que afirmam algo que o dono fez (\"Já resolvi\", \"Liberei\"…): fica com você" };
+  if (policy.noRecommended === "keep") return { keep: recommendedClaims ? "a recomendada afirma algo que o dono fez (a política deixa com você)" : "nenhuma decisão recomendada (a política deixa com você)" };
+  const safe = real.filter(({ option }) => !stopOf(option));
+  if (!safe.length) return { keep: `todas as decisões caem num limite: ${stopOf(real[0]!.option)?.label ?? "?"}` };
+  const lead = recommendedClaims ? "a recomendada afirma algo que o dono fez" : "nenhuma recomendada";
+  if (policy.noRecommended === "first") return { ...safe[0]!, why: `${lead}: a primeira fora dos limites` };
   // the label says what the option is ("Manter por 7 dias" may still say "não as remova" in its reply); the reply only when the label says neither
   const kind = (text: string) => (has(DEFERRING, text) ? 1 : has(DESTRUCTIVE, text) ? 2 : null);
   const rank = (option: OwnerPendingOption) => kind(option.label) ?? kind(option.reply) ?? 0;
   const best = safe.reduce((a, b) => (rank(b.option) < rank(a.option) ? b : a));
-  return { ...best, why: "nenhuma recomendada: a mais conservadora que faz andar" };
+  return { ...best, why: `${lead}: a mais conservadora que faz andar` };
 }
 
 // ── the plan for one item ───────────────────────────────────────────────
@@ -350,7 +405,7 @@ export function planDecision(item: OwnerPending, ctx: PlanContext): DecisorPlan 
     if ("keep" in choice) return { action: "keep", why: choice.keep };
     return { action: "option", index: choice.index, label: choice.option.label, why: choice.why };
   }
-  const stop = hardStopHit([item.title, ...(item.steps ?? []).flatMap((step) => [step.text, step.command ?? ""]), item.command ?? ""].join("\n"), policy.hardStops);
+  const stop = hardStopHit([item.title, item.why ?? "", ...(item.steps ?? []).flatMap((step) => [step.text, step.command ?? ""]), item.command ?? ""].join("\n"), [...OWNER_ONLY_STOPS, ...policy.hardStops]);
   if (stop) return { action: "keep", why: `cai num limite: ${stop.label}` };
   if (physical === "bot" && policy.physical !== "delegate-then-resolve") {
     return policy.physical === "keep"
