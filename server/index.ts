@@ -484,6 +484,7 @@ import { createRoomJobs, parallelRoomJobsEnabled, type RoomRoundLine } from "./h
 import { CONSENT_RULE, escapeNotes, OUTSIDE, peerLineText, peerProvenanceNote, quoteInNote, reportNote, requestWorkOrigin, type WorkOrigin } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
 import { pageSize, slimMessage } from "./host/message-pages.ts";
+import { createCoordinationWaitingSnapshot } from "./host/coordination-waiting.ts";
 import {
   mentionedBots,
   roomResponders,
@@ -3474,6 +3475,7 @@ try {
 if (browserCleanupReferencesReconciled) browserCleanup.startPending();
 
 let activeCoordinationForThread = (_threadId: string): boolean => false;
+let coordinationWaitingSnapshot = () => activeCoordinationForThread;
 /** Watches and Claude Code sessions of a thread, for its row (set once both exist). */
 let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts" | "ownerPending" | "ccSessions"> => ({});
 /** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
@@ -3496,32 +3498,33 @@ const openRequestsWhileWaiting = (task: TaskRecord): Pick<WireTask, "pendingRequ
 };
 /** Prompt-cache keep-warm status per thread; bound once keep-warm exists. */
 let cacheKeepWarmStatus = (_threadId: string): KeepWarmStatus | undefined => undefined;
-const wireTask = (task: TaskRecord, botModel: ModelSelection): WireTask => {
+const wireTask = (task: TaskRecord, botModel: ModelSelection, coordinatedThread = activeCoordinationForThread): WireTask => {
   // Snoozes heal on read against the server clock; the 0 sentinel ("until new activity") survives reads.
   const { snoozedUntil, ...base } = toWireTask(task, botModel);
   const needsInput = goalNeedsInputForThread(task.threadId);
   const ask = needsInput !== null ? goalNeedsInputAskForThread(task.threadId) : null;
   const stepsAsked = needsInput !== null ? goalNeedsInputStepsAskedForThread(task.threadId, needsInput) : null;
   const keepWarm = cacheKeepWarmStatus(task.threadId);
-  const coordinated = { ...base, ...threadSignals(task.threadId), ...openRequestsWhileWaiting(task), waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput, ...(ask ? { goalNeedsInputAsk: ask } : {}), ...(stepsAsked !== null ? { goalNeedsInputStepsAskedAt: stepsAsked } : {}) } : {}), ...(keepWarm ? { cacheKeepWarm: keepWarm } : {}) };
+  const coordinated = { ...base, ...threadSignals(task.threadId), ...openRequestsWhileWaiting(task), waitingForTeammates: needsInput === null && coordinatedThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput, ...(ask ? { goalNeedsInputAsk: ask } : {}), ...(stepsAsked !== null ? { goalNeedsInputStepsAskedAt: stepsAsked } : {}) } : {}), ...(keepWarm ? { cacheKeepWarm: keepWarm } : {}) };
   const asleep = snoozedUntil === 0 || (snoozedUntil !== undefined && snoozedUntil > Date.now());
   return asleep ? { ...coordinated, snoozedUntil } : coordinated;
 };
 
 /** Strips provider session ids (resumeCursors) here, not at call sites, so no broadcast or paired phone ever gets them. */
 const wireBot = (bot: BotRecord): WireBot => {
+  const coordinatedThread = coordinationWaitingSnapshot();
   const { resumeCursors: _resumeCursors, tasks, approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, packageBase: _packageBase, assignedSkills: _assignedSkills, ...rest } = bot;
   // Clients see Ask while an elevated grant awaits the desktop's confirmation, never a grant that may still roll back.
   const visible = approvalGrant && !approvalGrant.threadOnly
     ? { ...rest, approvalMode: "ask" as const, autoApprove: false }
     : { ...rest, approvalMode: approvalModeFor(rest) };
   const needsInput = goalNeedsInputForThread(bot.threadId);
-  return { ...visible, waitingForTeammates: needsInput === null && activeCoordinationForThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
+  return { ...visible, waitingForTeammates: needsInput === null && coordinatedThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
     // always said, false included: a client merges bot frames, and a field
     // left out would keep an old "Precisa de você" forever (R8-visual N1)
     goalNeedsInput: needsInput !== null, ...(needsInput !== null ? { goalNeedsInputSince: needsInput } : {}),
     mainThreadId: botMainThread(bot.id),
-    avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map((task) => wireTask(task, bot.modelSelection)) } : {}) };
+    avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map((task) => wireTask(task, bot.modelSelection, coordinatedThread)) } : {}) };
 };
 
 function toolScopeForTurn(botId: string) {
@@ -3533,8 +3536,9 @@ function toolScopeForTurn(botId: string) {
 }
 
 const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
+  const coordinatedThread = coordinationWaitingSnapshot();
   const { resumeCursors: _resumeCursors, tasks, approvalGrant: _approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, packageBase: _packageBase, assignedSkills: _assignedSkills, ...rest } = bot;
-  return { ...rest, approvalMode: approvalModeFor(rest), mainThreadId: botMainThread(bot.id), avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map((task) => wireTask(task, bot.modelSelection)) } : {}) };
+  return { ...rest, approvalMode: approvalModeFor(rest), mainThreadId: botMainThread(bot.id), avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map((task) => wireTask(task, bot.modelSelection, coordinatedThread)) } : {}) };
 };
 
 function previewSystemPrompt(bot: BotRecord) {
@@ -4165,11 +4169,10 @@ function handleDesktopTrustedApprovalMessage(raw: unknown): boolean {
 const storedAvatarExists = (avatarUrl: string): boolean =>
   attachmentExists(avatarUrl.slice("/api/attachments/".length));
 
-const publicBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => ({
-  ...wireBot(bot),
-  ...messagePage(bot.threadId, DEFAULT_PAGE),
-  tasks: store.tasks(bot.id).map((task) => wireTask(task, bot.modelSelection)),
-});
+const publicBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
+  const projected = wireBot(bot);
+  return { ...projected, ...messagePage(bot.threadId, DEFAULT_PAGE), tasks: projected.tasks ?? [] };
+};
 const publicBotQueuedMessages = () => queuedSteerSnapshot((botId, threadId) => Boolean(store.taskByThread(botId, threadId)));
 
 type GroupTurnOperation = {
@@ -4892,6 +4895,7 @@ const coordinator: Coordinator = createCoordinator({
   },
 });
 activeCoordinationForThread = awaitingTeammates;
+coordinationWaitingSnapshot = () => createCoordinationWaitingSnapshot(() => coordinator.active());
 const groupUsageReader = new GroupUsageReader(DATA_DIR);
 try { groupUsageReader.refresh(); } catch {}
 function newestQuestionChip(threadId: string, aboutThreadId: string): string | undefined {
@@ -18543,7 +18547,7 @@ ROUTES.push(createThreadRoutes({
   desktopMutationToken: () => desktopMutationToken,
   companionMutationToken: () => companionMutationToken,
   cliOwnerToken: () => cliOwnerToken,
-  pageSize, messagePage, messageWindow, publicBotQueuedMessages, publicGroupState, wireBot, wireTask,
+  pageSize, messagePage, messageWindow, publicBotQueuedMessages, publicGroupState, wireBot,
   botComputerControlSnapshot, messageFileRootsForThread, viewerFor, visibleTo, coordinator, groupThreadIsWorking,
 }));
 ROUTES.push(createBotCreateRoutes({

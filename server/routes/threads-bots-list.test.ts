@@ -13,7 +13,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise((done) => server.close(done))));
 });
 
-async function serve(messagePage: ThreadRouteDeps["messagePage"]): Promise<string> {
+async function serve(messagePage: ThreadRouteDeps["messagePage"], overrides: Partial<ThreadRouteDeps> = {}): Promise<string> {
   const bots = [{ id: "b1", threadId: "t1", modelSelection: {} }, { id: "b2", threadId: "t2", modelSelection: {} }];
   const deps = {
     store: { bots, groups: [], sections: [], tasks: () => [] },
@@ -24,7 +24,6 @@ async function serve(messagePage: ThreadRouteDeps["messagePage"]): Promise<strin
     messagePage,
     publicBotQueuedMessages: () => ({}),
     wireBot: (bot: { id: string }) => ({ id: bot.id }),
-    wireTask: () => ({}),
     botComputerControlSnapshot: () => ({ held: false, helpReason: null }),
     viewerFor: () => ({}),
     visibleTo: () => ({ everything: true, bot: () => true, group: () => true, thread: () => true, sections: (s: unknown) => s }),
@@ -33,6 +32,7 @@ async function serve(messagePage: ThreadRouteDeps["messagePage"]): Promise<strin
     companionMutationToken: () => undefined,
     cliOwnerToken: () => undefined,
   } as unknown as ThreadRouteDeps;
+  Object.assign(deps, overrides);
   const routes = [createThreadRoutes(deps)];
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -46,6 +46,22 @@ async function serve(messagePage: ThreadRouteDeps["messagePage"]): Promise<strin
 }
 
 describe("GET /api/bots pages transcripts by default", () => {
+  it("reuses the projected task list and preserves explicit empty tasks", async () => {
+    const tasks = [{ threadId: "t1", title: "Waiting", createdAt: 1, waitingForTeammates: true }];
+    const projectTask = vi.fn((task: (typeof tasks)[number]) => ({ ...task }));
+    const wireBot = vi.fn((bot: { id: string }) => ({ id: bot.id,
+      ...(bot.id === "b1" ? { tasks: tasks.map(projectTask) } : {}),
+    }));
+    const base = await serve(() => ({ messages: [], activeLeafId: null }), {
+      wireBot: wireBot as unknown as ThreadRouteDeps["wireBot"],
+    });
+
+    const body = await (await fetch(`${base}/api/bots`)).json() as { bots: Array<{ tasks: unknown[] }> };
+    expect(body.bots.map((bot) => bot.tasks)).toEqual([tasks, []]);
+    expect(wireBot).toHaveBeenCalledTimes(2);
+    expect(projectTask).toHaveBeenCalledTimes(1);
+  });
+
   it("answers the newest page without ?messages=, the whole transcript only with ?messages=all", async () => {
     const messagePage = vi.fn((_threadId: string, limit: number | undefined) => ({ messages: [], activeLeafId: null, ...(limit === undefined ? {} : { hasMore: false }) }));
     const base = await serve(messagePage);
