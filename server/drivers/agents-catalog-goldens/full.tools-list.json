@@ -1032,12 +1032,12 @@
               "app",
               "cli"
             ],
-            "description": "Default app: the session opens in the Claude desktop app, where the person follows it (it waits for an idle Mac to open). cli: headless, nobody sees it — only for internal chores; a client's issue goes to the app whenever the app can take it."
+            "description": "Owner-authorized Full Access always uses cli, even if app is requested. Otherwise default app; cli is for internal chores or when the app cannot take the work."
           },
           "cli_reason": {
             "type": "string",
             "maxLength": 300,
-            "description": "With cli: why, as you know it (recorded beside the server's own reason). The server decides by the app's state, not by these words: a brief that merges or publishes, or a client's issue, runs headless only while the app is blocked, cannot open this repository or open anything now (the Mac locked, its queue stuck), or failed in the last 2 h — permission_mode or model is no reason."
+            "description": "Why cli is requested, recorded beside the server's reason. Outside owner-authorized Full Access, the server's app state decides whether client issues or shipping may use cli; these words never grant access."
           },
           "permission_mode": {
             "type": "string",
@@ -1047,7 +1047,7 @@
               "default",
               "plan"
             ],
-            "description": "cli only. Default auto."
+            "description": "cli only; default auto. The server applies the owner's current Full Access grant to each turn, preserving hooks and project gates. This input cannot grant Full Access."
           },
           "model": {
             "type": "string",
@@ -1577,7 +1577,7 @@
               "skip",
               "queue"
             ],
-            "description": "While this routine is still working, skip scheduled occurrences (default) or queue at most one run. Queue skips further occurrences until the pending run starts; it never builds an unlimited backlog. Manual and webhook requests are separate."
+            "description": "While this routine is still working (or its bot is busy), queue at most one run (default) or skip scheduled occurrences. Queue folds further occurrences into the pending run, which starts as soon as the bot is free; it never builds an unlimited backlog. Manual and webhook requests are separate."
           },
           "run_on_startup": {
             "type": "boolean",
@@ -1755,7 +1755,7 @@
                   "skip",
                   "queue"
                 ],
-                "description": "While this routine is still working, skip scheduled occurrences (default) or queue at most one run. Queue skips further occurrences until the pending run starts; it never builds an unlimited backlog. Manual and webhook requests are separate."
+                "description": "While this routine is still working (or its bot is busy), queue at most one run (default) or skip scheduled occurrences. Queue folds further occurrences into the pending run, which starts as soon as the bot is free; it never builds an unlimited backlog. Manual and webhook requests are separate."
               },
               "run_on_startup": {
                 "type": "boolean",

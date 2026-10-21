@@ -9589,6 +9589,8 @@ function sessionTokenEnv(session: CcSession): Record<string, string> {
 /** One headless turn. Its exit hands the report to the owning conversation,
  * unless a reply was queued meanwhile, which then runs as the next turn. */
 function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
+  const fullAccess = fullAccessForSource(session.ownerBotId, session.ownerThreadId);
+  session.lastTurnPermissionMode = fullAccess ? "bypassPermissions" : session.permissionMode;
   const expectedCwd = join(session.repo, ".claude", "worktrees", session.worktree);
   // the first turn runs in the worktree the server made, or in the repository for claude -w to make one
   const cwd = first ? session.cliWorktree?.path ?? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
@@ -9614,7 +9616,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   };
   let child: CcChildProcess;
   try {
-    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${ccTurnFooter(session)}${CC_CLI_FOOTER}` : prompt, first), {
+    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${ccTurnFooter(session)}${CC_CLI_FOOTER}` : prompt, first, fullAccess), {
       cwd,
       // a token without admin rights for the platform's sessions, when the owner keeps one
       env: { ...process.env, PATH: augmentedPath(), ...sessionTokenEnv(session) },
@@ -10130,6 +10132,7 @@ async function refreshOwnSeeds(): Promise<void> {
 
 const desktopWork: DesktopWorkDeps = {
   ledger: ccLedger,
+  canRunSession: (session) => !fullAccessForSource(session.ownerBotId, session.ownerThreadId),
   now: Date.now,
   getDriver: getDesktopDriver,
   readRecord: (localId) => readDesktopRecord(localId),
@@ -10583,17 +10586,26 @@ function noteClaimedPrs(session: CcSession, text: string): void {
 
 /** Send a message to a session the way cc_session_send would, from the
  * server: now if it is idle, else after its current turn. */
-function sendToSessionFromServer(session: CcSession, text: string): void {
+function sendToSessionFromServer(session: CcSession, text: string): boolean {
+  if (session.surface === "app" && fullAccessForSource(session.ownerBotId, session.ownerThreadId)) {
+    if (session.blockedOn !== CC_APP_FULL_REFUSAL) {
+      session.blockedOn = CC_APP_FULL_REFUSAL;
+      ccLedger.save();
+      ccChip(session, CC_APP_FULL_REFUSAL, false);
+    }
+    return false;
+  }
   if (session.surface === "app" && session.desktop) {
     if (session.status === "idle" && !session.desktop.pending && !session.desktop.sent) {
       session.desktop.pending = { kind: "send", text, since: Date.now(), attempts: 0 };
       session.status = "running";
       ccLedger.save();
     } else ccLedger.enqueue(session, text);
-    return;
+    return true;
   }
   if (session.status !== "running" && !ccProcesses.has(session.id) && ccSlotFreeForWork()) runCcTurn(session, text, false);
   else ccLedger.enqueue(session, text);
+  return true;
 }
 
 // ── the production release first (server/release-priority.ts) ──────────
@@ -10892,12 +10904,12 @@ async function resumeSessionsAfterTag(): Promise<void> {
     }
     const message = resumeAfterRelease(wait, { tagSha: sha, failures, declined: readTail(DECLINED_SHA_FILE, 200).trim(), halted: readHaltedRelease()?.sha ?? null, at: Date.now() });
     if (!message) continue;
+    if (!sendToSessionFromServer(session, message)) continue;
     delete session.resumeAfterTag;
     ccLedger.save();
     const moved = Boolean(sha && sha !== wait.fromSha);
     ccChip(session, moved ? `a tag de produção andou (${sha!.slice(0, 8)}) — sessão retomada para relançar o ci:local` : `o release que tomou a vez (${wait.releaseSha?.slice(0, 9)}) não saiu — sessão retomada para relançar o ci:local`);
     console.log(`[release-priority] resumed session ${session.id}: ${moved ? `tag moved to ${sha!.slice(0, 9)}` : `release ${wait.releaseSha} failed again, was refused or halted`}`);
-    sendToSessionFromServer(session, message);
   }
 }
 
@@ -10923,9 +10935,13 @@ const ccStartQueue = new CcStartQueue(process.env.VITEST ? null : join(DATA_DIR,
 /** Existing work may take a slot: one stays free for each P1 waiting. */
 const ccSlotFreeForWork = () => slotFreeForWork({ taken: ccLedger.slotsTaken(), urgentQueued: ccStartQueue.urgentCount(), max: CC_MAX_RUNNING });
 
+const CC_APP_FULL_REFUSAL = "Acesso total usa somente o terminal. Esta sessão histórica pertence ao app Claude e não foi retomada nem migrada. Depois que o trabalho anterior terminar, use cc_session_archive para encerrar seu registro no OMB e cc_session_start para abrir outra no terminal; não duplique uma execução ativa ou incerta.";
+
 function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false, delegation?: DelegatedItemRef): StartResult {
   const input = parseCcStartInput(body, ccIsGitRepo);
   if (!input.ok) return { status: 400, body: { error: input.error } };
+  const fullAccess = fullAccessForSource(bot.id, threadId);
+  const surface = fullAccess ? "cli" : body.surface;
   // One live session per issue: a second would redo the same work.
   const duplicate = liveSessionForIssue(ccLedger.all(), input.repo, issueNumber(input.title, input.brief));
   if (duplicate) {
@@ -10939,11 +10955,11 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
   const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
   // why it runs headless, as the server knows it (recorded on its chip)
-  let cliOnRecord = cliReason;
+  let cliOnRecord = fullAccess ? "Acesso total autorizado pelo dono: terminal" : cliReason;
   // the breaker of the server's worktrees tripped and the owner was asked: straight to the cli, no app try (R13-dispatch R13-2)
-  const breakerCli = body.surface !== "cli" && process.platform === "darwin" && ownWorktreesOn(input.repo) ? ownBreakerCli(ownBreaker.get(), breakerRepo(input.repo)) : null;
+  const breakerCli = surface !== "cli" && process.platform === "darwin" && ownWorktreesOn(input.repo) ? ownBreakerCli(ownBreaker.get(), breakerRepo(input.repo)) : null;
   if (breakerCli) cliOnRecord = breakerCli;
-  if (body.surface === "cli") {
+  if (surface === "cli" && !fullAccess) {
     // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
     const { state: app, reason: appReason } = appAvailability(input.repo);
     // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
@@ -10977,7 +10993,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Fila de sessões: "${input.title}" é a #${queued.position} (prioridade ${priorityLabel(priority)}); abre sozinha quando uma vaga liberar`, 240), ok: true } });
     return { status: 200, queueId: queued.id, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
   }
-  if (body.surface !== "cli" && !breakerCli && process.platform === "darwin") {
+  if (surface !== "cli" && !breakerCli && process.platform === "darwin") {
     const appId = randomUUID();
     // The server makes the session's worktree and opens the app right in it
     // (lote X): the app's last folder, and the worktree it would reuse, do
@@ -20856,6 +20872,7 @@ const handleRequestInner = async (req: IncomingMessage, res: ServerResponse) => 
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
+        if (action === "send" && session.surface === "app" && fullAccessForSource(bot.id, threadId)) return json(res, 409, { error: CC_APP_FULL_REFUSAL });
         if (action === "send") {
           const scripts = useRepoScripts(typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "", repoPackageManager(session.repo), repoScripts(session.repo));
           if (!scripts.text) return json(res, 400, { error: "message é obrigatório" });
@@ -20967,6 +20984,24 @@ const handleRequestInner = async (req: IncomingMessage, res: ServerResponse) => 
         }
         if (session.surface === "app" && action === "archive") {
           const desktop = session.desktop!;
+          if (fullAccessForSource(bot.id, threadId)) {
+            const pending = desktop.pending;
+            const neverOpened = !desktop.localId && desktop.sentAt === undefined && !desktop.sent
+              && pending?.kind === "create" && pending.triedAt === undefined && pending.attempts === 0 && session.turns === 0;
+            const record = desktop.localId ? readDesktopRecord(desktop.localId) : null;
+            const transcript = record ? transcriptPath(record) : null;
+            const uncertainSend = Boolean(desktop.sent || ((pending?.kind === "send" || pending?.kind === "create") && (pending.triedAt !== undefined || pending.attempts > 0)));
+            const ended = (session.status === "idle" || session.status === "stopped" || session.status === "archived")
+              && !uncertainSend && record && (record.isArchived || (transcript && transcriptTurnEnded(transcript)));
+            if (!neverOpened && !ended) return json(res, 409, { error: "Não arquivei: o término da sessão no app Claude ainda não está confirmado. Nenhum app foi aberto e nenhuma execução foi duplicada." });
+            const held = [...session.queued, ...(pending?.kind === "send" || pending?.kind === "create" ? [{ text: pending.text, at: pending.since }] : [])];
+            if (held.length) session.heldQueue = [...(session.heldQueue ?? []), ...held];
+            delete desktop.pending;
+            delete desktop.archiveWhenResolved;
+            ccLedger.setStatus(session, "archived");
+            ccChip(session, `registro arquivado somente no OMB; app e worktree preservados${held.length ? `; ${held.length} mensagem(ns) não enviada(s) preservada(s) no histórico` : ""}`);
+            return json(res, 200, { message: `Registro arquivado somente no OMB; o app Claude não foi aberto nem alterado e a worktree foi preservada. Uma nova sessão desta tarefa pode ser iniciada no terminal.${archiveNote}` });
+          }
           if (desktop.pending?.kind === "archive" || desktop.archiveWhenResolved) {
             return json(res, 200, { message: "Já está na fila para ser arquivada no app Claude." });
           }

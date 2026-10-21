@@ -53,6 +53,8 @@ export interface CcSession {
   cliWorktreeLeft?: { path: string; reason: string };
   model?: string;
   permissionMode: CcPermissionMode;
+  /** Observed launch mode, never an authorization for a later turn. */
+  lastTurnPermissionMode?: CcPermissionMode | "bypassPermissions";
   status: CcStatus;
   createdAt: number;
   lastActivityAt: number;
@@ -321,14 +323,14 @@ export function slugify(text: string): string {
 
 /** argv for one turn. The brief/message always goes last, after "--", so a
  * text starting with "-" can never be read as a flag. */
-export function ccTurnArgs(session: Pick<CcSession, "id" | "worktree" | "model" | "permissionMode" | "cliWorktree">, prompt: string, first: boolean): string[] {
+export function ccTurnArgs(session: Pick<CcSession, "id" | "worktree" | "model" | "permissionMode" | "cliWorktree">, prompt: string, first: boolean, fullAccess = false): string[] {
   return [
     "-p",
     // a worktree the server made (and seeded) is the turn's cwd: no `-w`, which would make a bare one
     ...(first ? ["--session-id", session.id, ...(session.cliWorktree ? [] : ["-w", session.worktree])] : ["--resume", session.id]),
     "--output-format", "stream-json",
     "--verbose",
-    "--permission-mode", session.permissionMode,
+    "--permission-mode", fullAccess ? "bypassPermissions" : session.permissionMode,
     ...(session.model ? ["--model", session.model] : []),
     "--",
     prompt,
@@ -635,7 +637,7 @@ export function ccModeLine(session: CcSession): string {
     const mode = session.desktop?.permissionMode ?? session.permissionMode;
     return `Mode: in the Claude app, permission mode ${mode}${session.desktop?.permissionMode && session.desktop.permissionMode !== session.permissionMode ? ` (asked for ${session.permissionMode}; the app runs it as ${session.desktop.permissionMode})` : ""} — the person sees it there and can approve prompts in the app.`;
   }
-  return `Mode: headless CLI (claude -p), permission mode ${session.permissionMode} — nobody sees it and there is no approval dialog: a hook denial ends the turn; answer it with cc_session_send.`;
+  return `Mode: headless CLI (claude -p), permission mode ${session.lastTurnPermissionMode ?? session.permissionMode} — nobody sees it and there is no approval dialog: a hook denial ends the turn; answer it with cc_session_send.`;
 }
 
 /** The corridor form of a command the review hook stopped, when there is

@@ -35,6 +35,7 @@ import {
   screenWaitOf,
   uniqueSessionTitle,
   pickDesktopPending,
+  prepareOwnWorktrees,
   retireRenameAsks,
   runDesktopWork,
   SESSION_TITLE_TOOL,
@@ -115,6 +116,65 @@ describe("the brief", () => {
 });
 
 describe("backoff and the queue", () => {
+  it.each(["create", "send"] as const)("holds a disallowed %s without touching its history or blocking other sessions", async (kind) => {
+    const h = harness();
+    const held = kind === "send" ? h.opened("held") : h.appSession("held");
+    held.desktop!.pending = { kind, text: "keep this order", since: h.now - 60_000, attempts: 0 };
+    h.deps.canRunSession = (session) => session.id !== held.id;
+    const ready = h.appSession("ready");
+    ready.desktop!.pending = { kind: "create", text: "ready", since: h.now, attempts: 0 };
+    await h.tick();
+    expect(h.steps.send).not.toHaveBeenCalled();
+    expect(h.steps.create).toHaveBeenCalledTimes(1);
+    expect(h.steps.create.mock.calls[0]?.at(1)).toMatchObject({ text: "ready" });
+    expect(held.desktop!.pending).toMatchObject({ kind, text: "keep this order", attempts: 0 });
+    expect(held.status).toBe(kind === "create" ? "stopped" : "running");
+    if (kind === "create") {
+      expect(held.blockedOn).toMatch(/terminal/i);
+      expect(h.ledger.slotsTaken()).toBe(1);
+      h.deps.canRunSession = () => true;
+      await h.tick();
+      expect(h.steps.create).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each([true, false])("keeps the slot of an attempted create with a recorded timestamp: %s", async (timestamp) => {
+    const h = harness();
+    const held = h.appSession("held");
+    held.desktop!.pending = { kind: "create", text: "uncertain order", since: h.now, attempts: 1, ...(timestamp ? { triedAt: h.now } : {}) };
+    h.deps.canRunSession = () => false;
+    await h.tick();
+    expect(h.steps.create).not.toHaveBeenCalled();
+    expect(held.status).toBe("running");
+    expect(h.ledger.slotsTaken()).toBe(1);
+    expect(held.desktop!.pending.text).toBe("uncertain order");
+  });
+
+  it.each(["rename", "archive"] as const)("does not open the app for a disallowed %s", async (kind) => {
+    const h = harness();
+    const session = h.opened("held");
+    session.status = "idle";
+    session.desktop!.pending = { kind, text: "held action", since: h.now, attempts: 0 };
+    h.deps.canRunSession = () => false;
+    h.deps.getDriver = vi.fn(h.deps.getDriver);
+    await h.tick();
+    expect(h.deps.getDriver).not.toHaveBeenCalled();
+    if (kind === "archive") expect(session.desktop!.pending).toMatchObject({ kind, text: "held action", attempts: 0 });
+  });
+
+  it("does not prepare an app worktree while its session cannot run", async () => {
+    const h = harness();
+    const held = h.appSession("held");
+    held.desktop!.pending = { kind: "create", text: "keep this order", since: h.now, attempts: 0 };
+    held.desktop!.own = { path: WORKTREE, branch: "work", state: "planned", brief: "keep this order", classicText: "keep this order" };
+    h.deps.canRunSession = () => false;
+    const prepare = vi.fn(async () => ({ ok: false as const, reason: "fixture failure" }));
+    h.deps.own = { prepare, briefFor: () => "brief", classicBlocked: () => null };
+    await prepareOwnWorktrees(h.deps, { preparing: false });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(held.desktop!.own.state).toBe("planned");
+  });
+
   it("backs off 60s, doubling, up to 10 minutes", () => {
     expect(desktopBackoffMs(1)).toBe(60_000);
     expect(desktopBackoffMs(2)).toBe(120_000);

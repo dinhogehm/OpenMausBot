@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, appFailureRead, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, resumeLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, appFailureRead, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccModeLine, resumeLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -16,6 +16,22 @@ describe("argv", () => {
     expect(session.worktree).toBe("9237-webauthn-flaky-111111");
     expect(ccTurnArgs(session, "do it", true)).toEqual(["-p", "--session-id", base.id, "-w", session.worktree, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--", "do it"]);
     expect(ccTurnArgs(session, "-rf looks like a flag", false)).toEqual(["-p", "--resume", base.id, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--", "-rf looks like a flag"]);
+  });
+
+  it("uses Full Access only for the current trusted turn, without persisting it", () => {
+    const session = ledger().create({ ...base, permissionMode: "plan" });
+    expect(ccTurnArgs(session, "do it", true, true)).toEqual(["-p", "--session-id", base.id, "-w", session.worktree, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--", "do it"]);
+    expect(ccTurnArgs(session, "continue", false, true)).toEqual(["-p", "--resume", base.id, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--", "continue"]);
+    expect(ccTurnArgs(session, "review only", false, false)).toEqual(["-p", "--resume", base.id, "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--", "review only"]);
+    expect(session.permissionMode).toBe("plan");
+  });
+
+  it("reports the last effective mode without letting that history grant the next turn", () => {
+    const session = ledger().create({ ...base, permissionMode: "plan" });
+    session.lastTurnPermissionMode = "bypassPermissions";
+    expect(ccModeLine(session)).toContain("permission mode bypassPermissions");
+    expect(ccTurnArgs(session, "review only", false)).toContain("plan");
+    expect(ccTurnArgs(session, "review only", false)).not.toContain("bypassPermissions");
   });
 
   it("slugs accents and symbols", () => {

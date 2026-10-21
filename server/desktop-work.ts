@@ -83,6 +83,7 @@ export const CC_STALL_MAX_REPORTS = 3;
 
 export interface DesktopWorkDeps {
   ledger: CcSessionLedger;
+  canRunSession?: (session: CcSession) => boolean;
   now: () => number;
   getDriver: () => Promise<DesktopDriver>;
   readRecord: (localId: string) => DesktopRecord | null;
@@ -316,6 +317,7 @@ export async function prepareOwnWorktrees(deps: DesktopWorkDeps, state: { prepar
   if (!deps.own || state.preparing) return;
   const next = deps.ledger.all()
     .filter((session) => liveApp(session) && session.desktop!.own?.state === "planned" && session.desktop!.pending?.kind === "create")
+    .filter((session) => deps.canRunSession?.(session) !== false)
     .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0];
   if (!next) return;
   const own = next.desktop!.own!;
@@ -329,7 +331,7 @@ export async function prepareOwnWorktrees(deps: DesktopWorkDeps, state: { prepar
       made = { ok: false, reason: error instanceof Error ? error.message.slice(0, 300) : String(error) };
     }
     // stopped or archived meanwhile: what was made stays, as it is
-    if (!liveApp(next) || next.desktop?.own !== own || own.state !== "planned" || next.desktop.pending?.kind !== "create") {
+    if (!liveApp(next) || next.desktop?.own !== own || own.state !== "planned" || next.desktop.pending?.kind !== "create" || deps.canRunSession?.(next) === false) {
       deps.log?.(`own worktree: ${own.path} ${made.ok ? "made" : "not made"} for session ${next.id}, which no longer waits to open; left as it is`);
       return;
     }
@@ -876,7 +878,17 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
   followDesktopSessions(deps);
   if (state.busy) return;
   const now = deps.now();
-  const next = pickDesktopPending(deps.ledger.all(), now);
+  for (const session of deps.ledger.all()) {
+    const desktop = session.desktop;
+    const pending = desktop?.pending;
+    if (session.status !== "running" || pending?.kind !== "create" || deps.canRunSession?.(session) !== false
+      || pending.attempts !== 0 || pending.triedAt !== undefined || desktop?.sentAt !== undefined || desktop?.localId || desktop?.sent) continue;
+    session.status = "stopped";
+    session.blockedOn = "Acesso total usa somente o terminal; este início no app não chegou a ser tentado.";
+    deps.ledger.save();
+    deps.chip(session, session.blockedOn, false);
+  }
+  const next = pickDesktopPending(deps.ledger.all().filter((session) => deps.canRunSession?.(session) !== false), now);
   if (!next) return;
   const desktop = next.desktop!;
   const pending = desktop.pending!;
@@ -929,6 +941,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       return;
     }
     const steps = deps.steps ?? {};
+    if (deps.canRunSession?.(next) === false) return;
     let userFrameAt = 0;
     let step: DesktopStep;
     deps.log?.(`${pending.kind} start: session ${next.id} "${next.title.slice(0, 60)}" (try ${pending.attempts + 1}${pending.misses ? `, misses ${pending.misses}` : ""})`);
