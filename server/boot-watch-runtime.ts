@@ -1,31 +1,48 @@
 // Boot-time watches the server keeps: transient computer errors, owner activity per conversation, power and older needs-you items.
-import type { SharedState } from "./shared-state.ts";
+import { type SharedState } from "./shared-state.ts";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type WireBot } from "../shared/wire.ts";
-import {
-} from "./cloud-backend.ts";
 import { loadConfig, DATA_DIR } from "./config.ts";
 import { augmentedPath } from "./env-path.ts";
 import { buildNotification, type Notification } from "./notify.ts";
 import { chiefForBot, deskThread, OwnerWroteAt } from "./incidents.ts";
-import { BotAutonomy, GOAL_MAX_CONSECUTIVE_FAILURES, goalEndChip, prsCited, ownerPendingStepsAutoReport, missingParts, type OwnerPendingStep, type OwnerPendingOption, NEEDS_INPUT_EXPIRE_MS, promiseOverdueReport, type OwnerPending, chipText, DISPATCH_RETRY_MAX_MINUTES, watchLabel } from "./bot-autonomy.ts";
+import { BotAutonomy, GOAL_MAX_CONSECUTIVE_FAILURES, goalEndChip, ownerPendingStepsAutoReport, missingParts, type OwnerPendingStep, type OwnerPendingOption, NEEDS_INPUT_EXPIRE_MS, promiseOverdueReport, type OwnerPending, chipText, DISPATCH_RETRY_MAX_MINUTES, watchLabel, goalCitedPrs, citedPrsOutcome, NEEDS_INPUT_PR_CHECK_MAX, type CitedPrState, questionStepsAutoReport, questionReportRef, ANSWERED_IN_CONVERSATION, answerToAsk, answeredInConversationReport, type AskPromotion } from "./bot-autonomy.ts";
 import { runWatchCommand, watchMatches } from "./wake-watch.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { psTable } from "./bg-jobs.ts";
 import { execFile as execFileCc } from "node:child_process";
-import { parseLsRemoteTag, PRODUCTION_TAG } from "./prod-delivery.ts";
+import { parseLsRemoteTag, PRODUCTION_TAG, notAPullRequest } from "./prod-delivery.ts";
 import { computerErrorPt } from "./error-pt.ts";
 import { appUnblockPending } from "./owner-chips.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 import { botMarkPattern, botSlug } from "./watch-echo.ts";
 import { Store, type BotRecord } from "./store.ts";
+import { writeFileAtomic } from "./atomic.ts";
+import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_QUIET_MS, pipelineIdleLogLine, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
+import { PRODUCTION_REPO } from "../shared/productivity.ts";
+import { markStaleRoutineAsks } from "./routine-owner-ask.ts";
+import { botTextsWithRefsSince } from "./message-db.ts";
+import { type NowStatusService } from "./now-status.ts";
+import { type CcSessionLedger } from "./cc-sessions.ts";
+import { diskAlertText } from "./nested-worktrees.ts";
 
 export interface BootWatchRuntimeDeps {
   DESKTOP_MANAGED: boolean;
   autonomy: BotAutonomy;
+  autonomyTestMs: (name: string) => number | undefined;
+  goalNeedsInputForThread: (threadId: string) => number | null;
+  goalNeedsInputAskForThread: (threadId: string) => string | null;
+  questionPromotion: (threadId: string, at: number) => AskPromotion | null;
+  personSpokeSince: (threadId: string, at: number) => boolean;
+  readonly ccLedger: Pick<CcSessionLedger, "all">;
+  readonly refreshReleaseHold: () => Promise<void>;
+  readonly releaseHold: Parameters<typeof releaseInFlightOf>[0];
+  readonly RELEASE_HOLD_EVERY_MS: number;
+  readonly releasedCleanup: { lastStale: Parameters<typeof diskAlertText>[1] };
+  readonly nowStatus: Pick<NowStatusService, "recordAlert">;
   broadcast: (payload: Record<string, unknown>, options?: { adminOnly?: boolean }) => void;
   cfg: ReturnType<typeof loadConfig>;
   notify: (notification: Notification | null) => void;
@@ -40,7 +57,7 @@ export interface BootWatchRuntimeDeps {
 
 /** Built once, where server/index.ts used to declare all of this inline. */
 export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
-  const { DESKTOP_MANAGED, autonomy, broadcast, cfg, notify, store, wireBot } = deps;
+  const { DESKTOP_MANAGED, autonomy, autonomyTestMs, goalNeedsInputForThread, goalNeedsInputAskForThread, questionPromotion, personSpokeSince, broadcast, cfg, notify, store, wireBot } = deps;
   /** Errors of a computer still coming up after a boot: waited out quietly. */
   const BOOT_TRANSIENT = /cannot safely resume|Start (?:docker|podman|container) first|is not running|Cua Driver is not ready yet|Cannot connect to the Docker daemon/i;
   /** Retries of a turn that would not start before the Chief is told, and the
@@ -91,7 +108,7 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
    * whichever thread happens to be selected (bot.threadId follows the UI).
    * `except`: a conversation on its way out (being archived or deleted). */
   function chiefDeskThread(chief: BotRecord, except?: string): string {
-    // deps.sharedState and ownerWroteAt are set up as the server loads: a call made
+    // sharedState and ownerWroteAt are set up as the server loads: a call made
     // before that falls back to the rest of the rule
     let ownerThread: string | null = null;
     try {
@@ -153,7 +170,9 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
   /** Stop means stop: the person's Stop ends goal mode and drops a pending
    * wake-up, before the interrupt settles the turn as failed. */
   function stopAutonomyByPerson(threadId: string): void {
-    if (autonomy.cancelWake(threadId)) {
+    // a cut lease not given back yet (resumeCutLeases) is stopped too: never run after the Stop
+    const cutWake = autonomy.dropRecoveredLeases(threadId).some((lease) => lease.kind === "wake");
+    if (autonomy.cancelWake(threadId) || cutWake) {
       store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: "Despertador cancelado — parado por você", ok: true } });
     }
     finishGoalWithChip(threadId, "stopped", "stopped by you");
@@ -258,18 +277,21 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
     if (!drops.length) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     for (const drop of drops) {
-      const text = `Pouco espaço em disco: ${drop.freeGiB} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar. Libere espaço (worktrees antigas, caches de build) ou avise a pessoa.`;
-      console.warn(`[disk] ${text}`);
+      // with what the worktree report last measured outside the tag, and no "free space" order to a bot (R10-resilience D)
+      const alert = diskAlertText(drop, deps.releasedCleanup.lastStale);
+      console.warn(`[disk] ${alert.report.split("\n")[0]}`);
       const desk = chief ? chiefDeskThread(chief) : null;
       if (!chief || !desk || !store.taskByThread(chief.id, desk)) continue;
-      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
-      autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${text}`);
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(alert.chip, 200), ok: false } });
+      autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${alert.report}`);
     }
   }
 
-  /** Goals waiting on the person about a PR: every 10 min, ask gh whether the
-   * PR they cite was merged or closed meanwhile; if every one was, the goal
-   * is closed as completed with a chip (the question is moot). */
+  /** Goals waiting on the person about a PR: every 10 min, ask gh what became
+   * of the PRs their question cites (citedPrsOutcome). All merged: the question
+   * is moot, but merge is not delivery, so the goal resumes and the bot is told
+   * to check the result. One closed without merge: the bot is told once and the
+   * goal keeps waiting. The server never closes the goal as completed here. */
   const needsInputChecks = new Map<string, number>();
   let needsInputRunning = false;
   async function revalidateNeedsInputGoals(): Promise<void> {
@@ -290,20 +312,26 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
         }
         if (now - (needsInputChecks.get(goal.threadId) ?? 0) < 10 * 60_000) continue;
         needsInputChecks.set(goal.threadId, now);
-        const prs = prsCited(`${goal.detail ?? ""}\n${goal.goal}`).slice(0, 4);
-        if (!prs.length) continue;
-        const states: string[] = [];
+        // the question is what the world may answer: the PRs it cites, not the goal's own text
+        const prs = goalCitedPrs(goal.detail ?? "");
+        if (!prs.length || prs.length > NEEDS_INPUT_PR_CHECK_MAX) continue;
+        const states: CitedPrState[] = [];
         for (const pr of prs) {
           try {
-            const out = await deps.execCc("gh", ["pr", "view", String(pr.number), ...(pr.slug ? ["--repo", pr.slug] : []), "--json", "state", "--jq", ".state"], watchCwd(goal.botId, goal.threadId));
-            states.push(`${pr.number}:${out.trim()}`);
-          } catch { states.push(`${pr.number}:?`); }
+            const view = JSON.parse(await deps.execCc("gh", ["pr", "view", String(pr.number), ...(pr.slug ? ["--repo", pr.slug] : []), "--json", "state,mergedAt,closedAt"], watchCwd(goal.botId, goal.threadId))) as { state?: string; mergedAt?: string | null; closedAt?: string | null };
+            const changedAt = Date.parse(view.mergedAt ?? view.closedAt ?? "");
+            states.push({ number: pr.number, state: view.state ?? "?", explicit: pr.explicit, ...(Number.isFinite(changedAt) ? { changedAt } : {}) });
+          } catch (error) {
+            // a bare number that is an issue is not cited as a PR at all
+            if (notAPullRequest(error)) continue;
+            states.push({ number: pr.number, state: "?", explicit: pr.explicit });
+          }
         }
-        if (!states.every((state) => /:(MERGED|CLOSED)$/.test(state))) continue;
-        const detail = `As PRs citadas já foram ${states.map((state) => `#${state.replace(":", " ").replace("MERGED", "mergeada").replace("CLOSED", "fechada")}`).join(", ")} — a pergunta ficou sem objeto; encerrado pelo servidor.`;
-        const done = autonomy.resolveNeedsInput(goal.threadId, detail);
-        if (!done) continue;
-        store.appendMessage(goal.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Objetivo encerrado: ${detail}`, 240), ok: true } });
+        const outcome = citedPrsOutcome(states, goal.finishedAt ?? goal.startedAt);
+        if (!outcome) continue;
+        if (outcome.kind === "merged" ? !autonomy.resumeGoalAfterInput(goal.threadId) : !autonomy.notePrNotice(goal.threadId, outcome.signature)) continue;
+        autonomy.addReport(goal.botId, goal.threadId, outcome.report);
+        store.appendMessage(goal.threadId, { role: "bot", kind: "activity", tool: { name: chipText(outcome.chip, 240), ok: outcome.kind === "merged" } });
         refreshBotRow(goal.botId);
       }
     } finally {
@@ -320,6 +348,8 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
     console.warn(`[${logPrefix}] ${text}`);
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
+    // "Agora" shows the release alerts the Chief got, and where (lot Y); power alerts are not release news
+    if (logPrefix === "release") deps.nowStatus.recordAlert({ text: chipText(text, 240), ...(chief && desk ? { botId: chief.id, threadId: desk } : {}) });
     if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
     store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
     autonomy.addReport(chief.id, desk, report);
@@ -463,6 +493,75 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
     }
   }
 
+  /** The pipeline standing still (server/pipeline-idle.ts): no open PR, no
+   * release, and P0/P1 with nobody on them — the Chief is woken once, in its
+   * desk, with the list (R12-followup #1). Only the desktop app's server looks
+   * (OMB_PIPELINE_IDLE=1 lets a test's server look too), every 10 min. */
+  const PIPELINE_IDLE_FILE = join(DATA_DIR, "pipeline-idle.json");
+  const pipelineIdle: { state: PipelineIdleState | null; lastAt: number; running: boolean; lastWhy?: string } = { state: null, lastAt: 0, running: false };
+  /** `gh` with JSON out, or why it failed (said in the log, R13-followup #5). */
+  function ghJson(args: string[]): Promise<{ out: string | null; error?: string }> {
+    return new Promise((resolve) => {
+      execFileCc("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout, stderr) => resolve(error ? { out: null, error: `gh ${args.slice(0, 2).join(" ")} falhou: ${(String(stderr ?? "").trim().split("\n").at(-1) || error.message).slice(0, 160)}` } : { out: String(stdout) }));
+    });
+  }
+  /** A look's why, logged when it changed. */
+  function logPipelineIdleWhy(why: string): void {
+    const line = pipelineIdleLogLine(pipelineIdle.lastWhy, why);
+    pipelineIdle.lastWhy = why;
+    if (line) console.log(line);
+  }
+  async function checkPipelineIdle(): Promise<void> {
+    const enabled = process.env.OMB_PIPELINE_IDLE === "1" || (DESKTOP_MANAGED && !process.env.VITEST);
+    const every = autonomyTestMs("OMB_PIPELINE_IDLE_EVERY_MS") ?? PIPELINE_IDLE_EVERY_MS;
+    if (!enabled || pipelineIdle.running || Date.now() - pipelineIdle.lastAt < every) return;
+    const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+    if (!chief) return;
+    pipelineIdle.running = true;
+    pipelineIdle.lastAt = Date.now();
+    try {
+      if (!pipelineIdle.state) {
+        try { pipelineIdle.state = JSON.parse(readFileSync(PIPELINE_IDLE_FILE, "utf8")) as PipelineIdleState; } catch { pipelineIdle.state = {}; }
+      }
+      const stopped = existsSync(NURIA_STOP_FILE);
+      const prs = stopped ? null : await ghJson(idlePrsArgs(PRODUCTION_REPO));
+      const openPrs = stopped ? 0 : prs?.out == null ? null : parseOpenPrCount(prs.out, Date.now());
+      let unknown = prs?.error ?? (prs?.out != null && openPrs === null ? "gh pr list ilegível" : undefined);
+      let releaseInFlight: boolean | null = false;
+      if (!stopped && openPrs === 0) {
+        await deps.refreshReleaseHold();
+        // read now by this call or another: anything older, or still being read, is unknown (INSP-R12F F4)
+        releaseInFlight = releaseInFlightOf(deps.releaseHold, Date.now(), 2 * deps.RELEASE_HOLD_EVERY_MS);
+        if (releaseInFlight === null) unknown = "release ainda não lido";
+      }
+      const now = Date.now();
+      let candidates: IdleCandidate[] = [];
+      if (!stopped && openPrs === 0 && releaseInFlight === false) {
+        const issues = await ghJson(idleIssuesArgs(PRODUCTION_REPO));
+        const parsed = issues.out === null ? null : parseIdleIssues(issues.out);
+        if (parsed === null) return logPipelineIdleWhy(`estado desconhecido (${issues.error ?? "gh issue list ilegível"})`);
+        // a bot named it in the last day, or an open "Precisa de você" item waits on the owner for it
+        const taken = new Set([...mentionedNumbers(botTextsWithRefsSince(now - PIPELINE_IDLE_QUIET_MS)), ...heldByOwner(store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)))]);
+        candidates = idleCandidates(parsed, deps.ccLedger.all(), taken, now);
+      }
+      const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now, ...(unknown ? { unknown } : {}) });
+      logPipelineIdleWhy(step.why);
+      if (!step.wake) return;
+      const desk = chiefDeskThread(chief);
+      // "told" is kept only once the report is on the Chief's desk (INSP-R12F F5)
+      if (!store.taskByThread(chief.id, desk)) return;
+      const order = pipelineOrder(deps.sharedState.orders(chief.id));
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Esteira parada: fila de PRs vazia, sem release, ${candidates.length} P0/P1 sem ninguém nelas (${candidates.slice(0, 4).map((each) => `#${each.number}`).join(", ")}${candidates.length > 4 ? ", …" : ""}) — o Chief foi avisado`, 240), ok: true } });
+      autonomy.addReport(chief.id, desk, pipelineIdleReport(candidates, PRODUCTION_REPO, order));
+      pipelineIdle.state = step.state;
+      try { writeFileAtomic(PIPELINE_IDLE_FILE, `${JSON.stringify(step.state)}\n`); } catch { /* memory still holds it */ }
+      refreshBotRow(chief.id);
+      console.log(`[pipeline-idle] the pipeline stands still: ${candidates.length} P0/P1 with nobody on them (${candidates.map((each) => `#${each.number}`).join(" ")}); the Chief is told in ${desk}`);
+    } finally {
+      pipelineIdle.running = false;
+    }
+  }
+
   /** The Mac's power right now, for an answer that claims it (INSP-J2 r2 N4):
    * null when unknown (not a Mac, pmset failed). OMB_TEST_PMSET_BATT stands in
    * for `pmset -g batt` in the e2e tests. */
@@ -566,12 +665,21 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
    * ~/.nuria/stop exists, one item per bot per minute; the request is a report,
    * so it wakes the bot only when its conversation is free, like any report. */
   const STEPS_ASK_AFTER_BOOT_MS = Number(process.env.OMB_OWNER_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_OWNER_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_OWNER_STEPS_ASK_AFTER_MS) : 3 * 60_000;
-  const stepsAsk = { bootAt: Date.now(), lastAt: 0 };
+  const stepsAsk = { bootAt: Date.now(), lastAt: 0, questionsAt: 0 };
   const NURIA_STOP_FILE = join(homedir(), ".nuria", "stop");
   function askStepsForOlderItems(): void {
     const now = Date.now();
-    if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || now - stepsAsk.lastAt < 60_000) return;
-    if (existsSync(NURIA_STOP_FILE)) return;
+    // settling never sends anything to a bot: it runs even with ~/.nuria/stop
+    settleAnsweredQuestions();
+    // a routine's item it stopped repeating says so, still open (INSP-N22 A8)
+    for (const item of markStaleRoutineAsks(autonomy, now)) refreshBotRow(item.botId);
+    if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || existsSync(NURIA_STOP_FILE)) return;
+    // a bare question is looked at every minute on its own: an item's pace must not hold it back
+    if (now - stepsAsk.questionsAt >= QUESTION_STEPS_PACE_MS) {
+      stepsAsk.questionsAt = now;
+      askStepsForQuestions(now);
+    }
+    if (now - stepsAsk.lastAt < 60_000) return;
     stepsAsk.lastAt = now;
     // the server's own items, saved by an older build: the server completes them, never their bot (INSP-J2 #5)
     for (const item of autonomy.serverItemsIncomplete()) {
@@ -594,6 +702,80 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
     }
   }
 
+  /** A question a bot ended its turn with (lot J2): the line "Precisa de você"
+   * shows has no why, steps nor options — the bot is asked, once, to register
+   * it as an item that takes its place. Not in a routine's run nor an archived
+   * conversation (the panel does not show those lines either), and only when
+   * it has waited 30 min with the person silent in that conversation — a live
+   * exchange is never interrupted (INSP-J2b #3). */
+  function askStepsForQuestions(now: number): void {
+    for (const bot of store.bots) {
+      if (bot.hidden) continue;
+      for (const task of store.tasks(bot.id)) {
+        if (task.routineRunId || task.archivedAt || task.activity === "waiting-on-you") continue;
+        const at = goalNeedsInputForThread(task.threadId);
+        if (at === null || now - at < QUESTION_STEPS_ASK_AFTER_MS || questionPromotion(task.threadId, at) || personSpokeSince(task.threadId, at)) continue;
+        askQuestionSteps(bot.id, task.threadId, at);
+      }
+    }
+  }
+
+  /** The person answered a question in its own conversation after the server
+   * asked for its item (INSP-J2b #3): the item the bot opened for it is
+   * settled as "respondida na conversa" — unless the person was already
+   * answering the item itself — and a request still waiting is withdrawn. */
+  function settleAnsweredQuestions(): void {
+    for (const promotion of autonomy.allAskPromotions()) {
+      if (promotion.answeredAt !== undefined || !store.taskByThread(promotion.botId, promotion.threadId)) continue;
+      const answer = questionAnswer(promotion);
+      if (!answer) continue;
+      autonomy.markAskAnswered(promotion);
+      autonomy.dropReports(promotion.reportThreadId, (each) => { const ref = questionReportRef(each); return ref?.threadId === promotion.threadId && ref.askAt === promotion.askAt; });
+      const item = autonomy.askPromotionOpenItem(promotion);
+      if (item && !item.history?.length) {
+        for (const done of autonomy.resolveOwnerPending({ botId: item.botId, id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION })) {
+          if (store.taskByThread(done.botId, done.threadId)) store.appendMessage(done.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Resolvido (${ANSWERED_IN_CONVERSATION}): ${done.title}`, 240), ok: true } });
+          // the bot hears it closed, as the server, where the person answered (INSP-J2b r2 c-2)
+          autonomy.addReport(done.botId, promotion.threadId, answeredInConversationReport(done, promotion, answer.text));
+          console.log(`[owner-pending] ${done.id} settled: the person answered its question in ${promotion.threadId}`);
+        }
+      }
+      refreshBotRow(promotion.botId);
+    }
+  }
+
+  /** The person's message answering the promoted question, by answerToAsk: the
+   * question's whole message (its #refs), else what the panel showed. */
+  function questionAnswer(promotion: AskPromotion): { at: number; text: string } | null {
+    const messages = store.messagesFor(promotion.threadId);
+    const asked = messages.find((each) => each.at === promotion.askAt && each.role === "bot" && each.kind === "text")?.text ?? autonomy.goalFor(promotion.threadId)?.detail ?? "";
+    return answerToAsk(messages, promotion.askAt, `${asked} ${promotion.text}`);
+  }
+
+  /** A bare question gets this long to be answered on the spot before its bot is asked for the item (INSP-J2b #3: 30 min). */
+  const QUESTION_STEPS_ASK_AFTER_MS = Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) : 30 * 60_000;
+  /** How often the bare questions are looked at: a minute (shrunk by the autonomy tests). */
+  const QUESTION_STEPS_PACE_MS = autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000;
+  /** "Pedir de novo" on a question: the same 15 min the screen waits before offering it (J17). */
+  const QUESTION_STEPS_ASK_AGAIN_MS = 15 * 60_000;
+
+  /** Asks the bot, as the server, to register the question its conversation
+   * asked at `at` as an owner_pending item (lot J2): a report, the J17 way —
+   * to the owner's channel, waiting for it to be free, dropped by ~/.nuria/stop
+   * at dispatch. A request still waiting for the same question is replaced. */
+  function askQuestionSteps(botId: string, threadId: string, at: number): AskPromotion | null {
+    const target = deps.ownerTurnThread(botId, threadId);
+    if (!store.taskByThread(botId, target)) return null;
+    const title = store.taskByThread(botId, threadId)?.title;
+    const text = goalNeedsInputAskForThread(threadId) ?? title ?? "";
+    const asked = autonomy.noteAskPromotion({ botId, threadId, askAt: at, text, reportThreadId: target });
+    autonomy.dropReports(target, (each) => { const ref = questionReportRef(each); return ref?.threadId === threadId && ref.askAt === at; });
+    autonomy.addReport(botId, target, questionStepsAutoReport(asked, title));
+    console.log(`[owner-pending] ${store.bot(botId)?.name ?? botId}: its question in ${threadId} ("${text.slice(0, 80)}") has no steps: asked to register it as an item, in ${target}`);
+    refreshBotRow(botId);
+    return asked;
+  }
+
   /** A server item's why/steps/options, rebuilt from its key (an older build saved it bare). */
   function serverItemDetails(item: OwnerPending): { why: string; steps: OwnerPendingStep[]; options?: OwnerPendingOption[] } | null {
     const key = item.key ?? "";
@@ -609,5 +791,6 @@ export function createBootWatchRuntime(deps: BootWatchRuntimeDeps) {
     }
     return null;
   }
-  return { autonomyDispatchFailed, chiefDeskThread, ownerThreadGone, mainThreadOf, alertAutomationTrouble, stopAutonomyByPerson, finishGoalWithChip, watchCwd, runDueWatches, refreshBotRow, alertLostStandingWatches, alertOverduePromises, checkDiskSpace, revalidateNeedsInputGoals, releaseWatch, releaseAlertToChief, readHaltedRelease, checkPower, readPowerNow, carrierPowerCheck, checkProductionRelease, NURIA_STOP_FILE, askStepsForOlderItems };
+
+  return { autonomyDispatchFailed, chiefDeskThread, ownerThreadGone, mainThreadOf, alertAutomationTrouble, stopAutonomyByPerson, finishGoalWithChip, watchCwd, runDueWatches, refreshBotRow, alertLostStandingWatches, alertOverduePromises, checkDiskSpace, revalidateNeedsInputGoals, releaseWatch, releaseAlertToChief, readHaltedRelease, checkPower, readPowerNow, carrierPowerCheck, checkProductionRelease, NURIA_STOP_FILE, askStepsForOlderItems, readProductionTag, checkPipelineIdle, pipelineIdle, PIPELINE_IDLE_FILE, QUESTION_STEPS_ASK_AGAIN_MS, askQuestionSteps, questionAnswer };
 }

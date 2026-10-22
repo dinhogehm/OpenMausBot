@@ -42,6 +42,18 @@ Local VMs always run on the same physical host as the OpenMausBot desktop proces
 
 The bot's workspace and browser profile live in a durable mounted directory. Recreating the desktop can repair stale runtime state without deleting the durable workspace.
 
+The desktop's browser is Firefox ESR. Its profile (`~/.mozilla`, with the sites you signed in to, their cookies and sessions) is linked into the durable folder at `workspace/.browser-profiles/mozilla`, so a desktop that is stopped, recreated or upgraded starts with the same signed-in Firefox. Sign in once per bot desktop (from a **Sign in needed** card, or **Take control** in the Computer panel) and it stays signed in until the site itself ends the session.
+
+Desktops created before this layout kept Firefox inside the container. Before OpenMausBot removes one of them (to recreate or upgrade it), it copies that `~/.mozilla` into the durable folder, unless a durable Firefox profile is already there, and it removes nothing if the copy fails. Other profiles a bot created in `.browser-profiles` (such as `firefox-qa`) are left as they are. Deleting the bot deletes its folder, profile included.
+
+The durable folder holds live sign-in cookies, so treat it like a password: it stays in the OpenMausBot data folder with owner-only permissions, and browser profiles are never included in a workspace backup or export.
+
+## Saved logins
+
+A bot on a Local VM can sign in with a [saved login](/docs/security/permissions-and-secrets#saved-logins) or one from a connected 1Password vault: on the site's login page in the desktop's Firefox it calls `fill_login`. OpenMausBot reads the address of the page in Firefox's front window through the desktop's accessibility service, and fills only over https and only on that login's own site or the sign-in hosts saved with it (a login kept to **Only on this exact address** fills on that host alone). It does not submit the form: the bot presses the sign-in button, and on a two-step login calls `fill_login` again for the next step. It focuses the username, password and one-time-code boxes it finds there and types the values as key presses through the desktop's input driver. The password goes from OpenMausBot straight to that driver: it is not put on a command line, in a log, in the bot's conversation or in the bot's shell output. If the page changes site, you take control, or a character cannot be typed on the desktop's keyboard (some accented letters or symbols), it stops, empties what it typed, and the bot asks you to sign in instead.
+
+Keep in mind that the bot runs its own commands on the same desktop, so it could in principle watch that desktop's keyboard or screen while a login is typed; give a Local VM bot only logins you would trust it with. Desktops made before this release need **Prepare** in **App Settings → Local VM** and a recreate before `fill_login` works there.
+
 ## Ownership and reuse
 
 Local VM ownership uses a renewable lease. OpenMausBot validates the resolved image and container safety contract before reuse instead of trusting only a mutable image tag.

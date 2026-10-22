@@ -58,6 +58,7 @@ describe("durable accepted follow-ups", () => {
       "bot", "thread", `Reply context\n${text}`, store.messages[0],
       ["message-0"], true,
       { trigger: { kind: "user", email: "ada@example.test", label: "Ada's laptop" }, sender: { name: "ada@example.test" }, peerAsk: undefined },
+      [first.id],
     ]);
     expect(store.messages).toEqual([
       expect.objectContaining({ text, replyToId: "reply", sendId: "first", queueId: first.id, dataContext: { cardId: "c_1", draftSql: "select 1" } }),
@@ -70,6 +71,7 @@ describe("durable accepted follow-ups", () => {
       "bot", "thread", "then summarize", store.messages[1],
       ["message-1"], false,
       { trigger: undefined, sender: undefined, peerAsk: undefined },
+      [second.id],
     ]);
     expect(store.messages).toEqual([
       expect.objectContaining({ text, replyToId: "reply", sendId: "first", queueId: first.id }),

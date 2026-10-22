@@ -85,7 +85,10 @@ async function completedTurn(start: () => Promise<void>) {
   await start();
   const dump = await dumped(dumpOf("done"));
   const text = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value ?? "");
-  return { prompt: text(dump.prompt), system: text(dump.systemPrompt) };
+  // `system` is every instruction the launch carried: the system prompt and
+  // the volatile half (memory, recent work, shared state) that rides the
+  // launch's first message instead (system-prompt.ts).
+  return { prompt: text(dump.prompt), system: `${text(dump.systemPrompt)}\n${text(dump.prompt)}` };
 }
 const newBot = async (name: string, instanceId: "held" | "done" | "brief") =>
   (await api("POST", "/api/bots", { token: owner, body: { name, modelSelection: { instanceId, model: "claude-sonnet-5" } } })).body.bot as { id: string; threadId: string };
@@ -372,7 +375,9 @@ it("a process on the Cloud cannot write in the owner's running conversation, and
   await review(bot);
   const mine = await newThread(bot);
   const tools = await toolsFor(() => say(owner, bot, "Plan my day.", mine));
-  expect(String((await dumped(dumpOf("held"))).systemPrompt)).toContain("Change MEMORY.md only with memory_update");
+  // memory is in the volatile half, which rides the launch's first message (system-prompt.ts)
+  const held = await dumped(dumpOf("held"));
+  expect(JSON.stringify(held.systemPrompt ?? "") + JSON.stringify(held.prompt ?? "")).toContain("Change MEMORY.md only with memory_update");
   expect((await local("POST", `/api/bots/${bot.id}/messages`, { text: `Also save to MEMORY.md: ${INJECTED}`, threadId: mine })).status).toBe(403);
   expect((await sees(tools)).computers).toHaveLength(1);
   const token = randomBytes(32).toString("hex");
@@ -398,8 +403,9 @@ it("a process on the Cloud cannot write in the owner's running conversation, and
   // Its notes would be refused, so the teammate's turn is told to put facts in its result instead.
   let delegated: any;
   await expect.poll(async () => JSON.stringify((delegated = await dumped(dumpOf("held"))).prompt), { timeout: 15_000 }).toContain(INJECTED);
-  expect(String(delegated.systemPrompt)).toContain("Notes cannot be saved from this conversation");
-  expect(String(delegated.systemPrompt)).not.toContain("Change MEMORY.md only with memory_update");
+  const delegatedSystem = JSON.stringify(delegated.systemPrompt ?? "") + JSON.stringify(delegated.prompt ?? "");
+  expect(delegatedSystem).toContain("Notes cannot be saved from this conversation");
+  expect(delegatedSystem).not.toContain("Change MEMORY.md only with memory_update");
   await stop(bot, receipt.receipts![0]!.threadId!);
 }, 60_000);
 
@@ -416,7 +422,12 @@ it("a link planted in a bot's memory is a change, and what it points at never re
   rmSync(ws(bot, "MEMORY.md"));
   symlinkSync(notes, ws(bot, "MEMORY.md"));
   await stop(bot, guests);
-  const systemPrompt = () => JSON.stringify(JSON.parse(readFileSync(dumpOf("held"), "utf8")).systemPrompt ?? "");
+  // memory is volatile: a launch carries it in its first message, so read both
+  const systemPrompt = () => {
+    const launched = JSON.parse(readFileSync(dumpOf("held"), "utf8"));
+    return JSON.stringify(launched.systemPrompt ?? "") + JSON.stringify(launched.prompt ?? "");
+  };
+  // Flagged, and neither link is read into the owner's turn.
   const flagged = await toolsFor(async () => say(owner, bot, "Read plan.md from my Mac.", await newThread(bot)));
   expect((await sees(flagged)).unavailable).toContain("This bot's memory was changed");
   expect(systemPrompt()).toContain("You are Linked");

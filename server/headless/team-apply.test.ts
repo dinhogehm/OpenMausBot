@@ -125,7 +125,9 @@ describe("team apply", () => {
       "POST /api/bots", "PATCH /api/bots/bot-1", "POST /api/bots", "PATCH /api/bots/bot-2",
       "POST /api/bots/bot-1/skill-template", "PATCH /api/bots/bot-1", "tool create_channel",
     ]);
-    expect(state.bots.find((bot) => bot.name === "Priya")).toMatchObject({ section: "Launch Room", computer: "browser",
+    // fork: a new bot saves no level and so runs at Ask; the file's
+    // `approval: full` is written as the bot's own level.
+    expect(state.bots.find((bot) => bot.name === "Priya")).toMatchObject({ section: "Launch Room", approvalMode: "full", computer: "browser",
       browserProfile: "guest", toolScope: { deny: ["mcp:mail:*"] } });
     expect(approvalModeFor(state.bots.find((bot) => bot.name === "Priya")!)).toBe("full");
     expect(state.bots.find((bot) => bot.name === "Room Lead")).toMatchObject({ chiefOfStaff: true, managedSections: [], soul: "Lead the rehearsal.", cwd: "/work/room" });

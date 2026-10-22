@@ -90,7 +90,12 @@ function eventName(req: IncomingMessage): string | undefined {
 
 export function createWebhookIngressHandler(manager: WebhookManager, claimRequest?: () => () => void) {
   return async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+    } catch {
+      return json(res, 400, { error: "Invalid webhook request URL" });
+    }
     if (req.method === "GET" && url.pathname === "/health") {
       return json(res, 200, { app: "openmausbot-webhooks", ready: true });
     }

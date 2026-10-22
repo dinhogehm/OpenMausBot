@@ -1,3 +1,4 @@
+import { roomNeedsSetup, setupResponderMode, type RoomResponderMode } from "@/lib/room-setup";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { activeLocale, t } from "@/lib/i18n";
 import { useShowThreads } from "@/lib/thread-preferences";
@@ -72,7 +73,7 @@ import { useDesktopCapabilities, useCaptionChrome } from "./DesktopCapabilities"
 import { cn } from "@/lib/cn";
 import { useMenuMotion } from "./MenuMotion";
 import { shortPath } from "@/lib/short-path";
-import { useComposerDockPad } from "@/lib/composer-dock";
+import { JUMP_PILL_GAP, useComposerDockPad } from "@/lib/composer-dock";
 import { GlassBar, GlassScrollFrame } from "./GlassScrollFrame";
 import { awaitedMemberId, showWorkingDots } from "@/lib/turn-tail";
 import { liveActivityPhrases } from "@/lib/live-activity";
@@ -545,6 +546,7 @@ export const Transcript = memo(function Transcript({
                       emerging={false}
                       eager={false}
                       onReply={onReply}
+                      stampShared={false}
                     />
                   </div>
                 ))}
@@ -667,41 +669,6 @@ function RoomWorkingFolderChip({ group, onToggle }: { group: Group; onToggle: ()
   );
 }
 
-
-type RoomSetupFields = {
-  setupPending?: boolean;
-  setupRequired?: boolean;
-  setupState?: "required" | "completed" | "skipped";
-  setupCompletedAt?: number | string | null;
-  setupSkippedAt?: number | string | null;
-};
-
-type RoomResponderMode = "lead" | "everyone" | "mentions" | "auto";
-
-function setupResponderMode(responder: GroupDefaultResponder): RoomResponderMode {
-  return responder.kind === "member" ? "lead" : responder.kind;
-}
-
-function roomNeedsSetup(group: Group): boolean {
-  if (group.dm || group.messages.length > 0) return false;
-  // SAFETY: setup fields are additive server metadata; the existing Group shape remains valid when absent.
-  const marker = group as Group & RoomSetupFields;
-  const hasSetupMarker =
-    Object.prototype.hasOwnProperty.call(marker, "setupCompletedAt") ||
-    Object.prototype.hasOwnProperty.call(marker, "setupSkippedAt");
-  if (!hasSetupMarker) return false;
-  if (
-    marker.setupPending === false ||
-    marker.setupRequired === false ||
-    marker.setupState === "completed" ||
-    marker.setupState === "skipped" ||
-    marker.setupCompletedAt != null ||
-    marker.setupSkippedAt != null
-  ) {
-    return false;
-  }
-  return true;
-}
 
 function RoomSetup({ group, members }: { group: Group; members: Bot[] }) {
   const { state, dispatch } = useStore();
@@ -1522,8 +1489,9 @@ export function GroupView({ group }: { group: Group }) {
 
       <TranscriptAnnouncer threadKey={transcriptKey} snapshot={announcement} />
 
+      {/* This fork: at the side, clear of the composer: centered, it sat over the text being read */}
       {!following && (
-        <JumpToLatestButton onClick={jumpToLatest} style={{ bottom: composerDock.height }} />
+        <JumpToLatestButton onClick={jumpToLatest} className="left-auto right-4 translate-x-0" style={{ bottom: `calc(${composerDock.height}px + ${JUMP_PILL_GAP})` }} />
       )}
 
       <div ref={composerDockRef} className="absolute inset-x-0 bottom-0 z-[2] chat-column-dock">

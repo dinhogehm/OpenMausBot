@@ -40,3 +40,18 @@ export function writeComputerPanelView(
   } catch {
   }
 }
+
+export const PANEL_WIDTH_KEY = "omb-computer-panel-width";
+export const PANEL_MIN_WIDTH = 360;
+export const PANEL_MAX_WIDTH = 960;
+const PANEL_DEFAULT_WIDTH = 400;
+export const PANEL_RESIZE_STEP = 40;
+
+export function readPanelWidth(): number {
+  try {
+    const stored = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    if (Number.isFinite(stored) && stored >= PANEL_MIN_WIDTH && stored <= PANEL_MAX_WIDTH) return stored;
+  } catch {
+  }
+  return PANEL_DEFAULT_WIDTH;
+}

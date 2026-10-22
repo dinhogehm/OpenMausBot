@@ -27,6 +27,38 @@ export interface FillLoginDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** What fill_login found on a LoginPage: which boxes, never a value. */
+export interface LoginFieldsFound {
+  href: unknown;
+  username: boolean;
+  password: boolean;
+  /** How many one-time-code boxes (several for one-digit-per-box codes). */
+  code: number;
+}
+
+/**
+ * A page a login is filled on outside the built-in browser's engine, such as Firefox on a Local VM through accessibility
+ * and Cua Driver. Each method answers with where the page is and booleans, never a value. Field names are "username",
+ * "password" and "code0".."codeN". The built-in browser keeps its own page scripts (LoginRun), which also submit.
+ */
+export interface LoginPage {
+  /** The address of the page the person sees; null when there is none or the browser did not answer. */
+  url(): Promise<string | null>;
+  find(): Promise<LoginFieldsFound | null>;
+  /** Focuses (and empties) the field; `same` when it already holds `keep`. */
+  focus(name: string, keep?: string): Promise<{ href: unknown; focused: boolean; same: boolean } | null>;
+  /** Types into the focused field; false when the page did not take all of it (and nothing was left behind). */
+  type(name: string, text: string): Promise<boolean>;
+  /** Which fields hold something now; also forgets what find() marked. */
+  check(): Promise<Record<string, boolean> | null>;
+}
+
+export interface FillOnPageDeps {
+  remember(value: string, kind: "password" | "code"): void;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export interface FillLoginInput {
   username?: string;
   /** Submit what was filled; false leaves that to the bot. */
@@ -267,41 +299,48 @@ function pageState(value: Record<string, unknown> | null): PageState | null {
   };
 }
 
-export async function fillLogin(input: FillLoginInput, deps: FillLoginDeps): Promise<FillLoginOutcome> {
-  const now = deps.now ?? Date.now;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const page = await deps.engine(["get", "url"]);
-  const pageUrl = typeof page?.url === "string" ? page.url : "";
-  if (!page || !pageUrl || pageUrl === "about:blank") {
-    return { ok: false, text: "The browser has no page open. Open the site's login page first, then call fill_login." };
+/** The one saved login this page may be filled with, or what the bot is told instead. */
+async function chooseLogin(pageUrl: string, input: FillLoginInput): Promise<{ login: FillCandidate; pageHost: string } | { outcome: FillLoginOutcome }> {
+  if (!pageUrl || pageUrl === "about:blank") {
+    return { outcome: { ok: false, text: "The browser has no page open. Open the site's login page first, then call fill_login." } };
   }
   // The page must be one a login may ever be filled on before any login is looked at.
   const fillable = loginPageCheck(pageUrl);
   if (!fillable.ok) {
-    return { ok: false, host: fillable.pageHost ?? undefined, text: fillable.reason === "insecure"
+    return { outcome: { ok: false, host: fillable.pageHost ?? undefined, text: fillable.reason === "insecure"
       ? `This page (${fillable.pageHost}) is not secure (http, not https). fill_login only fills https pages, or http on this computer.`
-      : "The current page is not a web page fill_login can fill. Open the site's login page, then call fill_login." };
+      : "The current page is not a web page fill_login can fill. Open the site's login page, then call fill_login." } };
   }
   const pageHost = fillable.pageHost;
   const all = await input.candidates(pageHost);
   if (!all.length) {
-    return { ok: false, host: pageHost, text: `No saved login for ${pageHost}. A login fills on its own site and the sign-in hosts saved with it, never on another site. ${listed(await input.available())} Open that site's login page, or call request_sign_in so the person signs in.` };
+    return { outcome: { ok: false, host: pageHost, text: `No saved login for ${pageHost}. A login fills on its own site and the sign-in hosts saved with it, never on another site. ${listed(await input.available())} Open that site's login page, or call request_sign_in so the person signs in.` } };
   }
   let chosen = all;
   const wanted = input.username?.trim();
   if (wanted) {
     chosen = all.filter((login) => login.username.toLowerCase() === wanted.toLowerCase());
     if (!chosen.length) {
-      return { ok: false, host: pageHost, text: `No saved login for ${pageHost} has the username ${JSON.stringify(wanted)}. The usernames saved there: ${all.map((login) => login.username).join(", ")}.` };
+      return { outcome: { ok: false, host: pageHost, text: `No saved login for ${pageHost} has the username ${JSON.stringify(wanted)}. The usernames saved there: ${all.map((login) => login.username).join(", ")}.` } };
     }
   }
   if (chosen.length > 1) {
-    return { ok: false, host: pageHost, text: `There are ${chosen.length} saved logins for ${pageHost}: ${chosen.map((login) => login.username).join(", ")}. Call fill_login again with the username to use.` };
+    return { outcome: { ok: false, host: pageHost, text: `There are ${chosen.length} saved logins for ${pageHost}: ${chosen.map((login) => login.username).join(", ")}. Call fill_login again with the username to use.` } };
   }
   const login = chosen[0]!;
   if (!loginOriginCheck(pageUrl, login).ok) {
-    return { ok: false, host: pageHost, text: `This page's host (${pageHost}) is not one the saved login for ${loginLabel(login)} fills on.` };
+    return { outcome: { ok: false, host: pageHost, text: `This page's host (${pageHost}) is not one the saved login for ${loginLabel(login)} fills on.` } };
   }
+  return { login, pageHost };
+}
+
+export async function fillLogin(input: FillLoginInput, deps: FillLoginDeps): Promise<FillLoginOutcome> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const page = await deps.engine(["get", "url"]);
+  const chosen = await chooseLogin(page && typeof page.url === "string" ? page.url : "", input);
+  if ("outcome" in chosen) return chosen.outcome;
+  const { login, pageHost } = chosen;
   return new LoginRun(login, { submit: input.submit !== false, host: pageHost, deps, now, sleep }).run();
 }
 
@@ -561,4 +600,78 @@ class LoginRun {
     if (state === "silent") return { kind: "done", changed: true, href: before, title: "", alert: "", human: false };
     return { kind: "done", changed: moved(state), href: state.href, title: state.title, alert: fresh(state.alert) ? state.alert : "", human: !moved(state) && state.human };
   }
+}
+
+/**
+ * fill_login on a LoginPage (Firefox on a Local VM): the same login choice as the built-in browser, then one step that
+ * types what the page shows. Submitting is left to the bot, which presses the sign-in button on that desktop.
+ */
+export async function fillLoginOn(input: FillLoginInput, page: LoginPage, deps: FillOnPageDeps): Promise<FillLoginOutcome> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const chosen = await chooseLogin((await page.url()) ?? "", input);
+  if ("outcome" in chosen) return chosen.outcome;
+  const { login, pageHost } = chosen;
+
+  const found = await page.find();
+  if (!found) return { ok: false, host: pageHost, text: "The browser closed or did not answer. Open the login page again, then call fill_login." };
+  const stillHere = (href: unknown) => typeof href === "string" && loginOriginCheck(href, login).ok;
+  if (!stillHere(found.href)) return { ok: false, host: pageHost, text: `The page moved away from ${pageHost} before anything was filled. Open its login page again, then call fill_login.` };
+  const codeBoxes = Number.isFinite(found.code) ? Math.min(Math.max(0, Math.floor(found.code)), 12) : 0;
+  if (found.username !== true && found.password !== true && codeBoxes === 0) {
+    await page.check().catch(() => null);
+    return { ok: false, host: pageHost, loginId: login.id, text: `No login fields found on ${pageHost}. Open its sign-in page (the one with the username, password or code box), then call fill_login again.` };
+  }
+
+  const secrets = await login.secrets();
+  let filled: FilledField[] = [];
+  let moved = false;
+  const fill = async (name: string, text: string, keep?: string): Promise<boolean> => {
+    const focus = await page.focus(name, keep);
+    if (!focus || !stillHere(focus.href)) { moved = true; return false; }
+    if (focus.same) return true;
+    if (!focus.focused) return false;
+    return page.type(name, text);
+  };
+  try {
+    if (found.username === true && login.username) {
+      if (await fill("username", login.username, login.username)) filled.push("username");
+    }
+    deps.remember(secrets.password, "password");
+    if (secrets.totp) deps.remember(secrets.totp.secret, "password");
+    if (!moved && found.password === true) {
+      if (await fill("password", secrets.password)) filled.push("password");
+    }
+    if (!moved && codeBoxes > 0 && secrets.totp) {
+      const left = secrets.totp.period * 1000 - (now() % (secrets.totp.period * 1000));
+      if (left < 3_000) await sleep(left + 250);
+      const code = totpCode(secrets.totp, now());
+      deps.remember(code, "code");
+      let typed = 0;
+      if (codeBoxes === 1) typed = (await fill("code0", code)) ? 1 : 0;
+      else for (let index = 0; index < codeBoxes && index < code.length && !moved; index++) if (await fill(`code${index}`, code[index]!)) typed++;
+      if (typed > 0) filled.push("code");
+    }
+  } finally {
+    const checked = await page.check().catch(() => null);
+    if (checked) filled = filled.filter((field) => field === "code" ? checked.code0 === true : checked[field] === true);
+  }
+  if (moved && !filled.length) {
+    return { ok: false, host: pageHost, loginId: login.id, text: `The page moved away from ${pageHost} before anything was filled. Open its login page again, then call fill_login.` };
+  }
+  const codeMissing = codeBoxes > 0 && !secrets.totp;
+  if (!filled.length) {
+    return { ok: false, host: pageHost, loginId: login.id, text: codeMissing
+      ? `This page on ${pageHost} asks for a one-time code, and the saved login has no 2FA key. Call request_sign_in so the person can enter the code.`
+      : `Could not fill the login fields on ${pageHost}: the page did not take the typing. Click the field once, then call fill_login again, or call request_sign_in.` };
+  }
+  const next = filled.includes("password") || filled.includes("code")
+    ? " Submit the form now (its sign-in button, or Enter), then check you are signed in."
+    : " Go on to the next step (such as Next or Continue), then call fill_login again for the password.";
+  const note = codeMissing ? " The page also asks for a one-time code, and the saved login has no 2FA key: if it still needs one after you submit, call request_sign_in." : "";
+  const who = login.source === "1password" ? " (from 1Password)" : "";
+  return {
+    ok: true, host: pageHost, loginId: login.id, filled,
+    text: scrubHeldSecrets(`Filled ${joinWords(filled.map((field) => FIELD_WORDS[field]))} for ${login.username || "the saved login"}${who} on ${pageHost}.${next}${note} You never see the password; do not read it back from the page.`),
+  };
 }

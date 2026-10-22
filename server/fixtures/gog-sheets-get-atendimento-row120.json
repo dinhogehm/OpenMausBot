@@ -1,0 +1,15 @@
+{
+  "range": "Atendimento!A120:K120",
+  "values": [
+    [
+      "",
+      "Matheus",
+      "Osvaldo",
+      "15/09/2026 01:18",
+      "Publicado",
+      "Validado",
+      "Na tela de \"abrir ticket pelo helpdesk\", em um atendimento, se você preencher\nalguns campo, e trocar de guia do navegador, depois voltar, ele apaga todos os campos preenchidos",
+      "Fix da #8802 publicado na PR #8844: campos e ticket criado preservados ao alternar guia/refetch, com 10 testes focados e 24 regressões aprovados. Entrega registra o recibo confirmado de 15/09/2026 01:18 (8ac65b483); validação funcional pós-deploy pendente, issue ainda aberta. https://github.com/dinhogehm/nuria-platform/issues/8802"
+    ]
+  ]
+}

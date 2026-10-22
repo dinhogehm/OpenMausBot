@@ -59,6 +59,7 @@ import { activeLocale, t } from "@/lib/i18n";
 import { createBotPatchQueue, type BotUpdatePatch } from "./bot-patch-queue";
 import { useChatErrorClear } from "./chat-error";
 import { openLiveEvents, publishLiveFrame, publishMissedFrames } from "@/lib/live-events";
+import type { NowServerStatus } from "../../shared/now-status";
 
 const MAX_ROUTINE_RUNS = 2_000;
 const ACTIVE_ROUTINE_RUN_STATUSES = new Set<RoutineRun["status"]>(["queued", "running", "waiting"]);
@@ -246,6 +247,8 @@ export interface Task {
   goalNeedsInputSince?: number;
   /** What it asks, in one sentence (the title may only say who). */
   goalNeedsInputAsk?: string;
+  /** The server asked the bot to register that ask as an item with steps (lot J2). */
+  goalNeedsInputStepsAskedAt?: number;
   /** Watches running for this conversation (wake_when). */
   watches?: WireWatch[];
   /** It had a standing watch and has had none for a while. */
@@ -254,6 +257,9 @@ export interface Task {
   ccAlerts?: WireCcAlert[];
   /** What waits on the person here (owner_pending). */
   ownerPending?: WireOwnerPending[];
+  /** The cards still open here while it waits on the person (an approval, a
+   * question), oldest first; an empty list: nothing left to answer. */
+  pendingRequests?: Message[];
   /** Its Claude Code sessions, CLI ones marked (they are not in the Claude app). */
   ccSessions?: WireCcSession[];
   threadId: string;
@@ -460,55 +466,10 @@ export function visibleMessages(bot: Pick<Bot, "messages" | "activeLeafId">): Me
   return path.reverse();
 }
 
-import type { BrowserEngineSummary, BrowserProfile, ConfigStatus, ManagedPolicySummary } from "./config-status";
+import { configStatusFromFrame, type ConfigStatusFrame, type BrowserEngineSummary, type BrowserProfile, type ConfigStatus, type ManagedPolicySummary } from "./config-status";
+export { configStatusFromFrame, type ConfigStatusFrame } from "./config-status";
 import { rememberConsumedQueueId, reconcileSnapshotQueues, replaceBotQueues } from "./storeQueues";
 export type { BrowserEngineSummary, BrowserProfile, ConfigStatus, ManagedPolicySummary };
-
-// A section left out here is wiped from state.config whenever a config frame lands.
-export type ConfigStatusFrame = Pick<
-  ConfigStatus,
-  "xai" | "mistral" | "cerebras" | "groq" | "meta" | "xResearch" | "treg" | "anthropic" | "openai" | "openrouter" | "openaiCompat" | "fleet" | "composio" | "box" | "vps" | "rooms" | "mcp" | "threads" | "automaticRecovery" | "cacheKeepWarm" | "localVm" | "opencodeGo" | "tts" | "decider" | "imageGen" | "live" | "profile" | "language" | "features" | "onboarding" | "browserEngine" | "browserProfiles" | "edition" | "budgets" | "billing" | "managedPolicy" | "cloudHome"
->;
-
-export function configStatusFromFrame(frame: ConfigStatusFrame): ConfigStatus {
-  return {
-    xai: frame.xai,
-    mistral: frame.mistral,
-    cerebras: frame.cerebras,
-    groq: frame.groq,
-    meta: frame.meta, xResearch: frame.xResearch, treg: frame.treg,
-    anthropic: frame.anthropic,
-    openai: frame.openai,
-    openrouter: frame.openrouter,
-    openaiCompat: frame.openaiCompat,
-    fleet: frame.fleet,
-    composio: frame.composio,
-    box: frame.box,
-    vps: frame.vps,
-    rooms: frame.rooms,
-    mcp: frame.mcp,
-    threads: frame.threads,
-    automaticRecovery: frame.automaticRecovery,
-    cacheKeepWarm: frame.cacheKeepWarm,
-    localVm: frame.localVm,
-    opencodeGo: frame.opencodeGo,
-    tts: frame.tts,
-    decider: frame.decider,
-    imageGen: frame.imageGen,
-    live: frame.live,
-    profile: frame.profile,
-    language: frame.language,
-    features: frame.features,
-    onboarding: frame.onboarding,
-    browserEngine: frame.browserEngine,
-    browserProfiles: frame.browserProfiles,
-    edition: frame.edition,
-    budgets: frame.budgets,
-    billing: frame.billing,
-    managedPolicy: frame.managedPolicy,
-    ...(frame.cloudHome ? { cloudHome: true } : {}),
-  };
-}
 
 export interface EngineInstall {
   platform?: "darwin" | "win32" | "linux";
@@ -632,7 +593,9 @@ export interface AppState {
   liveCallVersion: number;
   liveCallLookupSeq: number;
   selectedId: string;
-  activeView: "chat" | "team-map" | "routines" | "report" | "files";
+  activeView: "chat" | "team-map" | "routines" | "report" | "pipeline" | "files";
+  /** "Agora" (lot Y): the server's last word on the delivery line, pushed when it changes. */
+  nowStatus: NowServerStatus | null;
   /** Folders a finished move left on this computer, for Files to offer sharing. */
   filesSuggest: string[] | null;
   routines: Routine[];
@@ -713,6 +676,8 @@ export type Action =
   | { type: "showRoutines"; section?: "schedule" | "logs"; view?: "calendar" | "list"; botId?: string; routineId?: string; runStatus?: RoutineRunStatusFilter }
   | { type: "showTeamMap" }
   | { type: "showReport" }
+  | { type: "nowStatus"; status: NowServerStatus }
+  | { type: "showPipeline" }
   | { type: "showFiles"; suggest?: string[] }
   | { type: "showChat" }
   | { type: "routinesHydrated"; routines: Routine[]; runs: RoutineRun[] }
@@ -802,6 +767,8 @@ export type Action =
       always?: boolean;
       rememberCommand?: boolean;
       onError?: (message: string) => void;
+      /** The server took the answer ("Precisa de você" awaits it). Never sent. */
+      onDone?: () => void;
     }
   | { type: "newTask"; botId: string; projectId?: string; cwd?: string; onCreated?: () => void; onError?: (message: string) => void }
   | { type: "switchTask"; botId: string; threadId: string; whole?: true }
@@ -1072,6 +1039,19 @@ export function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         activeView: "report",
+        settingsOpen: false,
+        computerOpen: false,
+        inspectorOpen: false,
+        appSettingsOpen: false,
+        pluginsOpen: false,
+      };
+    case "nowStatus":
+      // an older answer (a slow fetch after a pushed frame) never replaces a newer one
+      return state.nowStatus && state.nowStatus.generatedAt > action.status.generatedAt ? state : { ...state, nowStatus: action.status };
+    case "showPipeline":
+      return {
+        ...state,
+        activeView: "pipeline",
         settingsOpen: false,
         computerOpen: false,
         inspectorOpen: false,
@@ -2009,6 +1989,7 @@ export const initialState: AppState = {
   liveCallLookupSeq: 0,
   selectedId: "",
   activeView: "chat",
+  nowStatus: null,
   routines: [],
   routineRuns: [],
   routinesLoadState: "loading",
@@ -2722,6 +2703,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               if (response?.settlementPending && typeof response.message === "string") {
                 showError(new Error(response.message));
               }
+              action.onDone?.();
             })
             .catch((error) => {
               // A failed settings flush stops the response so work never resumes under a stale approval level.
@@ -3321,6 +3303,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         case "bot.queued":
           rawDispatch({ type: "botQueues", queues: frame.queues });
           break;
+        case "now":
+          rawDispatch({ type: "nowStatus", status: frame.status });
+          break;
         case "message": {
           rawDispatch({ type: "messageAdded", threadId: frame.threadId, message: frame.message as Message });
           if (frame.message?.role === "user" && typeof frame.message.queueId === "string") {
@@ -3555,7 +3540,7 @@ export function formatTime(at: number) {
   const locale = activeLocale();
   let format = TIME_FORMAT_CACHE.get(locale);
   if (!format) {
-    format = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" });
+    format = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
     TIME_FORMAT_CACHE.set(locale, format);
   }
   return format.format(date);

@@ -1,8 +1,8 @@
 // cc_session from a bot's own turn: starts, steers, lists and stops its Claude Code sessions.
 import { chipText } from "../bot-autonomy.ts";
-import { CC_MAX_RUNNING, ccProcAlive, ccSessionLine, corridorForSend, hotfixWithReleaseScripts, repoCorridor, repoPackageManager, repoScripts, resumeLine, useRepoScripts } from "../cc-sessions.ts";
+import { CC_APP_FULL_REFUSAL, CC_MAX_RUNNING, ccProcAlive, ccSessionLine, corridorForSend, hotfixWithReleaseScripts, repoCorridor, repoPackageManager, repoScripts, resumeLine, useRepoScripts } from "../cc-sessions.ts";
 import { queueListing } from "../cc-start-queue.ts";
-import { readDesktopRecord, recordBlocked } from "../claude-desktop.ts";
+import { readDesktopRecord, recordBlocked, transcriptPath, transcriptTurnEnded } from "../claude-desktop.ts";
 import { ccSessionActive } from "../desktop-work.ts";
 import { sessionChips } from "../owner-chips.ts";
 import { archiveBlockers, resumeNeeded } from "../prod-delivery.ts";
@@ -11,6 +11,7 @@ import { PASS, type RouteContext, type RouteHandler } from "./table.ts";
 /** Built per request, inside the internal capability gate. */
 export function createInternalCcSessionRoutes(deps: {
   store: import("../store.ts").Store;
+  fullAccessForSource: (botId: string, threadId: string) => boolean;
   carrierPowerCheck: (text: string) => { refusal: string } | { note: string } | null;
   ccChip: (session: import("../cc-sessions.ts").CcSession, text: string, ok?: boolean) => void;
   ccChipShort: (session: import("../cc-sessions.ts").CcSession, text: string, ok?: boolean, skip?: string | null) => void;
@@ -32,7 +33,7 @@ export function createInternalCcSessionRoutes(deps: {
   readInternalBody: () => ReturnType<RouteContext["readBody"]>;
   requireActiveInternalCapability: () => void;
 }): RouteHandler {
-  const { store, carrierPowerCheck, ccChip, ccChipShort, ccReport, ccLedger, ccProcesses, ccSlotFreeForWork, ccStartQueue, execCc, noteClaimedPrs, openThreadOf, releaseHold, reportArchivedWorktrees, resumeOf, runCcTurn, startCcSession, internalSender, internalCapability, readInternalBody, requireActiveInternalCapability } = deps;
+  const { store, fullAccessForSource, carrierPowerCheck, ccChip, ccChipShort, ccReport, ccLedger, ccProcesses, ccSlotFreeForWork, ccStartQueue, execCc, noteClaimedPrs, openThreadOf, releaseHold, reportArchivedWorktrees, resumeOf, runCcTurn, startCcSession, internalSender, internalCapability, readInternalBody, requireActiveInternalCapability } = deps;
   return async ({ res, path, method, json }) => {
     if (!(method === "POST" && path === "/api/internal/cc-session")) return PASS;
     const body = await readInternalBody();
@@ -97,6 +98,7 @@ export function createInternalCcSessionRoutes(deps: {
     const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
     if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
     if (action === "send") {
+      if (session.surface === "app" && fullAccessForSource(bot.id, threadId)) return json(res, 409, { error: CC_APP_FULL_REFUSAL });
       const scripts = useRepoScripts(typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "", repoPackageManager(session.repo), repoScripts(session.repo));
       if (!scripts.text) return json(res, 400, { error: "message é obrigatório" });
       if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });
@@ -207,6 +209,24 @@ export function createInternalCcSessionRoutes(deps: {
     }
     if (session.surface === "app" && action === "archive") {
       const desktop = session.desktop!;
+      if (fullAccessForSource(bot.id, threadId)) {
+        const pending = desktop.pending;
+        const neverOpened = !desktop.localId && desktop.sentAt === undefined && !desktop.sent
+          && pending?.kind === "create" && pending.triedAt === undefined && pending.attempts === 0 && session.turns === 0;
+        const record = desktop.localId ? readDesktopRecord(desktop.localId) : null;
+        const transcript = record ? transcriptPath(record) : null;
+        const uncertainSend = Boolean(desktop.sent || ((pending?.kind === "send" || pending?.kind === "create") && (pending.triedAt !== undefined || pending.attempts > 0)));
+        const ended = (session.status === "idle" || session.status === "stopped" || session.status === "archived")
+          && !uncertainSend && record && (record.isArchived || (transcript && transcriptTurnEnded(transcript)));
+        if (!neverOpened && !ended) return json(res, 409, { error: "Não arquivei: o término da sessão no app Claude ainda não está confirmado. Nenhum app foi aberto e nenhuma execução foi duplicada." });
+        const held = [...session.queued, ...(pending?.kind === "send" || pending?.kind === "create" ? [{ text: pending.text, at: pending.since }] : [])];
+        if (held.length) session.heldQueue = [...(session.heldQueue ?? []), ...held];
+        delete desktop.pending;
+        delete desktop.archiveWhenResolved;
+        ccLedger.setStatus(session, "archived");
+        ccChip(session, `registro arquivado somente no OpenMausBot; app e worktree preservados${held.length ? `; ${held.length} mensagem(ns) não enviada(s) preservada(s) no histórico` : ""}`);
+        return json(res, 200, { message: `Registro arquivado somente no OpenMausBot; o app Claude não foi aberto nem alterado e a worktree foi preservada. Uma nova sessão desta tarefa pode ser iniciada no terminal.${archiveNote}` });
+      }
       if (desktop.pending?.kind === "archive" || desktop.archiveWhenResolved) {
         return json(res, 200, { message: "Já está na fila para ser arquivada no app Claude." });
       }

@@ -107,8 +107,8 @@ export function SignInRequestCard({
     if (card.place === "local") setExplained(true);
     else dispatch({ type: "openSignIn", botId, messageId: message.id, url: card.url, site: card.site, place: card.place });
   };
-  // fill_login reaches only the built-in browser (and My Chrome); a desktop paired to another host relays no passwords.
-  const canSave = card.place === "browser" && window.ogb?.remoteClient?.active !== true;
+  // fill_login reaches the built-in browser (and My Chrome) and Firefox on a Local VM; a desktop paired to another host relays no passwords.
+  const canSave = (card.place === "browser" || card.place === "vm") && window.ogb?.remoteClient?.active !== true;
   let pageHost = card.site;
   try { pageHost = new URL(card.url).hostname; } catch {}
   return (

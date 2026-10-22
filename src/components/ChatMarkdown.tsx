@@ -279,11 +279,11 @@ export function CodeBlock({ code, lang, initialWrap = false }: CodeBlockProps) {
   // React compares dangerouslySetInnerHTML by identity: a fresh object each render rebuilds the highlighted DOM.
   const markup = useMemo(() => (html ? { __html: html } : null), [html]);
   const { state: copied, copy } = useCopyFeedback(code);
-  const [wrapLines, setWrapLines] = useState(() => initialWrap || (countLines(code) === 1 && code.length > WRAP_ONE_LINE_OVER));
+  const startWrapped = initialWrap || (countLines(code) === 1 && code.length > WRAP_ONE_LINE_OVER);
+  const [wrapLines, setWrapLines] = useState(startWrapped);
   useEffect(() => {
-    // a single long line (a command to copy) starts wrapped: never cut at the bubble's edge
-    setWrapLines(initialWrap || (countLines(code) === 1 && code.length > WRAP_ONE_LINE_OVER));
-  }, [initialWrap]);
+    setWrapLines(startWrapped);
+  }, [startWrapped]);
 
   useEffect(() => {
     if (!highlightable) return setHtml(null);

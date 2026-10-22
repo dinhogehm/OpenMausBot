@@ -84,12 +84,19 @@ describe("transcriptLookups", () => {
   });
 });
 
+// This fork: a clock time is in the app's language, the same form as the
+// message stamps beside it, not the browser's own locale.
 describe("formatTime", () => {
-  it("says what toLocaleTimeString said, in the browser's own locale", () => {
-    const options = { hour: "numeric", minute: "2-digit" } as const;
-    for (const at of [0, 1_700_000_000_000, Date.UTC(2026, 2, 8, 6, 59), Date.UTC(2026, 9, 3, 23, 30), Date.now()]) {
-      expect(formatTime(at)).toBe(new Date(at).toLocaleTimeString([], options));
+  afterEach(() => setLocale("en"));
+  it("says what toLocaleTimeString says in the app's language", () => {
+    const options = { hour: "2-digit", minute: "2-digit" } as const;
+    for (const locale of ["en", "pt-br"]) {
+      setLocale(locale);
+      for (const at of [0, 1_700_000_000_000, Date.UTC(2026, 2, 8, 6, 59), Date.UTC(2026, 9, 3, 23, 30), Date.now()]) {
+        expect(formatTime(at)).toBe(new Date(at).toLocaleTimeString(locale === "pt-br" ? "pt-BR" : "en", options));
+      }
     }
+    expect(formatTime(Number.NaN)).toBe("Invalid Date");
   });
 });
 

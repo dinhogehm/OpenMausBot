@@ -145,7 +145,11 @@ describe("SignInRequestCard while it waits", () => {
     expect(saveLoginFromCard).toHaveBeenLastCalledWith({ botId: "pepper", threadId: "thread-1", messageId: "card-1" }, fields, "login.microsoftonline.com");
   });
 
-  it.each(["vm", "cloud", "local"])("does not offer to save a login on %s, where fill_login cannot reach yet", (place) => {
+  it("offers to save a login on a Local VM, where fill_login types into Firefox", () => {
+    expect(view({ place: "vm" })).toContain("Save a login");
+  });
+
+  it.each(["cloud", "local"])("does not offer to save a login on %s, where fill_login cannot reach yet", (place) => {
     expect(view({ place })).not.toContain("Save a login");
   });
 

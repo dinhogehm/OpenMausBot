@@ -75,11 +75,11 @@ export function DesktopWorkspaceSwitcher({ compact = false, inline = false, pill
   const Icon = current?.local === false || (cloudHome && !current) ? Cloud : Laptop;
   const shown = cloudHome ? `${name} · ${onLine}` : name;
   const title = current?.origin ? `${shown} · ${current.origin}` : shown;
-  const label = t("sidebar.switchServer", { name: shown });
+  const label = t("workspaceSwitcher.aria", { name: shown });
   const openMenu = () => {
     if (open) return;
     setError(""); setOpen(true);
-    void openServerMenu(bridge, { howTo, onClosed: onMenuClosed }).catch(() => setError(t("sidebar.switchServerError")))
+    void openServerMenu(bridge, { howTo, onClosed: onMenuClosed }).catch(() => setError(t("workspaceSwitcher.menuError")))
       .finally(() => setOpen(false));
   };
   if (rail) return <div data-workspace-switcher="rail" className="relative">

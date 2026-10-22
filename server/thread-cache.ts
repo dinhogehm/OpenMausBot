@@ -4,6 +4,8 @@ import type { Message } from "./store.ts";
 export interface ThreadState {
   messages: Message[];
   activeLeafId: string | null;
+  rev?: number;
+  pathMemo?: { rev: number; length: number; leaf: string | null; path: Message[] };
 }
 
 /** A conversation nobody read or wrote for this long gives its parsed transcript back; the next read reloads it from messages.db. */

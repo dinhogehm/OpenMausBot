@@ -1,9 +1,10 @@
 // An item's history and its decisions, as the resolver shows them.
 import { quietButton, sectionHeading, strongButton } from "./needsYouStyles";
 import type { NeedsYouResolverViewProps } from "./NeedsYouResolver";
-import { Check, CircleAlert, Clock, Loader2, Send, Sparkles } from "lucide-react";
+import { Check, CircleAlert, Clock, Loader2, Repeat, Send, Sparkles } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
 import { answerNotDelivered, answerTime, chosenOption, decisionsInOrder, needsYouKey, negativeDecision, waitingAge, type NeedsYouItem } from "@/lib/needs-you";
 
 /** What the person answered, oldest first, and whether it reached the bot (J18). */
@@ -24,6 +25,15 @@ export function History({ item, now }: { item: NeedsYouItem; now: number }) {
           // sent: a check, said to a screen reader and on hover — not repeated in every line (r2 N8);
           // waiting its turn: "na fila" (r2 N9); not sent: said in full
           const sent = t("needsYou.history.delivered", { name: item.botName });
+          if (!entry.delivered && !entry.queued && entry.error === CHOICE_REPLACED) {
+            const next = item.history!.slice(n + 1).find((each) => each.kind === "option");
+            return (
+              <li key={`${entry.at}-${n}`} data-history-state="replaced" className="flex items-start gap-2 text-[13px] leading-relaxed text-ink-secondary">
+                <Repeat size={14} aria-hidden="true" className="mt-0.5 shrink-0" />
+                <span className="min-w-0 break-words">{what}{" — "}{next?.label ? t("needsYou.history.replacedBy", { label: next.label }) : t("needsYou.history.replaced")}</span>
+              </li>
+            );
+          }
           return (
             <li key={`${entry.at}-${n}`} data-history-state={entry.delivered ? "delivered" : entry.queued ? "queued" : "failed"} title={entry.delivered ? sent : undefined} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink">
               {entry.delivered

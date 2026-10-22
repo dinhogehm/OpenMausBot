@@ -18,7 +18,7 @@ import {
 } from "./cloud-backend.ts";
 import { createSkillReview } from "./skill-review.ts";
 import { canAccessTeam, coordinatorSupervises } from "./peer-roster.ts";
-import { type LocalVmTarget } from "./container-computer.ts";
+import { containerRuntimeStatus, type LocalVmTarget } from "./container-computer.ts";
 import { loadConfig, builtInBrowserEnabled, stripWorkspaceCredentialEnv, PROVIDER_CREDENTIAL_ENV, DATA_DIR } from "./config.ts";
 import { ComputerControl } from "./computer-control.ts";
 import { augmentedPath } from "./env-path.ts";
@@ -33,11 +33,12 @@ import { previousSkillVersion, skillCardCopy, skillRequestReferences } from "./s
 import { skillReferencesSha256 } from "./skill-storage.ts";
 import { createSkillsLibraryHost } from "./host/skills-library.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
-import { savedLoginsPrompt } from "./system-prompt.ts";
+import { type ComputerPromptKind, savedLoginsPrompt } from "./system-prompt.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { BROWSER_CONTROL_REFUSAL, browserRuntimeEnv } from "./browser-runtime.ts";
 import { HeldSecrets, LoginStore } from "./login-store.ts";
-import { fillLogin } from "./login-fill.ts";
+import { fillLogin, fillLoginOn } from "./login-fill.ts";
+import { cuaMcpInput, firefoxProbe, vmLoginPage } from "./vm-firefox-login.ts";
 import { BotLogins, cardLoginPlace, cardSignInElsewhere, observeSignInPage, type ObservedPage } from "./bot-logins.ts";
 import { stepContext } from "./browser-steps.ts";
 import { parseLoginFields, parseTotpField } from "./routes/logins.ts";
@@ -92,6 +93,8 @@ export interface ConnectorRuntimeDeps {
   claimTurnResource: (owner: TurnOwner, resource: string) => boolean;
   computerCallGate: (internalCapability: InternalCapability, signal?: AbortSignal) => Promise<ControlState>;
   computerControl: ComputerControl;
+  botComputerControlSnapshot: (botId: string) => { held: boolean };
+  touchLocalVm: (target: LocalVmTarget) => void;
   connectionUpdateText: (labels: readonly string[]) => string;
   credentialUpdateText: (label: string, outcome: "provided" | "dismissed") => string;
   fullAccessForSource: (botId: string, threadId: string) => boolean;
@@ -111,7 +114,7 @@ export interface ConnectorRuntimeDeps {
 
 /** Built once, where server/index.ts used to declare all of this inline. */
 export function createConnectorRuntime(deps: ConnectorRuntimeDeps) {
-  const { roomSetupPending, browserLive, currentBrowserSession, loginInput, browserSystemPrompt, currentBrowserSpec, browserRuntime, answerCardNode, autoVmClaims, botComputerControlKey, botForThread, botLogins, cfg, claimTurnResource, computerCallGate, computerControl, connectionUpdateText, credentialUpdateText, fullAccessForSource, heldSecrets, internalCapabilityIsActive, liveTurnByThread, localVmThreadTargets, logins, notify, phoneSecrets, skillReview, skillsHost, store, teamComputerTurns, turnPlaces } = deps;
+  const { roomSetupPending, browserLive, currentBrowserSession, loginInput, browserSystemPrompt, currentBrowserSpec, browserRuntime, answerCardNode, autoVmClaims, botComputerControlKey, botForThread, botLogins, cfg, claimTurnResource, computerCallGate, computerControl, botComputerControlSnapshot, touchLocalVm, connectionUpdateText, credentialUpdateText, fullAccessForSource, heldSecrets, internalCapabilityIsActive, liveTurnByThread, localVmThreadTargets, logins, notify, phoneSecrets, skillReview, skillsHost, store, teamComputerTurns, turnPlaces } = deps;
   const CONNECTOR_SLUG = /^[a-z0-9][a-z0-9_-]{0,80}$/;
 
   /** The name the person gave an attachment, from the newest of this thread's messages that carries its exact tag. */
@@ -840,15 +843,58 @@ export function createConnectorRuntime(deps: ConnectorRuntimeDeps) {
     return target && { ...target, env: browserRuntimeEnv({ ...target.spec.env, AGENT_BROWSER_SESSION: target.session }) };
   }
 
+  function vmLoginsPromptFor(botId: string, kind: ComputerPromptKind | null, agentsMounted: boolean, browserShown: boolean): string {
+    if (!agentsMounted || browserShown || (kind !== "vm-private" && kind !== "vm-shared")) return "";
+    return savedLoginsPrompt(botLogins.sitesFor(botId));
+  }
+
+  async function fillLoginOnVm(bot: BotRecord, capability: InternalCapability, rawUsername: unknown): Promise<{ ok: boolean; text: string }> {
+    let vm: LocalVmTarget | undefined;
+    try {
+      vm = await attachmentVmForTurn(capability);
+    } catch (error) {
+      return { ok: false, text: `${error instanceof Error ? error.message : "The Local VM is not available to this turn."} Call request_sign_in if it keeps failing.` };
+    }
+    if (!vm) return { ok: false, text: "You have no Local VM desktop in this turn, so fill_login has nothing to fill. Call request_sign_in instead." };
+    const runtime = (await containerRuntimeStatus()).runtime;
+    if (!runtime) return { ok: false, text: "The Local VM's container runtime is not available. Call request_sign_in instead." };
+    const target = vm;
+    const stillAllowed = () => internalCapabilityIsActive({ ...capability, localVmTarget: target }) && !botComputerControlSnapshot(bot.id).held;
+    if (!stillAllowed()) return { ok: false, text: "The Local VM is no longer available to this turn, or the person is using it. Call request_sign_in instead." };
+    const username = typeof rawUsername === "string" ? rawUsername.slice(0, 512) : undefined;
+    const page = vmLoginPage({ probe: firefoxProbe(runtime, target), input: cuaMcpInput(runtime, target), stillAllowed });
+    try {
+      const outcome = await fillLoginOn({
+        username,
+        candidates: (host) => botLogins.candidates(bot.id, host),
+        available: async () => botLogins.sitesFor(bot.id),
+      }, page, { remember: (value, kind) => heldSecrets.remember(value, kind) });
+      touchLocalVm(target);
+      if (outcome.ok && outcome.loginId) botLogins.markUsed(outcome.loginId);
+      const problem = page.problem();
+      if (problem) {
+        const done = outcome.filled?.length ? ` Already filled: ${outcome.filled.join(" and ")}.` : "";
+        return { ok: false, text: redactSecretsInText(`${problem}${done}`) };
+      }
+      return { ok: outcome.ok, text: outcome.text };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, text: `Could not fill the login on the Local VM: ${redactSecretsInText(reason)} Call request_sign_in if it keeps failing.` };
+    } finally {
+      page.close();
+    }
+  }
+
   const FILL_LOGIN_ELSEWHERE: Record<Surface, string> = { browser: "your built-in browser", local: "this computer", vm: "the Local VM", cloud: "the cloud computer" };
 
   /** Filled by the server as one browser action; the answer is a status in words, never a value. */
   async function fillLoginForTurn(bot: BotRecord, capability: InternalCapability, rawUsername: unknown, rawSubmit: unknown): Promise<{ ok: boolean; text: string }> {
     const threadId = capability.threadId;
     const place = signInPlace(bot, threadId);
+    if (place === "vm") return fillLoginOnVm(bot, capability, rawUsername);
     if (place !== "browser") {
       return { ok: false, text: place
-        ? `fill_login works in the built-in browser and My Chrome, not on ${FILL_LOGIN_ELSEWHERE[place]} yet. Call request_sign_in so the person signs in there.`
+        ? `fill_login works in the built-in browser, My Chrome and Firefox on a Local VM, not on ${FILL_LOGIN_ELSEWHERE[place]} yet. Call request_sign_in so the person signs in there.`
         : "fill_login works in the built-in browser, and this conversation has none. Call request_sign_in instead." };
     }
     const current = botForThread(bot.id, threadId) ?? bot;
@@ -932,5 +978,5 @@ export function createConnectorRuntime(deps: ConnectorRuntimeDeps) {
     const s = (err as { stderr?: unknown }).stderr;
     return typeof s === "string" ? s : Buffer.isBuffer(s) ? s.toString("utf8") : "";
   }
-  return { CONNECTOR_SLUG, attachmentNameInThread, messageFileRootsForThread, attachmentVmForTurn, connectorThread, lastHumanRoomMessageAt, roomPostEligibility, proposalPersistence, skillProposalPersistence, stagedSkillListing, stagedSkillCleanupsForThread, rejectDeletedThreadSkillStages, applyOwnStagedSkill, appendSkillRequestCard, resolveSkillRequest, sendSkillResolution, connectorMessage, connectorCards, maybeResumeConnectors, phoneSecretSubmissions, claimPhoneSecretBotDeletion, phoneSecretSubmissionKey, credentialDesktopHandoff, secretMessage, currentSecretState, resumeSecretCard, provideSecretFromPhone, recordTurnPlace, requestSignIn, settleSignIn, signInSaveTarget, saveLoginFromCard, browserPromptFor, fillLoginForTurn, testCliBinary, cliProbeEnvironment };
+  return { CONNECTOR_SLUG, attachmentNameInThread, messageFileRootsForThread, attachmentVmForTurn, connectorThread, lastHumanRoomMessageAt, roomPostEligibility, proposalPersistence, skillProposalPersistence, stagedSkillListing, stagedSkillCleanupsForThread, rejectDeletedThreadSkillStages, applyOwnStagedSkill, appendSkillRequestCard, resolveSkillRequest, sendSkillResolution, connectorMessage, connectorCards, maybeResumeConnectors, phoneSecretSubmissions, claimPhoneSecretBotDeletion, phoneSecretSubmissionKey, credentialDesktopHandoff, secretMessage, currentSecretState, resumeSecretCard, provideSecretFromPhone, recordTurnPlace, requestSignIn, settleSignIn, signInSaveTarget, saveLoginFromCard, browserPromptFor, vmLoginsPromptFor, fillLoginForTurn, testCliBinary, cliProbeEnvironment };
 }

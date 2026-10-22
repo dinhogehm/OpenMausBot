@@ -8,14 +8,14 @@ explicit grant: Full Access, a saved exact command or MCP read-shaped tool, or
 the narrow built-in web-search allowance under Approve for me. In Full Access,
 OMB also applies its own configuration tools without another approval.
 
-Every bot and conversation starts at **Full access**, the default T3 Code uses
-too: each engine runs in its own most permissive mode, and a real question or
-a missing credential still reaches you. That covers a bot made in New bot,
-through the API or by onboarding, each new thread, a Chief's new teammates,
-and bots imported from a team backup, a shared team file or the organization
-library. A level a person picks stays until someone changes it. On a hosted
-company workspace the default stays Ask, because Full access there comes only
-from the operator's dedicated policy.
+Every bot and conversation starts at **Ask** until a person picks a level
+(this fork; upstream starts at Full access, as T3 Code does). That covers a
+bot made in New bot, through the API or by onboarding, each new thread, a
+Chief's new teammates, and bots imported from a team backup, a shared team
+file or the organization library. No setting or policy makes the no-level
+default Full or Custom: Full is only ever a level someone saved. A level a
+person picks stays until someone changes it. On a hosted company workspace
+Full access comes only from the operator's dedicated policy.
 
 | Level | Behavior |
 | --- | --- |
@@ -159,12 +159,11 @@ stop the prompts.
 
 ### Changing a bot's engine
 
-A bot at **Full access** keeps it when you switch it to another engine: every
-engine runs Full access, so there is no reset to Ask and no confirmation. The
-bot's threads that follow its model keep their level too. **Custom** rules
-belong to Codex, so a Custom bot goes back to Ask before it changes engine.
-Switching to an engine that cannot run the bot's level (for example
-Auto-accept edits on Codex) still asks to choose Ask first.
+In this fork neither **Full access** nor **Custom** crosses engines: a bot at
+either level goes back to Ask before it changes engine (upstream lets Full
+travel), and so do the threads that follow its model. Choose the level again
+on the new engine. Switching to an engine that cannot run the bot's level
+(for example Auto-accept edits on Codex) also asks to choose Ask first.
 
 ### Antigravity: Ask, Edits, or Auto (full access)
 

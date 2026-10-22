@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, sep } from "node:path";
 
 import type { CommandAllowlistCandidate, CommandAllowlistRule } from "../shared/command-allowlist.ts";
+import { commandCoveredByPatterns, commandPatterns, isCommandPattern } from "../shared/command-pattern.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { redactSecretsInText } from "./redact.ts";
 
@@ -131,10 +132,24 @@ export class CommandAllowlistStore {
     if (next.length !== this.rules.length) this.save(next);
   }
 
-  matches(botId: string, value: CommandAllowlistCandidate): boolean {
+  matches(botId: string, value: CommandAllowlistCandidate, opts: { implicitReadOnly?: boolean } = {}): boolean {
     if (this.unreadable || typeof botId !== "string" || !BOT_ID.test(botId)) return false;
     const candidate = commandAllowlistCandidate(value);
-    return candidate !== null && this.rules.some((rule) => rule.botId === botId && sameScope(rule, candidate));
+    if (candidate === null) return false;
+    const scoped = this.rules.filter((rule) => rule.botId === botId && rule.cwd === candidate.cwd && rule.providerInstanceId === candidate.providerInstanceId);
+    // Exact strings (every rule saved before patterns existed) keep working as they did.
+    if (scoped.some((rule) => rule.command === candidate.command)) return true;
+    // Program patterns (`cat *`, `git status *`) and the implicit read-only set, part by part.
+    return commandCoveredByPatterns(candidate.command, scoped.map((rule) => rule.command).filter(isCommandPattern), opts);
+  }
+
+  /** "Always allow this type of command": save one pattern per part (shared commandPatterns); refuses when any part may write. */
+  remember(botId: string, value: CommandAllowlistCandidate): CommandAllowlistRule[] {
+    const candidate = validateCommandAllowlistCandidate(value);
+    const patterns = commandPatterns(candidate.command);
+    // the card never offers this for a command with a part that may write or delete; a stale request is refused too
+    if (!patterns) throw invalid("This command has a part that can change or delete something, so it cannot be always allowed. Allow it once instead.");
+    return patterns.map((command) => this.add(botId, { ...candidate, command }));
   }
 
   private assertWritable(): void {

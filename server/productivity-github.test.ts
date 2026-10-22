@@ -4,7 +4,7 @@
 // old deployments and paginated compares. Only reads are ever asked for.
 import { describe, expect, it } from "vitest";
 import {
-  emptyGhCache, explicitReferences, GH_CACHE_VERSION, isCarrier, issuePriority, issueType, migrateGhCache, parseGate, parsePr, RATE_FLOOR, RateLimited,
+  emptyGhCache, explicitReferences, ghEnv, ghErrorMessage, GH_CACHE_VERSION, isCarrier, issuePriority, issueType, migrateGhCache, parseGate, parsePr, RATE_FLOOR, RateLimited,
   readCompare, readDeployments, readTagSha, syncCompares, syncGithub, type GhRunner, type SyncProgress,
 } from "./productivity-github.ts";
 
@@ -78,6 +78,12 @@ describe("labels and links", () => {
     const node = { number: 100, title: "t", body: "Corrige o fluxo.\n\nCloses #8986", createdAt: at(1), updatedAt: at(2), mergedAt: at(2), state: "MERGED", baseRefName: "main", headRefName: "perf/8750-epico", mergeCommit: { oid: "m", message: "fix: x (#100)\n\nRefs #8751" }, closingIssuesReferences: { nodes: [] }, labels: { nodes: [] } };
     // the epic number in the branch (#N) is not a reference
     expect(parsePr(node)!.refs).toEqual([8986, 8751]);
+    // of those, what it says it closes: not the "Refs" (lot Z: a partial delivery is not a cycle to close)
+    expect(parsePr(node)!.fixes).toEqual([8986]);
+    expect(explicitReferences("Refs #9074. Fecha #9185; corrige #3", { closing: true })).toEqual([9185, 3]);
+    // a PR that says it ships a phase is marked; one that does not, is not
+    expect(parsePr({ ...node, title: "feat(email): threading de ticket independente do From — Fase 0 do #9071" })!.partial).toBe(true);
+    expect(parsePr(node)!.partial).toBeUndefined();
   });
 
   it("reads the merge gate on the PR head", () => {
@@ -241,5 +247,19 @@ describe("REST reads", () => {
     expect(await syncCompares({ gh, cache, pairs: [{ base: "a", head: "b" }] })).toBe(1);
     expect(cache.compares["a...b"]).toEqual(["m1"]);
     expect(await syncCompares({ gh, cache, pairs: [{ base: "a", head: "b" }] })).toBe(0);
+  });
+});
+
+describe("running gh (report-fixes: \"spawn gh ENOENT\" from an app opened in the Finder)", () => {
+  it("runs gh on the augmented PATH, not the bare one the Finder gives", () => {
+    const env = ghEnv({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: "/Users/x" }, "/opt/homebrew/bin:/usr/bin:/bin");
+    expect(env).toMatchObject({ PATH: "/opt/homebrew/bin:/usr/bin:/bin", HOME: "/Users/x", GH_PROMPT_DISABLED: "1", NO_COLOR: "1" });
+  });
+
+  it("says gh is missing in words, and keeps gh's own words otherwise", () => {
+    const missing = Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
+    expect(ghErrorMessage(missing, "")).toMatch(/GitHub CLI \(gh\) not found/);
+    expect(ghErrorMessage(Object.assign(new Error("Command failed"), { code: 1 }), "HTTP 401: Bad credentials\n")).toBe("HTTP 401: Bad credentials");
+    expect(ghErrorMessage(new Error("Command failed: gh api"), "")).toBe("Command failed: gh api");
   });
 });

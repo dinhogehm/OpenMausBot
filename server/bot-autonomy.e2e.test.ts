@@ -1,8 +1,15 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
-import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
+import { launchVerificationServer, runControlOmb, verificationServerArgs, verificationServerEnvironment } from "../scripts/control-omb.ts";
 import { request } from "../scripts/mcp-server.ts";
+import { INTERRUPTED_PREFIX } from "./bot-autonomy.ts";
+import { waitForExit } from "./testing/cleanup.ts";
+import { ownTurnText } from "./testing/room-handoff-agent.ts";
 
 /** The system's git, not a package manager's bin: the fixture's PATH is
  * sealed off this machine's CLIs, and watches and sessions run git. */
@@ -80,7 +87,8 @@ it("tells the bot when a promise passes its deadline unkept, and never for a kep
 it("carries what one conversation decided, and the owner's orders, into the bot's other conversations", () => fixture(async f => {
   f.save({ turns: [
     { reply: "Mergeei a PR #9313 pelo gate. Aguardo o carrier." },
-    { expectSystemIncludes: ["Estado das suas outras conversas", "Mergeei a PR #9313 pelo gate.", "Ordens do dono em vigor", "Não rode ci:local enquanto houver release"], reply: "Entendido, sigo a ordem." },
+    // the shared state is volatile: it rides the launch message, not the system prompt
+    { expectContextIncludes: ["Estado das suas outras conversas", "Mergeei a PR #9313 pelo gate.", "Ordens do dono em vigor", "Não rode ci:local enquanto houver release"], reply: "Entendido, sigo a ordem." },
   ] });
   await f.send("Não rode ci:local enquanto houver release. Faça o merge da #9313.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
@@ -93,7 +101,7 @@ it("carries what one conversation decided, and the owner's orders, into the bot'
 it("speaks to the owner in the one conversation they named, and shows there what was said to them elsewhere", () => fixture(async f => {
   f.save({ turns: [
     { reply: "Combinado: falo com você só por aqui." },
-    { expectSystemIncludes: ["Conversa com o dono:", "Não fale com o dono aqui"], reply: "Preciso de uma decisão sua: publico o carrier agora?" },
+    { expectContextIncludes: ["Conversa com o dono:", "Não fale com o dono aqui"], reply: "Preciso de uma decisão sua: publico o carrier agora?" },
   ] });
   await f.send("Use só esta conversa para falar comigo.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
@@ -118,18 +126,30 @@ it("says so when a new goal replaces one still open in the conversation", () => 
 
 it("keeps giving a goal turns until the bot ends it, then goes quiet", () => fixture(async f => {
   f.save({ turns: [
-    { steps: [{ tool: "goal_start", arguments: { goal: "SHIP_9195 to production", max_turns: 5 } }], reply: "Goal accepted" },
-    { expectContextIncludes: ["Goal mode — turn 1 of 5", "SHIP_9195 to production"], reply: "Merged the PR" },
-    { expectContextIncludes: ["Goal mode — turn 2 of 5"], steps: [{ tool: "goal_end", arguments: { status: "completed", detail: "deployed and verified" } }], reply: "Shipped" },
+    { steps: [{ tool: "goal_start", arguments: { goal: "SHIP_9195", max_turns: 5 } }], reply: "Goal accepted" },
+    { expectContextIncludes: ["Goal mode — turn 1 of 5", "SHIP_9195"], reply: "Merged the PR" },
+    { expectContextIncludes: ["Goal mode — turn 2 of 5"], steps: [{ tool: "goal_end", arguments: { status: "completed", detail: "shipped and verified", proof: "PR #9400 mergeada (61a5d68cd)" } }], reply: "Shipped" },
   ] });
-  await f.send("Ship 9195 and don't stop until it is in production.");
+  await f.send("Ship 9195 and don't stop until it is done.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(3);
   expect(toolResult(f.turns()[0], "goal_start")).toContain("Modo objetivo ligado");
-  await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Objetivo concluído após 2 turnos — deployed and verified"), { timeout: 10_000 }).toBe(true);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Objetivo concluído após 2 turnos — shipped and verified — prova: PR #9400 mergeada (61a5d68cd)"), { timeout: 10_000 }).toBe(true);
   // An ended goal starts nothing more (a fourth turn would have no plan and fail).
   await new Promise(resolve => setTimeout(resolve, 1_000));
   expect(f.turns()).toHaveLength(3);
   expect(f.ledger().goals[0]).toMatchObject({ status: "completed", turnCount: 2 });
+}), 60_000);
+
+it("refuses to close a goal about production on a PR number alone", () => fixture(async f => {
+  // 12/10: a goal closed "em produção" 8 min before the P1 #9512, with only a detail
+  f.save({ turns: [
+    { steps: [{ tool: "goal_start", arguments: { goal: "Levar a PR #9400 até produção", max_turns: 1 } }], reply: "Goal accepted" },
+    { expectContextIncludes: ["Goal mode — turn 1 of 1"], steps: [{ tool: "goal_end", arguments: { status: "completed", detail: "em produção", proof: "PR #9400 mergeada" } }], reply: "Done" },
+  ] });
+  await f.send("Leve a #9400 até produção.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(toolResult(f.turns()[1], "goal_end")).toContain("a meta fala em produção");
+  await expect.poll(() => f.ledger().goals[0]?.status, { timeout: 10_000 }).not.toBe("completed");
 }), 60_000);
 
 it("stops a goal at its turn limit", () => fixture(async f => {
@@ -144,10 +164,10 @@ it("stops a goal at its turn limit", () => fixture(async f => {
 
 it("pauses for the person on needs_input and resumes on their answer", () => fixture(async f => {
   f.save({ turns: [
-    { steps: [{ tool: "goal_start", arguments: { goal: "DEPLOY", max_turns: 5 } }], reply: "Goal accepted" },
+    { steps: [{ tool: "goal_start", arguments: { goal: "PICK_ENV", max_turns: 5 } }], reply: "Goal accepted" },
     { steps: [{ tool: "goal_end", arguments: { status: "needs_input", detail: "staging or production?" } }], reply: "Staging or production?" },
     { expectContextIncludes: ["production please"], reply: "Deploying to production" },
-    { expectContextIncludes: ["Goal mode — turn 2 of 5"], steps: [{ tool: "goal_end", arguments: { status: "completed", detail: "in production" } }], reply: "Done" },
+    { expectContextIncludes: ["Goal mode — turn 2 of 5"], steps: [{ tool: "goal_end", arguments: { status: "completed", detail: "environment picked", proof: "https://github.com/o/r/pull/9400" } }], reply: "Done" },
   ] });
   await f.send("Deploy it.");
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Objetivo esperando você")), { timeout: 20_000 }).toBe(true);
@@ -182,6 +202,10 @@ it("drops the goal and the pending wake when the person presses Stop", () => fix
   ] });
   await f.send("Start the long job.");
   await expect.poll(() => f.ledger().goals?.[0]?.status, { timeout: 20_000 }).toBe("active");
+  // Stop only once the wake is armed too: under load, a Stop between goal_start
+  // and wake_me killed the turn before the wake existed, and no "Despertador
+  // cancelado" chip could ever come (the flaky case of 04/10, base and lot U alike)
+  await expect.poll(() => f.ledger().wakes?.length ?? 0, { timeout: 20_000 }).toBe(1);
   await f.api(`/api/bots/${f.bot.id}/interrupt`, { threadId: f.bot.activeTaskId });
   await expect.poll(() => f.ledger().goals[0].status, { timeout: 10_000 }).toBe("stopped");
   expect(f.ledger().wakes).toEqual([]);
@@ -534,6 +558,62 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o9/reply`, { text: "x" })).rejects.toThrow(/já foi resolvido/);
 }), 90_000);
 
+// Lot J2 bug 2 (04/10): "A decisão de produto da #9356 continua com você…"
+// sat 13 h in "Precisa de você" as a bare title. The server asks the bot,
+// once and as itself, to register its question as an item with why, steps
+// and options; never with ~/.nuria/stop; the item then takes the question's place.
+it("asks the bot once to register its bare question as an item, never with ~/.nuria/stop, and the item replaces the question (lot J2)", () => fixture(async f => {
+  const stop = join(f.session.info.dataDir, ".nuria", "stop");
+  mkdirSync(join(f.session.info.dataDir, ".nuria"), { recursive: true });
+  writeFileSync(stop, "");
+  const options = [{ label: "Opção A", reply: "Siga com a opção A.", recommended: true, why: "Mantém o fluxo atual do cliente." }, { label: "Opção B", reply: "Siga com a opção B." }];
+  const asking = { reply: "A decisão de produto da #9356 continua com você, sem registro novo na issue. Sigo com a opção A ou B?" };
+  f.save({ turns: [asking] });
+  const task = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).find((each: any) => each.threadId === f.bot.activeTaskId);
+  await f.send("Como está a #9356?");
+  await expect.poll(async () => (await task())?.goalNeedsInput, { timeout: 20_000 }).toBe(true);
+  // the bot answers the request with its Ref (INSP-J2b #1: only that link replaces the question); a wrong one is refused
+  const ref = `${f.bot.activeTaskId}@${(await task()).goalNeedsInputSince}`;
+  const item = { action: "add", title: "Decidir a opção de produto da #9356", why: "A cliente espera a resposta para seguir.", steps: [{ text: "Leia o resumo da #9356", link: "https://github.com/acme/app/issues/9356" }], options };
+  f.save({ turns: [asking, { expectContextIncludes: ["[Servidor: pergunta sem passo a passo]", "Sigo com a opção A ou B?", `owner_pending add: replacesAsk \\"${ref}\\"`], steps: [
+    { tool: "owner_pending", arguments: { ...item, replacesAsk: `${f.bot.activeTaskId}@1` }, expectError: true },
+    { tool: "owner_pending", arguments: { ...item, replacesAsk: "não é um ref" }, expectError: true },
+    { tool: "owner_pending", arguments: { ...item, replacesAsk: ref } },
+  ], reply: "Registrado." }] });
+  // with ~/.nuria/stop: nothing is asked, and "Pedir de novo" is refused saying why
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  expect(existsSync(join(f.session.info.dataDir, "bot-autonomy.json")) ? f.ledger().askPromotions ?? [] : []).toEqual([]);
+  expect((await task()).goalNeedsInputStepsAskedAt).toBeUndefined();
+  await expect(f.api(`/api/bots/${f.bot.id}/tasks/${f.bot.activeTaskId}/ask-steps`, {})).rejects.toThrow(/nuria\/stop está ativo/);
+  expect(f.turns()).toHaveLength(1);
+  // without it: one request, as the server, and the bot's item takes the question's place
+  rmSync(stop);
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  await expect.poll(async () => (await task())?.goalNeedsInput, { timeout: 10_000 }).toBeUndefined();
+  expect((await task()).ownerPending).toEqual([expect.objectContaining({ id: "o1", title: "Decidir a opção de produto da #9356", why: "A cliente espera a resposta para seguir.", options })]);
+  // one request, remembered (a restart does not ask again), linked to the item the bot opened with its Ref
+  expect(f.ledger().askPromotions).toEqual([expect.objectContaining({ threadId: f.bot.activeTaskId, reportThreadId: f.bot.activeTaskId, text: "Sigo com a opção A ou B?", itemId: "o1" })]);
+  expect(toolResult(f.turns()[1], "owner_pending")).toContain("Ele substitui a sua pergunta");
+  // never in the person's voice
+  expect((await f.messages()).filter((message: any) => message.role === "user").map((message: any) => message.text)).toEqual(["Como está a #9356?"]);
+  // the question is gone: "Pedir de novo" has nothing to ask, and nothing is asked again
+  await expect(f.api(`/api/bots/${f.bot.id}/tasks/${f.bot.activeTaskId}/ask-steps`, {})).rejects.toThrow(/não espera mais uma resposta sua/);
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  expect(f.turns()).toHaveLength(2);
+  // INSP-J2b r3: the owner answers in the conversation; the server settles o1 and tells the bot, which may reopen it
+  f.save({ turns: [asking, { reply: "Registrado." }, { reply: "Certo, sigo com a B." }, {
+    expectContextIncludes: ["[Servidor: pendência fechada]", "O item o1", `reabra o item com owner_pending add replacesAsk \\"${ref}\\"`],
+    steps: [{ tool: "owner_pending", arguments: { ...item, replacesAsk: ref } }], reply: "Reabri o item.",
+  }] });
+  await f.send("Siga com a opção B.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(4);
+  expect(f.ledger().resolvedOwnerPending).toEqual([expect.objectContaining({ id: "o1", resolvedBy: "owner", resolvedNote: "respondida na conversa" })]);
+  expect(toolResult(f.turns()[3], "owner_pending")).toContain("Ele substitui a sua pergunta");
+  const reopened = (await task()).ownerPending;
+  expect(reopened).toEqual([expect.objectContaining({ title: "Decidir a opção de produto da #9356" })]);
+  expect(f.ledger().askPromotions[0].itemId).toBe(reopened[0].id);
+}, { OMB_OWNER_STEPS_ASK_AFTER_MS: "0", OMB_QUESTION_STEPS_ASK_AFTER_MS: "0" }), 90_000);
+
 // The app's records (under the fixture's HOME) decide: with the app able to
 // open the repository, a client's issue headless is refused whatever the
 // cli_reason says; with the app opening another repository, it runs, and
@@ -546,6 +626,9 @@ it.runIf(process.platform === "darwin")("decides a headless session of a client'
   const other = join(data, "other-repo");
   execFileSync("git", ["init", "-q", repo]);
   execFileSync("git", ["init", "-q", other]);
+  // New Session the old way: with worktrees the server makes (lote X, on by
+  // default) the app's last folder no longer matters — own-worktrees tests
+  writeFileSync(join(data, "own-worktrees-settings.json"), JSON.stringify({ enabled: false }));
   const records = join(data, "Library", "Application Support", "Claude", "claude-code-sessions", "org", "acct");
   mkdirSync(records, { recursive: true });
   const newest = (cwd: string) => writeFileSync(join(records, "local_root.json"), JSON.stringify({ sessionId: "local_root", cliSessionId: "c-root", createdAt: Date.now(), cwd, title: "raiz" }));
@@ -576,6 +659,9 @@ it.runIf(process.platform === "darwin")("asks the owner ONCE to unblock the app 
   const data = f.session.info.dataDir;
   const repo = join(data, "platform");
   execFileSync("git", ["init", "-q", repo]);
+  // New Session the old way: with worktrees the server makes (lote X, on by
+  // default) the reused folder no longer blocks — own-worktrees tests
+  writeFileSync(join(data, "own-worktrees-settings.json"), JSON.stringify({ enabled: false }));
   const records = join(data, "Library", "Application Support", "Claude", "claude-code-sessions", "org", "acct");
   mkdirSync(records, { recursive: true });
   const folder = join(repo, ".claude", "worktrees", "reabertura-496989");
@@ -643,15 +729,116 @@ it("renews a standing watch whose time limit ran out with nothing seen, without 
   expect(standing().watch.fired ?? 0).toBe(0);
 }), 60_000);
 
-it("follows the gate a turn cut at the time limit left running, and resumes the session when it ends (R8-resilience TO)", async () => {
+// R10-followup #5: the Chief's 'prod' note still asked to close #9327 a day
+// after it merged. A fake gh answers GitHub's issues API: #4242 merged, #4243 open.
+const refsBin = mkdtempSync(join(tmpdir(), "omb-refs-gh-"));
+writeFileSync(join(refsBin, "gh"), [
+  "#!/bin/sh",
+  "case \"$2\" in",
+  "  */issues/4242) printf 'closed\\ttrue\\t2026-10-01T21:02:11Z\\n' ;;",
+  "  */issues/4243) printf 'open\\ttrue\\t\\n' ;;",
+  "  *) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;",
+  "esac",
+].join("\n"));
+chmodSync(join(refsBin, "gh"), 0o755);
+
+it("tells the bot, under an hour-old note, which PRs it names are no longer open (R10-followup #5)", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "refs-repo");
+  const commit = (message: string) => execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", message]);
+  execFileSync("git", ["init", "-q", repo]);
+  commit("first");
+  const command = `git -C ${repo} log --format=%s -1`;
+  f.save({ turns: [
+    { steps: [{ tool: "wake_when", arguments: { command, reason: "Tag andou: fechar carrier #4242 e liberar gate da #4243 em https://github.com/acme/web", every_minutes: 1, max_minutes: 600, standing: true, label: "prod" } }], reply: "Watching" },
+    { expectContextIncludes: ["no longer open: PR #4242 merged.", "check before redoing it", "update_reason"], reply: "Checked" },
+  ] });
+  await f.send("Watch the tag.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  // an "hour" (60 shrunk minutes = 12 s) passes, then the watched output changes
+  await new Promise((resolve) => setTimeout(resolve, 13_000));
+  commit("second");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  const context = JSON.stringify(f.turns()[1]);
+  // the open PR is not said: it is what the note expects
+  expect(context).not.toContain("PR #4243");
+  await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "Checked"), { timeout: 10_000 }).toBe(true);
+}, { OMB_TEST_GRANT_PATH: `${refsBin}${delimiter}${GIT_DIR}` }), 60_000);
+
+// INSP-U r1 U1: the look-up runs between "the intake lock is free" and taking it.
+// This gh says it was called, then takes 5 s to answer.
+const slowRefsBin = mkdtempSync(join(tmpdir(), "omb-refs-slow-gh-"));
+const slowRefsCalled = join(slowRefsBin, "called");
+writeFileSync(join(slowRefsBin, "gh"), [
+  "#!/bin/sh",
+  // the fixture's PATH is sealed: sleep by its full path
+  `: > ${JSON.stringify(slowRefsCalled)}`,
+  "/bin/sleep 5",
+  "case \"$2\" in",
+  "  */issues/4242) printf 'closed\\ttrue\\t2026-10-01T21:02:11Z\\n' ;;",
+  "  *) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;",
+  "esac",
+].join("\n"));
+chmodSync(join(slowRefsBin, "gh"), 0o755);
+
+it("a routine that takes the intake lock while the watch looks its note up on GitHub runs alone; the watch waits for it (INSP-U r1 U1)", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "refs-repo");
+  const commit = (message: string) => execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", message]);
+  execFileSync("git", ["init", "-q", repo]);
+  commit("first");
+  const gate = join(f.session.info.dataDir, "routine.gate");
+  f.save({ turns: [
+    { steps: [{ tool: "wake_when", arguments: { command: `git -C ${repo} log --format=%s -1`, reason: "Tag andou: fechar carrier #4242 em https://github.com/acme/web", every_minutes: 1, max_minutes: 600, standing: true, label: "prod" } }], reply: "Watching" },
+    // the routine's intake turn, held open until the test says
+    { expectContextIncludes: ["ROUTINE_U1 read the Chat"], gateFile: gate, reply: "Routine read" },
+    { expectContextIncludes: ["no longer open: PR #4242 merged."], reply: "Checked" },
+  ] });
+  const { routine } = await f.api("/api/routines", {
+    name: "Intake", prompt: "ROUTINE_U1 read the Chat", botId: f.bot.id,
+    enabled: false, schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 },
+  });
+  await f.send("Watch the tag.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  // an "hour" (12 s) passes, the watched output changes: the watch fires and asks gh
+  await new Promise((resolve) => setTimeout(resolve, 13_000));
+  commit("second");
+  await expect.poll(() => existsSync(slowRefsCalled), { timeout: 20_000 }).toBe(true);
+  // while gh sleeps, the same bot's routine sees the lock free and takes it
+  const { run } = await f.api(`/api/routines/${routine.id}/run`, {});
+  await expect.poll(async () => (await f.api("/api/routines", undefined, "GET")).runs.find((each: any) => each.id === run.id)?.status, { timeout: 15_000 }).toBe("running");
+  // gh answers; the watch must not start next to the routine
+  await new Promise((resolve) => setTimeout(resolve, 7_000));
+  const log = () => readFileSync(f.session.info.logPath, "utf8");
+  expect(log()).toMatch(/\[intake\] wake prod in \S+ of \S+ waits behind \S+ \(the bot's other intake turn\)/);
+  expect((await f.chips()).some((chip: string) => chip.startsWith('Vigia permanente "prod" disparou'))).toBe(false);
+  writeFileSync(gate, "open");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
+  const turns = f.turns();
+  // one intake turn after the other: each read its own step of the plan
+  expect(turns.map((turn: any) => turn.turnIndex)).toEqual([0, 1, 2]);
+  expect(turns[1].threadId).not.toBe(f.bot.activeTaskId);
+  expect(turns[2].threadId).toBe(f.bot.activeTaskId);
+  expect(log()).toContain(`waits behind ${turns[1].threadId}`);
+  await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "Checked"), { timeout: 10_000 }).toBe(true);
+}, { OMB_TEST_GRANT_PATH: `${slowRefsBin}${delimiter}${GIT_DIR}` }), 90_000);
+
+/** A fake claude that behaves as Claude Code does with a gate run in the
+ * background: GATE starts a "ci:local" in a group of its own in the worktree,
+ * which ends when the file RELEASE:<path> exists; the turn ends when the gate
+ * does (the claude hears its result); on SIGTERM it kills that background
+ * gate before exiting, as Claude Code kills its background shells. */
+async function gateFake() {
   const { chmodSync, mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-cut-"));
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-gate-"));
   const fake = join(tools, "fake-claude.mjs");
   const calls = join(tools, "calls.jsonl");
-  // GATE:<ms> starts a "ci:local" in its own process group inside the worktree, HOLD:<ms> outlasts the turn limit
+  const gatePid = join(tools, "gate.pid");
+  const gateScript = join(tools, "local-ci.cjs");
+  writeFileSync(gateScript, `const { existsSync } = require("node:fs"); const release = process.argv[2]; setInterval(() => { if (existsSync(release)) process.exit(0); }, 100); setTimeout(() => process.exit(0), 120000);\n`);
   writeFileSync(fake, `#!/usr/bin/env node
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 const argv = process.argv.slice(2);
@@ -660,14 +847,34 @@ let cwd = process.cwd();
 const w = argv.indexOf("-w");
 if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv }) + "\\n");
-const gate = /GATE:(\\d+)/.exec(prompt);
-if (gate) spawn(process.execPath, ["-e", "setTimeout(() => {}, " + gate[1] + ")", "ci:local"], { cwd, detached: true, stdio: "ignore" }).unref();
-console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
-const hold = /HOLD:(\\d+)/.exec(prompt);
-if (hold) await new Promise(r => setTimeout(r, Number(hold[1])));
-console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "did: " + prompt.split("\\n")[0].slice(0, 60), total_cost_usd: 0.01 }));
+// SLOWINIT: says its init (its cwd) only past the turn limit, as a claude slow to start under load
+const slow = /SLOWINIT/.test(prompt);
+if (!slow) console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+const release = /RELEASE:(\\S+)/.exec(prompt);
+if (release) {
+  // node running the gate's script, as npm → local-ci does
+  const gate = spawn(process.execPath, [${JSON.stringify(gateScript)}, release[1]], { cwd, detached: true, stdio: "ignore" });
+  writeFileSync(${JSON.stringify(gatePid)}, String(gate.pid));
+  if (slow) setTimeout(() => console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" })), 8000);
+  process.on("SIGTERM", () => { try { process.kill(-gate.pid, "SIGKILL"); } catch {} process.exit(143); });
+  await new Promise((resolve) => gate.on("exit", resolve));
+}
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "gate verde no head", total_cost_usd: 0.01 }));
 `);
   chmodSync(fake, 0o755);
+  return {
+    fake, tools,
+    calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length : 0),
+    gatePid: () => (existsSync(gatePid) ? Number(readFileSync(gatePid, "utf8")) : 0),
+  };
+}
+
+// R8-resilience TO, INSP-R13res A1: on a cut Claude Code kills its background
+// gate, so a turn past its limit while its gate runs is not cut: the cut
+// waits, the gate ends, the claude hears it and ends its turn as usual.
+it("does not cut a turn past its limit while its gate runs: the turn hears the gate's end and finishes (R8-resilience TO, INSP-R13res A1)", async () => {
+  const { fake, tools, calls, gatePid } = await gateFake();
+  const release = join(tools, "release");
   await fixture(async f => {
     const { execFileSync } = await import("node:child_process");
     const data = f.session.info.dataDir;
@@ -675,19 +882,63 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     execFileSync("git", ["init", "-q", repo]);
     const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
     f.save({ turns: [
-      { steps: [{ tool: "cc_session_start", arguments: { title: "#9998 gate longo", brief: "GATE:9000 HOLD:30000", repo, surface: "cli" } }], reply: "Started" },
-      { reply: "Cut, waiting for its gate" },
-      { reply: "Resumed and done" },
+      // its init comes after the first check: the gate is found in the worktree a first turn makes
+      { steps: [{ tool: "cc_session_start", arguments: { title: "#9998 gate longo", brief: `RELEASE:${release} SLOWINIT`, repo, surface: "cli" } }], reply: "Started" },
+      { reply: "Done" },
+      { reply: "spare" },
     ] });
     await f.send("Run the long gate.");
-    // the turn is cut; its gate is followed, not lost
-    await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger()[0]?.bgJob?.pids?.length ?? 0 : 0), { timeout: 20_000 }).toBeGreaterThan(0);
-    expect(ccLedger()[0].status).toBe("failed");
-    await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("turno cortado em")), { timeout: 10_000 }).toBe(true);
-    // the gate ends: the session is resumed with a new turn
-    await expect.poll(() => readFileSync(calls, "utf8").trim().split("\n").length, { timeout: 30_000 }).toBe(2);
-    expect(JSON.parse(readFileSync(calls, "utf8").trim().split("\n")[1]!).argv.slice(0, 3)).toEqual(["-p", "--resume", ccLedger()[0].id]);
-  }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
+    // past the limit with its gate running: the cut waits, nothing is killed
+    try {
+      await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("mas o gate (ci:local) da sessão ainda roda; o corte espera o gate terminar (até 10 min de turno)")), { timeout: 20_000 }).toBe(true);
+    } catch (error) {
+      // the server's own account of the turn says why
+      throw new Error(`${String(error)}\nledger: ${JSON.stringify(ccLedger()[0])}\ngate pid ${gatePid()}\n${readFileSync(f.session.info.logPath, "utf8").split("\n").filter((line) => line.includes("[cc-sessions]")).join("\n")}`);
+    }
+    expect(ccLedger()[0].status).toBe("running");
+    expect(() => process.kill(gatePid(), 0)).not.toThrow();
+    // the gate ends: the turn ends by itself, not cut, nothing to follow
+    writeFileSync(release, "");
+    await expect.poll(() => ccLedger()[0].status, { timeout: 20_000 }).toBe("idle");
+    expect(ccLedger()[0]).toMatchObject({ lastReport: "gate verde no head" });
+    expect(ccLedger()[0].bgJob).toBeUndefined();
+    expect((await f.chips()).some((chip: string) => chip.includes("turno cortado"))).toBe(false);
+    expect(calls()).toBe(1);
+  }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000", OMB_CC_GATE_WAIT_MAX_MS: "600000" });
+}, 90_000);
+
+// INSP-R13res A1: past the gate's ceiling the turn is cut, and since the cut
+// kills its background gate, it says so — no background job, no resumption
+// telling the session its gate "finished".
+it("cuts a turn whose gate runs past the ceiling, and says the gate was stopped with no result (INSP-R13res A1)", async () => {
+  const { fake, tools, calls, gatePid } = await gateFake();
+  const release = join(tools, "release");
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
+    f.save({ turns: [
+      { steps: [{ tool: "cc_session_start", arguments: { title: "#9995 gate travado", brief: `RELEASE:${release}`, repo, surface: "cli" } }], reply: "Started" },
+      { reply: "Cut" },
+      { reply: "spare" },
+    ] });
+    await f.send("Run the stuck gate.");
+    await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("o corte espera o gate terminar")), { timeout: 20_000 }).toBe(true);
+    // the ceiling passes: cut, its gate killed with it
+    await expect.poll(() => ccLedger()[0].status, { timeout: 30_000 }).toBe("failed");
+    // said in the cut's own write, with how long the cut really waited (R2 B1, B7)
+    // on a failure, the server's own gate checks say why
+    const gateLog = () => readFileSync(f.session.info.logPath, "utf8").split("\n").filter((line) => line.includes("gate check")).join("\n");
+    expect(ccLedger()[0].lastError, gateLog()).toMatch(/it was cut while its gate \(ci:local\) still ran, after waiting \d+ min for it/);
+    await expect.poll(async () => (await f.chips()).some((chip: string) => /turno cortado com 1 min de turno, depois de esperar \d+ min pelo gate \(ci:local\) — gate interrompido pelo corte, sem resultado/.test(chip)), { timeout: 15_000 }).toBe(true);
+    // killed by its claude on the cut (reaped by launchd a moment later)
+    await expect.poll(() => { try { process.kill(gatePid(), 0); return true; } catch { return false; } }, { timeout: 5_000 }).toBe(false);
+    expect(ccLedger()[0].bgJob).toBeUndefined();
+    expect((await f.chips()).some((chip: string) => chip.includes("o servidor retoma a sessão"))).toBe(false);
+    expect(calls()).toBe(1);
+  }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000", OMB_CC_GATE_WAIT_MAX_MS: "8000" });
 }, 90_000);
 
 it("queues starts once the 4 slots are taken, opens the P1 first when they free, and lets the bot cancel one (INSP-F F3)", async () => {
@@ -784,8 +1035,9 @@ it("forgets the conversation the owner named when it is archived, and the next o
   expect(sharedState().ownerThread).toBeUndefined();
 }), 60_000);
 
-/** A fake claude for the cut tests: the first prompt's GATE:<ms> (a "ci:local"
- * in a group of its own), MCP (a child in the claude's own group, working in
+/** A fake claude for the cut tests: the first prompt's GATE:<ms> (a job in a
+ * group of its own that outlives the cut, as one started with nohup does; not
+ * a gate, which the cut would wait for — see gateFake), MCP (a child in the claude's own group, working in
  * the worktree, that dies 2 s after the claude) and HOLD:<ms> (outlasting the
  * limit) are kept in a file and apply to every turn, the resumption too. */
 async function cutFake() {
@@ -809,7 +1061,7 @@ if (!existsSync(${JSON.stringify(directives)})) writeFileSync(${JSON.stringify(d
 const said = readFileSync(${JSON.stringify(directives)}, "utf8");
 if (/\\bMCP\\b/.test(said)) spawn(process.execPath, ["-e", "const p = process.ppid; setInterval(() => { try { process.kill(p, 0); } catch { setTimeout(() => process.exit(0), 2000); } }, 100)", "mcp-server"], { cwd, stdio: "ignore" }).unref();
 const gate = /GATE:(\\d+)/.exec(said);
-if (gate) spawn(process.execPath, ["-e", "setTimeout(() => {}, " + gate[1] + ")", "ci:local"], { cwd, detached: true, stdio: "ignore" }).unref();
+if (gate) spawn(process.execPath, ["-e", "setTimeout(() => {}, " + gate[1] + ")", "long-job"], { cwd, detached: true, stdio: "ignore" }).unref();
 console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
 const hold = /HOLD:(\\d+)/.exec(said);
 if (hold) await new Promise(r => setTimeout(r, Number(hold[1])));
@@ -869,3 +1121,178 @@ it("resumes a cut turn once: cut again right after, it is not resumed a second t
     expect(ccLedger()[0].bgJob).toBeUndefined();
   }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
 }, 120_000);
+
+// ── autonomous turns on the job runtime (this fork) ─────────────────────
+
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+/** Every resume of a requester opens with this (runtime/envelope.ts composeResume). */
+const SETTLED = "Your downstream room requests have settled.";
+/** The report envelope's opening for the teammate's result (composeReport). */
+const REPORT_FROM_PEER = "[OpenMausBot report from @Peer";
+/** What a wake given back by its lease after a restart opens its note with
+ * (bot-autonomy.ts INTERRUPTED_PREFIX), without the brackets. */
+const RERUN_WAKE = "A execução anterior foi interrompida por um restart do servidor";
+/** The line a turn the restart cut gets in its conversation (failedTurnTool). */
+const CUT_LINE = "error: turn interrupted — OpenMausBot restarted";
+/** The chip a root the runtime itself runs again writes (index.ts runRootTurn). */
+const RERUN_CHIP = "Resuming after a restart";
+
+/** Like `fixture`, for the runtime's view of autonomous turns: the bot and a
+ * teammate of one team (each can reach the other), turns picked from a plan
+ * by what each turn was asked (room-handoff-agent's `script`, so a turn a
+ * restart cut is not counted as played), the runtime's rows
+ * (DATA_DIR/runtime.db) and a restart as a quit or an update does it
+ * (SIGTERM, then the same data and port). */
+async function autonomyRuntime(test: (f: any) => Promise<void>) {
+  const parentEnv: NodeJS.ProcessEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50" };
+  const session = await launchVerificationServer(parentEnv, undefined, undefined, undefined, undefined, { scripted: true });
+  const url = session.info.url;
+  const dataDir = session.info.dataDir;
+  let server: ChildProcess = session.child;
+  let restarted = false;
+  const restart = async () => {
+    await waitForExit(server, { signal: "SIGTERM" });
+    const env = verificationServerEnvironment(parentEnv, dataDir, Number(new URL(url).port));
+    const log = openSync(session.info.logPath, "a", 0o600);
+    server = spawn(process.execPath, verificationServerArgs(env), { cwd: ROOT, env, stdio: ["ignore", log, log] });
+    restarted = true;
+    closeSync(log);
+    await expect.poll(async () => {
+      try { return (await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(1_000) })).ok; } catch { return false; }
+    }, { timeout: 30_000 }).toBe(true);
+  };
+  const planPath = join(dataDir, "room-plan.json");
+  const turns = (botId?: string): any[] => (existsSync(`${planPath}.evidence.jsonl`)
+    ? readFileSync(`${planPath}.evidence.jsonl`, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [])
+    .filter((turn: any) => !botId || turn.botId === botId);
+  try {
+    const cli = (...args: string[]) => runControlOmb(args, { env: { OPENMAUSBOT_URL: url } }) as Promise<any>;
+    const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+    const bot = (await cli("new-bot", "--name", "Delivery", "--section", "Ops")).bot;
+    const peer = (await cli("new-bot", "--name", "Peer", "--section", "Ops")).bot;
+    const plan: Record<string, { script: unknown[] }> = { [bot.id]: { script: [] }, [peer.id]: { script: [] } };
+    const script = (botId: string, ...entries: unknown[]) => {
+      (plan[botId] ??= { script: [] }).script.push(...entries);
+      writeFileSync(planPath, JSON.stringify(plan));
+    };
+    writeFileSync(planPath, JSON.stringify(plan));
+    const turn = (key: string) => turns().find((candidate: any) => candidate.planKey === key);
+    const say = (threadId: string, text: string) => api(`/api/bots/${bot.id}/messages`, { text, threadId });
+    const messages = async (threadId: string) => (await api(`/api/threads/${threadId}/messages?limit=300`, undefined, "GET")).messages as any[];
+    const chips = async (threadId: string) => (await messages(threadId)).filter((message: any) => message.kind === "activity").map((message: any) => String(message.tool?.name ?? ""));
+    const ledger = () => JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8"));
+    /** Every assignment record, as the runtime stores it (the json column). */
+    const assignments = (): any[] => {
+      const path = join(dataDir, "runtime.db");
+      if (!existsSync(path)) return [];
+      const db = new DatabaseSync(path, { readOnly: true });
+      try {
+        return (db.prepare("SELECT json FROM assignments ORDER BY created_at, id").all() as Array<{ json: string }>).map((row) => JSON.parse(row.json));
+      } finally { db.close(); }
+    };
+    const events = (id: string): Array<{ kind: string; detail?: string }> => {
+      const db = new DatabaseSync(join(dataDir, "runtime.db"), { readOnly: true });
+      try {
+        return (db.prepare("SELECT kind, detail FROM assignment_events WHERE assignment_id = ? ORDER BY id").all(id) as Array<{ kind: string; detail: string | null }>)
+          .map((row) => ({ kind: row.kind, ...(row.detail == null ? {} : { detail: row.detail }) }));
+      } finally { db.close(); }
+    };
+    const gate = (name: string) => join(dataDir, `${name}.gate`);
+    const ready = (name: string) => join(dataDir, `${name}.ready`);
+    try {
+      await test({ session, bot, peer, script, turns, turn, say, messages, chips, ledger, assignments, events, gate, ready, restart });
+    } catch (error) {
+      console.error(`autonomy runtime fixture state:\n${JSON.stringify({
+        turns: turns().map((record: any) => ({ botId: record.botId, planKey: record.planKey, unplanned: record.unplanned, own: ownTurnText(record.prompt).slice(0, 400) })),
+        assignments: assignments().map(({ id, parentId, requester, status, outcome, outcomeDetail, executions, restarts, restart }: any) =>
+          ({ id, parentId, requester: requester?.kind, status, outcome, outcomeDetail, executions, restarts, restart })),
+      }, null, 1)}`);
+      throw error;
+    }
+    // No bot ran a turn its script did not plan: no second run of a cut
+    // turn, no resume nobody expected.
+    expect(turns().filter((record: any) => record.unplanned).map((record: any) => ownTurnText(record.prompt).slice(0, 300))).toEqual([]);
+  } finally {
+    if (restarted) await waitForExit(server, { signal: "SIGTERM" });
+    await session.close();
+  }
+}
+
+// A wake's turn opens a root of its own, recorded as the bot's own turn
+// (index.ts autonomyOpener): without one its coordinate_bots would be
+// refused. The hand-off is accepted, the teammate's result resumes that
+// root, and the wake's conversation reviews it.
+it("lets a wake's turn hand work to a teammate on a root of its own, recorded as the bot's turn", () => autonomyRuntime(async f => {
+  f.script(f.bot.id,
+    // the resume first: it may quote the wake's note too
+    { key: "W2", match: [SETTLED, REPORT_FROM_PEER], reply: "W2-FINAL: o Peer conferiu o deploy." },
+    { key: "W1", match: ["WAKE_COORD"], steps: [{ tool: "coordinate_bots", arguments: { bot_ids: [f.peer.id], message: "WC-BRIEF: confira o deploy de hoje." } }], reply: "W1: pedi ao Peer." },
+    { key: "U0", match: ["U0-WAKE-COORD"], steps: [{ tool: "wake_me", arguments: { minutes: 1, reason: "WAKE_COORD peça ao Peer para conferir o deploy" } }], reply: "U0: volto em um minuto." });
+  f.script(f.peer.id, { key: "P1", match: ["WC-BRIEF"], reply: "WC-RESULT: deploy conferido." });
+  const thread = f.bot.activeTaskId;
+  await f.say(thread, "U0-WAKE-COORD: daqui a um minuto, peça ao Peer para conferir o deploy.");
+  // the wake's turn handed the work on (a refusal fails the scripted step),
+  // the teammate answered, and the wake's root was resumed with it
+  await expect.poll(() => f.turns(f.bot.id).map((record: any) => record.planKey), { timeout: 45_000 }).toEqual(["U0", "W1", "W2"]);
+  expect(f.turns(f.peer.id).map((record: any) => record.planKey)).toEqual(["P1"]);
+  expect(toolResult(f.turn("W1"), "coordinate_bots")).not.toMatch(/refused|has no root|no longer running/i);
+  expect((await f.chips(thread)).filter((name: string) => name === "Enviado para Peer")).toHaveLength(1);
+  const child = f.assignments().find((row: any) => row.parentId && row.assignee.botId === f.peer.id);
+  expect(child).toMatchObject({ mode: "work", brief: "WC-BRIEF: confira o deploy de hoje." });
+  const root = f.assignments().find((row: any) => row.id === child.parentId);
+  // the wake's root: in the bot's conversation, opened by the bot's own turn, not the person's
+  expect(root).toMatchObject({ assignee: { botId: f.bot.id, destination: { threadId: thread } }, requester: { kind: "bot_turn", botId: f.bot.id, threadId: thread } });
+  expect(root.parentId).toBeUndefined();
+  expect(root.brief).toContain("WAKE_COORD");
+  // the person's own turn before it is a root of its own, the person's
+  expect(f.assignments().filter((row: any) => !row.parentId && row.assignee.destination.threadId === thread).map((row: any) => [row.id === root.id, row.requester.kind]))
+    .toEqual([[false, "person"], [true, "bot_turn"]]);
+  await expect.poll(() => f.assignments().find((row: any) => row.id === child.id)?.status, { timeout: 15_000 }).toBe("completed");
+  await expect.poll(() => f.assignments().find((row: any) => row.id === root.id)?.status, { timeout: 15_000 }).toBe("completed");
+  await expect.poll(async () => (await f.messages(thread)).some((message: any) => message.kind === "text" && message.text === "W2-FINAL: o Peer conferiu o deploy."), { timeout: 15_000 }).toBe(true);
+}), 90_000);
+
+// A wake's turn a restart cuts is never run again by the runtime (index.ts
+// outward port, isAutonomyRoot): its root ends failed(interrupted) at the
+// next start, its conversation says the turn was cut, once, and only its
+// lease (bot-autonomy.ts, resumeCutLeases) gives the wake back, which runs
+// once more, told it was interrupted.
+it("does not rerun a wake's turn a restart cut: its root ends interrupted, said once, and only its lease runs it again, once", () => autonomyRuntime(async f => {
+  expect(INTERRUPTED_PREFIX).toContain(RERUN_WAKE);
+  f.script(f.bot.id,
+    { key: "W-RERUN", match: [RERUN_WAKE, "WAKE_CUT"], reply: "W-RERUN: conferido depois do restart." },
+    { key: "W-CUT", match: ["WAKE_CUT"], readyFile: f.ready("wake-cut"), gateFile: f.gate("wake-cut"), reply: "never" },
+    { key: "U0", match: ["U0-WAKE-CUT"], steps: [{ tool: "wake_me", arguments: { minutes: 1, reason: "WAKE_CUT confira o deploy" } }], reply: "U0: volto em um minuto." });
+  const thread = f.bot.activeTaskId;
+  await f.say(thread, "U0-WAKE-CUT: confira o deploy daqui a um minuto.");
+  // the wake's turn runs, held at its gate, on a root of the bot's own turn
+  await expect.poll(() => existsSync(f.ready("wake-cut")), { timeout: 30_000 }).toBe(true);
+  const wakeRoot = () => f.assignments().find((row: any) => !row.parentId && row.requester.kind === "bot_turn" && row.assignee.destination.threadId === thread);
+  await expect.poll(() => wakeRoot()?.status, { timeout: 15_000 }).toBe("running");
+  const cut = wakeRoot();
+  // its wake is leased to the turn, on disk until the turn ends
+  expect(f.ledger().inFlight).toEqual([expect.objectContaining({ kind: "wake", threadId: thread })]);
+
+  await f.restart();
+
+  // the runtime ends the cut root instead of running it again
+  await expect.poll(() => f.assignments().find((row: any) => row.id === cut.id)?.status, { timeout: 30_000 }).toBe("failed");
+  expect(f.assignments().find((row: any) => row.id === cut.id)).toMatchObject({ outcome: "interrupted", executions: 1, restarts: 0 });
+  expect(f.events(cut.id).find((event: any) => event.kind === "restart_reconciled")?.detail).toBe("failed: outward action done");
+  // only the lease gives the wake back: one more turn, told it was interrupted
+  await expect.poll(() => f.turns(f.bot.id).map((record: any) => record.planKey), { timeout: 30_000 }).toEqual(["U0", "W-RERUN"]);
+  expect(ownTurnText(f.turn("W-RERUN").prompt)).toContain(RERUN_WAKE);
+  await expect.poll(async () => (await f.messages(thread)).some((message: any) => message.kind === "text" && message.text === "W-RERUN: conferido depois do restart."), { timeout: 15_000 }).toBe(true);
+  // that turn opened a root of its own; the cut one is not reused
+  await expect.poll(() => f.assignments().filter((row: any) => !row.parentId && row.requester.kind === "bot_turn" && row.assignee.destination.threadId === thread)
+    .map((row: any) => [row.id === cut.id, row.status]), { timeout: 15_000 }).toEqual([[true, "failed"], [false, "completed"]]);
+  // the conversation says once that the turn was cut; the runtime's own rerun never shows
+  expect((await f.chips(thread)).filter((name: string) => name === CUT_LINE)).toHaveLength(1);
+  expect((await f.chips(thread)).filter((name: string) => name === RERUN_CHIP)).toHaveLength(0);
+  // well after: no second run, the cut root still the one that failed, the lease spent
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  expect(f.turns(f.bot.id).filter((record: any) => record.planKey === "W-RERUN")).toHaveLength(1);
+  expect(f.assignments().find((row: any) => row.id === cut.id)).toMatchObject({ status: "failed", executions: 1 });
+  expect(f.ledger().inFlight ?? []).toEqual([]);
+  expect((await f.chips(thread)).filter((name: string) => name === CUT_LINE)).toHaveLength(1);
+}), 120_000);

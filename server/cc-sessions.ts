@@ -18,12 +18,15 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import { writeFileAtomic } from "./atomic.ts";
 import type { BgJob } from "./bg-jobs.ts";
 import type { CcDelivery } from "./prod-delivery.ts";
+import type { DelegatedItemRef } from "./owner-delegate.ts";
 
 export const CC_TITLE_MAX = 120;
 export const CC_BRIEF_MAX = 20_000;
 export const CC_MESSAGE_MAX = 20_000;
 export const CC_REPORT_MAX = 6_000;
 /** Sessions running at once, across all bots. Each is a full agent. */
+export const CC_APP_FULL_REFUSAL = "Acesso total usa somente o terminal. Esta sessão histórica pertence ao app Claude e não foi retomada nem migrada. Depois que o trabalho anterior terminar, use cc_session_archive para encerrar seu registro no OpenMausBot e cc_session_start para abrir outra no terminal; não duplique uma execução ativa ou incerta.";
+
 export const CC_MAX_RUNNING = 4;
 /** One turn may not run longer than this before it is stopped. */
 export const CC_TURN_TIMEOUT_MS = 90 * 60_000;
@@ -44,8 +47,16 @@ export interface CcSession {
   worktree: string;
   /** Where the session lives; known once the first run reports it. */
   cwd?: string;
+  /** cli: the worktree the server made for it before its first turn, with
+   * the dependencies cloned from the seed when it was in date (G2, R13-gate):
+   * the first turn runs right there instead of `-w`. */
+  cliWorktree?: { path: string; branch: string; caches: "cloned" | "install"; reason?: string };
+  /** cli: the folder a seeded start given up past its deadline left (never used; told in the worktree report — R3-1). */
+  cliWorktreeLeft?: { path: string; reason: string };
   model?: string;
   permissionMode: CcPermissionMode;
+  /** Observed launch mode, never an authorization for a later turn. */
+  lastTurnPermissionMode?: CcPermissionMode | "bypassPermissions";
   status: CcStatus;
   createdAt: number;
   lastActivityAt: number;
@@ -122,6 +133,10 @@ export interface CcSession {
   claimedPrs?: number[];
   /** The orders it was given before claimedPrs existed were read back (once). */
   claimsReadAt?: number;
+  /** The owner delegated it an item of "Precisa de você" (lote del): its report settles the item. */
+  delegatedItem?: DelegatedItemRef;
+  /** Turns whose report already settled that item (an archive's report does not again). */
+  delegationSettledTurns?: number;
   /** When its bot and the Chief were told it must be resumed (once per stop: a later failure or idle tells again). */
   resumeReportedAt?: number;
   /** When the last word on its stop was said (24 h: the exact block, or
@@ -211,9 +226,9 @@ export interface CcDesktopState {
   removeWorktree?: boolean;
   /** The issue number the session is about ("9311"), from its title or brief. */
   issue?: string;
-  /** A rename to "NNNN …" was already tried (it is tried once). */
+  /** The app's title was found without the issue number and the log said so (once); the session names itself from its brief, nobody renames it. */
   renameTried?: boolean;
-  /** The person was asked (owner_pending) to rename it by hand: resolved once the app's title opens with "NNNN", or on archive. */
+  /** Before sessions named themselves, the person was asked (owner_pending) to rename it by hand; settled at startup (retireRenameAsks). */
   renameAsked?: boolean;
   /** tool_use id of the open question already reported to the owner. */
   questionReported?: string;
@@ -231,6 +246,35 @@ export interface CcDesktopState {
   wrongFolder?: string;
   /** Its brief opens with the folder check (desktop-work.ts folderGuard). */
   folderGuarded?: boolean;
+  /** The worktree the server makes for it before opening it (own-worktrees.ts, lote X). */
+  own?: CcOwnWorktree;
+  /** Both ways of the app failed (its own worktree, then New Session): the
+   * same brief was handed to the cli — the session it started (or the
+   * queue entry), or why it could not (R13-dispatch R13-2). */
+  cliFallback?: { at: number; sessionId?: string; queueId?: string; refusal?: string };
+}
+
+/** A worktree the server made (or will make) for an app session, and how it
+ * went: `planned` until it exists, `ready` once made (the create opens the
+ * app right there), `failed` when it could not be made and `abandoned` when
+ * the app would not open there — both go on through New Session, as before.
+ * The worktree is never removed by the server. */
+export interface CcOwnWorktree {
+  path: string;
+  branch: string;
+  state: "planned" | "ready" | "failed" | "abandoned";
+  /** The folder handed to the app (an alias of `path`, own-worktrees.ts ownLinkPath). */
+  link?: string;
+  /** The commit it was made at. */
+  head?: string;
+  /** Its caches: cloned from the seed, or installed by the session (and why). */
+  caches?: { mode: "cloned" | "install"; reason?: string; dirs?: string[]; savedKb?: number; savedMs?: number; ms?: number; install?: string; hooks?: string };
+  /** Why it failed or was abandoned. */
+  reason?: string;
+  /** The brief as the bot wrote it: the app's text is made from it once the worktree is ready. */
+  brief: string;
+  /** The brief for New Session (its own folder check), should this one not open. */
+  classicText: string;
 }
 
 export interface CcDesktopPending {
@@ -252,8 +296,19 @@ export interface CcDesktopPending {
   helperFailures?: number;
   /** archive: clicked; the app's record must say archived by then. */
   verifyUntil?: number;
+  /** create in the server's worktree: the new session's worktree option read ON or unreadable (the last time), and what the screen showed. */
+  worktreeOption?: "on" | "unknown";
+  worktreeSeen?: string;
+  /** create: since when the app asks to trust the workspace, waiting for the person. */
+  trustSince?: number;
+  /** create in the server's worktree: "trust this workspace" clicks so far (after each, the link is opened again — R13-3). */
+  trustClicks?: number;
   /** archive: clicks that the app's record did not confirm. */
   archiveTries?: number;
+  /** send: times it was parked after DESKTOP_SEND_PARK_MISSES misses in a row (each park backs off longer). */
+  parks?: number;
+  /** send: parked since then — it no longer holds the owner's conversation or the Mac awake. */
+  parkedAt?: number;
 }
 
 export function slugify(text: string): string {
@@ -270,13 +325,14 @@ export function slugify(text: string): string {
 
 /** argv for one turn. The brief/message always goes last, after "--", so a
  * text starting with "-" can never be read as a flag. */
-export function ccTurnArgs(session: Pick<CcSession, "id" | "worktree" | "model" | "permissionMode">, prompt: string, first: boolean): string[] {
+export function ccTurnArgs(session: Pick<CcSession, "id" | "worktree" | "model" | "permissionMode" | "cliWorktree">, prompt: string, first: boolean, fullAccess = false): string[] {
   return [
     "-p",
-    ...(first ? ["--session-id", session.id, "-w", session.worktree] : ["--resume", session.id]),
+    // a worktree the server made (and seeded) is the turn's cwd: no `-w`, which would make a bare one
+    ...(first ? ["--session-id", session.id, ...(session.cliWorktree ? [] : ["-w", session.worktree])] : ["--resume", session.id]),
     "--output-format", "stream-json",
     "--verbose",
-    "--permission-mode", session.permissionMode,
+    "--permission-mode", fullAccess ? "bypassPermissions" : session.permissionMode,
     ...(session.model ? ["--model", session.model] : []),
     "--",
     prompt,
@@ -583,7 +639,7 @@ export function ccModeLine(session: CcSession): string {
     const mode = session.desktop?.permissionMode ?? session.permissionMode;
     return `Mode: in the Claude app, permission mode ${mode}${session.desktop?.permissionMode && session.desktop.permissionMode !== session.permissionMode ? ` (asked for ${session.permissionMode}; the app runs it as ${session.desktop.permissionMode})` : ""} — the person sees it there and can approve prompts in the app.`;
   }
-  return `Mode: headless CLI (claude -p), permission mode ${session.permissionMode} — nobody sees it and there is no approval dialog: a hook denial ends the turn; answer it with cc_session_send.`;
+  return `Mode: headless CLI (claude -p), permission mode ${session.lastTurnPermissionMode ?? session.permissionMode} — nobody sees it and there is no approval dialog: a hook denial ends the turn; answer it with cc_session_send.`;
 }
 
 /** The corridor form of a command the review hook stopped, when there is
@@ -896,7 +952,10 @@ export const APP_FAILURE_WINDOW_MS = 2 * 3_600_000;
 
 /** The newest app failure the server itself saw for `repo` in the last 2 h,
  * said in pt-BR, or null: a message typed into the app that never arrived,
- * a screen action that kept failing, or an app session that failed. */
+ * a screen action that kept failing, or an app session that failed — by its
+ * `failedAt`, whatever it is now: archiving a failed session (what a bot
+ * does next) leaves it "archived" with no error, and the failure must still
+ * free the cli (R13-dispatch R13-1: #9032 refused twice after archiving). */
 export function recentAppFailure(sessions: readonly CcSession[], repo: string, now: number): string | null {
   const when = (at: number) => new Date(at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
   const found: Array<{ at: number; text: string }> = [];
@@ -907,9 +966,19 @@ export function recentAppFailure(sessions: readonly CcSession[], repo: string, n
     if (send && !send.confirmed) found.push({ at: send.at, text: `a mensagem digitada na sessão "${name}" não chegou (${when(send.at)})` });
     const pending = session.desktop.pending;
     if (pending?.triedAt !== undefined && pending.attempts > 0 && pending.lastReason) found.push({ at: pending.triedAt, text: `${pending.kind === "create" ? "abrir" : pending.kind === "send" ? "enviar" : pending.kind === "archive" ? "arquivar" : "renomear"} "${name}" no app falhou ${pending.attempts}× (${pending.lastReason.slice(0, 80)})` });
-    if (session.status === "failed" && session.failedAt !== undefined && session.lastError) found.push({ at: session.failedAt, text: `a sessão "${name}" falhou no app (${when(session.failedAt)})` });
+    if (session.failedAt !== undefined) found.push({ at: session.failedAt, text: `a sessão "${name}" falhou no app (${when(session.failedAt)}${session.status === "archived" ? ", arquivada depois" : ""})` });
   }
   return found.filter((each) => now - each.at <= APP_FAILURE_WINDOW_MS).sort((a, b) => b.at - a.at)[0]?.text ?? null;
+}
+
+/** What the server read to refuse the cli, said in pt-BR: how many app
+ * sessions of `repo` it has, and its newest failure out of the window — so
+ * a refusal shows which record it went by (R13-dispatch R13-1). */
+export function appFailureRead(sessions: readonly CcSession[], repo: string, now: number): string {
+  const ours = sessions.filter((session) => session.surface === "app" && session.repo === repo);
+  const last = ours.filter((session) => session.failedAt !== undefined).sort((a, b) => b.failedAt! - a.failedAt!)[0];
+  const at = last ? new Date(last.failedAt!).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  return `li ${ours.length} ${ours.length === 1 ? "sessão" : "sessões"} do app em ${repo.split("/").filter(Boolean).pop() ?? repo} no registro de sessões; ${last ? `a falha mais recente é de "${last.title.slice(0, 50)}" (${last.id.slice(0, 8)}), em ${at}, há ${Math.round((now - last.failedAt!) / 60_000)} min — fora da janela de 2 h` : "nenhuma tem falha registrada"}`;
 }
 
 /** Whether the Claude app can take a new session for the repository now:
@@ -930,7 +999,7 @@ export type AppAvailability = "available" | "blocked" | "unavailable";
  *   default, and any model would do (INSP-H r2 #1).
  * `appReason`: why the app is unavailable, when the server knows it (the Mac
  * locked, its queue stuck) — recorded instead of the generic reason. */
-export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string; app?: AppAvailability; appReason?: string | null; appFailure?: string | null }): { refusal: string } | { onRecord: string } {
+export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string; app?: AppAvailability; appReason?: string | null; appFailure?: string | null; appFailureRead?: string }): { refusal: string } | { onRecord: string } {
   const text = `${input.title}\n${input.brief}`;
   const client = clientIssue(text);
   const ships = Boolean(input.corridor) && shipsWork(text);
@@ -941,7 +1010,7 @@ export function cliSurfaceRefusal(input: { corridor: string; title: string; brie
   if (input.appFailure) return { onRecord: `falha recente no app: ${input.appFailure}` };
   const why = client ? "é uma issue de cliente, que o dono acompanha no app Claude" : "faz merge ou publicação num repositório com gate e carrier";
   return {
-    refusal: `${said ? `cli_reason recusado ("${said.slice(0, 120)}"): ` : ""}este brief ${why}, e o app Claude pode abrir a sessão agora — não houve falha no app nas últimas 2 h. Use surface "app" (o padrão); se o app falhar, o servidor registra e libera a cli.`,
+    refusal: `${said ? `cli_reason recusado ("${said.slice(0, 120)}"): ` : ""}este brief ${why}, e o app Claude pode abrir a sessão agora — não houve falha no app nas últimas 2 h${input.appFailureRead ? ` (${input.appFailureRead})` : ""}. Use surface "app" (o padrão); se o app falhar, o servidor registra e libera a cli, mesmo depois de a sessão falhada ser arquivada.`,
   };
 }
 

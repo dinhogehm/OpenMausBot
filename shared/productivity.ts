@@ -136,9 +136,11 @@ export function bucketStarts(from: number, to: number, granularity: Granularity)
 
 export interface ReportPeriod { from: number; to: number }
 
-/** The preset windows the screen offers: the last 48 h, the last 30 or 90
- * days, the last 12 months — each ending with the current (partial) bucket. */
-export const PERIOD_PRESETS: Record<Granularity, readonly number[]> = { hour: [48], day: [30, 90], month: [12] };
+/** The preset windows the screen offers: the last day (24 h) or 48 h, the
+ * last week (7 days), fortnight (15 days), 30 or 90 days, the last 12 months —
+ * each ending with the current (partial) bucket. The first of each grouping
+ * is its default. */
+export const PERIOD_PRESETS: Record<Granularity, readonly number[]> = { hour: [48, 24], day: [30, 90, 7, 15], month: [12] };
 export const MAX_BUCKETS: Record<Granularity, number> = { hour: 24 * 14, day: 366, month: 36 };
 
 /** The last `count` buckets up to now, the current one included. */
@@ -189,8 +191,10 @@ export function parseReportBound(value: string, end: boolean): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** The period a request names, or why not. Without from/to: the default
- * preset (48 h, 30 days, 12 months). `days` picks the 90-day preset. */
+/** The period a request names, or why not. Without from/to: `count` picks
+ * one of the grouping's PERIOD_PRESETS (24 or 48 h; 7, 15, 30 or 90 days;
+ * 12 months), and any other count falls back to its default (48 h, 30 days,
+ * 12 months). */
 export function resolveReportPeriod(input: { granularity: Granularity; from?: string | null; to?: string | null; count?: number | null; now: number }): { period: ReportPeriod } | { error: string } {
   const { granularity, now } = input;
   if (!input.from && !input.to) {
@@ -244,6 +248,8 @@ export interface ReportKpis {
   mergedPrs: number;
   /** Release-carrier PRs merged in the period (how the code is published, not new work). */
   carrierPrs: number;
+  /** PRs closed without merge whose work entered main through a lote merged in the period. */
+  batchedPrs: number;
   /** Issues closed in the period (any reason). */
   closedIssues: number;
   /** Of those, closed as not planned or duplicate. */
@@ -256,13 +262,19 @@ export interface ReportKpis {
   leadIssueToMerge: Distribution;
   /** PR merged → in production, for PRs delivered in the period (ms). */
   leadMergeToProd: Distribution;
-  /** Release runs that RAN (CI or deploy steps) and ended without advancing the tag. */
+  /** Commits whose release RAN (CI or deploy steps), failed on the change and never reached
+   * production — one per commit, however many tries. A run stopped by the machine or the
+   * snapshot (drift, disk, queue) or with no verdict is aborted, not failed. */
   failedReleases: number;
+  /** The tries behind failedReleases' commits and those retried into production: each run that failed on the change. */
+  failedAttempts: number;
   /** Runs the watcher dropped before they ran (a newer tip, the admission queue). Not failures. */
   supersededReleases: number;
-  /** Runs that stopped before running anything (stale lock, smart-deploy could not start). Not failures. */
+  /** Runs with no verdict on the change: stopped before running (stale lock, smart-deploy could not
+   * start, nothing to publish) or by the machine/snapshot (drift of the sealed snapshot, disk full,
+   * queue timeout, killed). Not failures. */
   abortedReleases: number;
-  /** deliveries ÷ (deliveries + failures): how often a release that ran reached production; null without attempts. */
+  /** deliveries ÷ (deliveries + failed commits), per commit: how often a commit whose release ran reached production; null without any. */
   releaseSuccessRate: number | null;
   /** Distinct commits the operator declined to publish. */
   declinedReleases: number;
@@ -277,9 +289,11 @@ export interface ReportKpis {
   /** DORA — deliveries per business day WITH A RELEASE SOURCE (Mon–Fri, São
    * Paulo, national holidays off): days no source covers are unknown, not zero. */
   deploysPerBusinessDay: number | null;
-  /** Business days elapsed in the period. */
+  /** The window is shorter than a day: the frequency is its count, not a rate (no extrapolation). */
+  deployFrequencyCountOnly?: boolean;
+  /** Business days the period touches, whole (rounded up). */
   businessDays: number;
-  /** Of those, the business days a release source covers (the denominator above). */
+  /** Of those, the whole business days a release source covers, at least 1 when it covers any of the period (the denominator above). */
   releaseBusinessDays: number;
   /** How much of the period a release source covers: below "full", deliveries are a lower bound. */
   releaseCovered: "full" | "partial" | "none";
@@ -346,7 +360,13 @@ export interface ReportBucket {
   usageCoverage: "full" | "partial" | "none";
 }
 
-export interface ReportReleaseItem { number: number; title: string; kind: "pr" | "issue"; type?: IssueType; priority?: IssuePriority; carrier?: boolean }
+export interface ReportReleaseItem {
+  number: number; title: string; kind: "pr" | "issue"; type?: IssueType; priority?: IssuePriority; carrier?: boolean;
+  /** A PR closed without merge that reached production through this lote. */
+  viaBatch?: number;
+  /** A lote whose PRs are listed (the vehicle, not counted as a delivery). */
+  batch?: boolean;
+}
 
 export interface ReportRelease {
   sha: string;
@@ -469,6 +489,21 @@ export interface ProductivityReport {
   enabled?: boolean;
   /** The owner's targets; empty by default (no traffic light without a target). */
   goals: ReportGoals;
+  /** The worktrees the server made for its app sessions in the period and
+   * what cloning their caches saved (lote X); absent when not known. */
+  worktrees?: ReportOwnWorktrees;
+}
+
+/** server/own-worktrees.ts OwnSummary, as the report carries it. */
+export interface ReportOwnWorktrees {
+  created: number;
+  cloned: number;
+  installed: number;
+  failed: number;
+  savedKb: number;
+  savedMs: number;
+  reasons: Array<{ reason: string; count: number }>;
+  seeds: Array<{ repo: string; state: string; reason?: string; head?: string; lockHash?: string; installedAt?: number; installMs?: number; kb: number }>;
 }
 
 // ── goals ───────────────────────────────────────────────────────────────────
@@ -522,7 +557,7 @@ export function releaseCountParts(report: Pick<ProductivityReport, "releases" | 
   return {
     released: report.releases.filter((row) => row.outcome === "released").length,
     failedCommits: report.releases.filter((row) => row.outcome === "failed").length,
-    failedTries: report.kpis.failedReleases,
+    failedTries: report.kpis.failedAttempts ?? report.kpis.failedReleases,
     superseded: report.kpis.supersededReleases,
     aborted: report.kpis.abortedReleases,
     declined: report.kpis.declinedReleases,

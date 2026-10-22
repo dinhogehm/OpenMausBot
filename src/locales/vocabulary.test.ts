@@ -57,7 +57,14 @@ const ALLOWED: ReadonlyArray<{ file: string; snippet?: string; why: string }> = 
   { file: "server/workspace-backup.ts", snippet: "OMB-WORKSPACE-1", why: "a backup file's format marker" },
   { file: "electron/cloud-move.mjs", snippet: "OMB-WORKSPACE-1", why: "a backup file's format marker" },
   { file: "electron/company-backups.mjs", snippet: "OMB-WORKSPACE-1", why: "a backup file's format marker" },
-  { file: "server/claude-desktop.ts", snippet: "OMB", why: "the prefix of a session marker the desktop helper matches, never shown as a name" },
+  // This fork: the owner's own pt-BR chips and reports about the worktrees and
+  // Claude Code sessions the server makes call the app "OMB", as the owner does.
+  { file: "server/claude-desktop.ts", snippet: "OMB", why: "this fork's pt-BR chip, in the owner's word for the app" },
+  { file: "server/desktop-work.ts", snippet: "OMB", why: "this fork's pt-BR chips, in the owner's word for the app" },
+  { file: "server/cc-own-runtime.ts", snippet: "worktree(s) do OMB", why: "this fork's pt-BR chip, in the owner's word for the app" },
+  { file: "server/own-worktrees.ts", snippet: "OMB", why: "this fork's pt-BR chips, in the owner's word for the app" },
+  { file: "server/owner-chips.ts", snippet: "OMB", why: "this fork's pt-BR chips, in the owner's word for the app" },
+  { file: "server/productivity-export.ts", snippet: "pelo OMB", why: "this fork's pt-BR report, in the owner's word for the app" },
 ];
 
 function* sources(dir: string): Generator<string> {
@@ -119,6 +126,17 @@ describe("one name per thing", () => {
           || (/boat/i.test(value!) && !/\bboats?\b/i.test((en as Record<string, string>)[key]!)))
         .map(([key]) => `${code}: ${key}`));
     expect([...new Set(offending)]).toEqual([]);
+  });
+
+  // R13-visual N29: "login do Cloud", "plano do Cloud", "seu Cloud", "OMB Cloud" sat beside "Minha Nuvem"
+  it("pt-BR never says Cloud alone: the plan and its sign-in are MausBot Cloud, the home is Minha Nuvem", () => {
+    const pack = locales["pt-br"] as Record<string, string>;
+    const offending = Object.entries(pack)
+      // the plan's own name, another company's product, and the Server menu's literal items (Electron's menu is not translated)
+      .filter(([, value]) => /\bCloud\b/.test(value.replace(/MausBot Cloud|Cerebras Cloud|“My Cloud”|“Add a Cloud…”/g, "")))
+      .map(([key, value]) => `${key}: ${value}`);
+    expect(offending).toEqual([]);
+    expect(pack["sidebar.preview.screenFrame"]).toBe("Captura de tela");
   });
 
   it("hard-coded strings in src, server, electron and shared use the same words", () => {

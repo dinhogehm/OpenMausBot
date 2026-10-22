@@ -50,6 +50,7 @@ export function rememberRoutineWake(userData, keepAwake) {
 export function createRoutineWakeHold(deps) {
   let blockerId = null;
   let timer = null;
+  let pollGeneration = 0;
   let last = { hold: false, reason: "idle", at: null };
 
   const apply = (decision) => {
@@ -65,9 +66,13 @@ export function createRoutineWakeHold(deps) {
   };
 
   const poll = async () => {
+    const generation = ++pollGeneration;
     const status = await Promise.resolve()
       .then(() => deps.fetchStatus())
       .catch(() => null);
+    // stop() and newer polls supersede this request, even if its response
+    // arrives later. An explicit poll after stop remains supported.
+    if (generation !== pollGeneration) return state();
     apply(routineWakeDecision({ enabled: deps.settings().keepAwake, onBattery: deps.isOnBattery(), status }));
     return state();
   };
@@ -82,6 +87,7 @@ export function createRoutineWakeHold(deps) {
       timer.unref?.();
     },
     stop() {
+      pollGeneration += 1;
       if (timer) clearInterval(timer);
       timer = null;
       apply({ hold: false, reason: "stopped", at: null });

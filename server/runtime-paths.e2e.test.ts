@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 
 import { launchVerificationServer, runControlOmb, verificationServerArgs, verificationServerEnvironment } from "../scripts/control-omb.ts";
+import { ROUTINE_RESULT_CONTRACT } from "./result-contract.ts";
 import { ENVELOPE_MARK } from "./runtime/envelope.ts";
 import { waitForExit } from "./testing/cleanup.ts";
 import { readHandoffs } from "./testing/handoff-rows.ts";
@@ -16,6 +17,9 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SETTLED = "Your downstream room requests have settled.";
 const REPORT_FROM_PEER = "[OpenMausBot report from @Peer";
 const ROUTINE_TURN = "Execute this routine now";
+/** A line only the routine's result contract has (server/result-contract.ts). */
+const ROUTINE_CONTRACT_LINE = ROUTINE_RESULT_CONTRACT.split("\n").at(-1)!;
+/** What a requester hears about teammates a restart cut (restartNote). */
 const TEAMMATES_CUT = "A restart cut these teammates' turns";
 const TOKEN = "runtime-paths-external-fixture-token-0123456789abcdef";
 
@@ -164,6 +168,11 @@ it("R1 a routine run coordinates a teammate, waits, and completes through a rout
   expect(resume).toContain(ROUTINE_TURN);
   expect(resume).toContain(REPORT_FROM_PEER);
   expect(resume).toContain("R1-RESULT: 42 rows");
+  // This fork: the fixture runs without the result contract, so the run has
+  // none, and neither its turn nor its resume carries the routine's
+  // (index.ts routineResultContract; with it on: result-contract.e2e.test.ts).
+  expect(f.told(f.turn("O0"))).not.toContain(ROUTINE_CONTRACT_LINE);
+  expect(resume).not.toContain(ROUTINE_CONTRACT_LINE);
   await expect.poll(() => f.roots()[0]?.status, { timeout: 15_000 }).toBe("completed");
   expect(f.children()).toHaveLength(1);
   expect(f.children()[0]).toMatchObject({ status: "completed", mode: "work", reply: "resume", botId: f.peer.id, text: brief });

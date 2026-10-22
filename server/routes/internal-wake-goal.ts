@@ -1,5 +1,6 @@
 // wake_me / set_goal from a bot's own turn: wakes, watches, standing orders and goals.
-import { STANDING_DEFAULT_LABEL, STANDING_MAX_PER_THREAD, chipText, goalEndChip, goalStartedAck, parseGoalEndInput, parseGoalInput, parsePromiseInput, parseStandingLabel, parseWakeInput, parseWatchInput, wakeChip, watchLabel } from "../bot-autonomy.ts";
+import { STANDING_DEFAULT_LABEL, STANDING_MAX_PER_THREAD, chipText, goalEndChip, goalStartedAck, parseGoalEndInput, parseGoalInput, parsePromiseInput, parseStandingLabel, parseWakeInput, parseWatchInput, productionGoal, productionGoalProblem, wakeChip, watchLabel } from "../bot-autonomy.ts";
+import { CERTIFIED_RESULTS, type CcDelivery, type ReleaseRecord } from "../prod-delivery.ts";
 import { augmentedPath } from "../env-path.ts";
 import { parseWatchCommand, runWatchCommand, watchCommandWarnings, watchIgnoreWarnings, watchMatches } from "../wake-watch.ts";
 import { PASS, type RouteContext, type RouteHandler } from "./table.ts";
@@ -16,8 +17,10 @@ export function createInternalWakeGoalRoutes(deps: {
   internalCapability: { threadId: string; botId: string };
   readInternalBody: () => ReturnType<RouteContext["readBody"]>;
   requireActiveInternalCapability: () => void;
+  deliverySessions: () => ReadonlyArray<{ delivery?: CcDelivery }>;
+  releaseRecord?: (sha: string) => Promise<ReleaseRecord | null | "unavailable">;
 }): RouteHandler {
-  const { store, autonomy, broadcast, intakeLock, watchCwd, wireBot, internalSender, internalCapability, readInternalBody, requireActiveInternalCapability } = deps;
+  const { store, autonomy, broadcast, intakeLock, watchCwd, wireBot, internalSender, internalCapability, readInternalBody, requireActiveInternalCapability, deliverySessions, releaseRecord } = deps;
   return async ({ res, path, method, json }) => {
     if (!(method === "POST" && (path === "/api/internal/wake" || path === "/api/internal/goal"))) return PASS;
     const body = await readInternalBody();
@@ -151,6 +154,25 @@ export function createInternalWakeGoalRoutes(deps: {
         if (!store.taskByThread(bot.id, target) || store.groupByThread(target)) {
           return json(res, 400, { error: "thread_id precisa ser uma das suas próprias conversas diretas" });
         }
+      }
+      const ending = autonomy.goalFor(target);
+      if (input.status === "completed" && ending?.status === "active" && productionGoal(ending.goal)) {
+        const proof = input.proof ?? "";
+        const announcedPrs = new Set<number>();
+        for (const session of deliverySessions()) for (const pr of Object.values(session.delivery?.prs ?? {})) {
+          if (pr.reportedAt !== undefined) announcedPrs.add(pr.number);
+        }
+        const certifiedReleases = new Map<string, number>();
+        if (releaseRecord) for (const match of proof.matchAll(/\b[0-9a-f]{40}\b/g)) {
+          const record = await releaseRecord(match[0]);
+          const live = record && record !== "unavailable" && CERTIFIED_RESULTS.has(record.result)
+            ? Date.parse(record.deployedAt ?? record.finishedAt ?? "") : Number.NaN;
+          if (Number.isFinite(live)) certifiedReleases.set(match[0], live);
+        }
+        requireActiveInternalCapability();
+        if (autonomy.goalFor(target) !== ending) return json(res, 409, { error: "o objetivo mudou enquanto a prova de produção era conferida" });
+        const problem = productionGoalProblem({ goalText: ending.goal, goalStartedAt: ending.startedAt, proof, announcedPrs, certifiedReleases });
+        if (problem) return json(res, 400, { error: problem });
       }
       const goal = autonomy.finishGoal(target, input.status, input.detail);
       if (!goal) return json(res, 409, { error: target === threadId ? "o modo objetivo não está ligado nesta conversa" : "o modo objetivo não está ligado naquela conversa" });

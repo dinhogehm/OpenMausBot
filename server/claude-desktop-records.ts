@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { canonicalFolder } from "./own-worktrees.ts";
 
 export const DESKTOP_SESSIONS_DIR = join(homedir(), "Library", "Application Support", "Claude", "claude-code-sessions");
 
@@ -28,6 +29,8 @@ export interface DesktopRecord {
    * for every record on this Mac, worktree sessions included): where the
    * session landed (`cwd`) is the app's choice, not this one. */
   originCwd?: string;
+  /** The base branch the session started from, as the app recorded it. */
+  sourceBranch?: string;
   /** The app's own summary of a turn: status_category "blocked" means it waits
    * on someone. It is written after the turn, and summarizes_uuid names the
    * assistant message it is about. */
@@ -76,6 +79,12 @@ export function readRecord(file: string): DesktopRecord | null {
       const value = toMs(record[key]);
       if (value === undefined) delete record[key];
       else record[key] = value;
+    }
+    // a session opened through the server's alias of its own worktree
+    // (own-worktrees.ts ownLinkPath) is about the worktree itself
+    for (const key of ["cwd", "worktreePath"] as const) {
+      const folder = record[key];
+      if (typeof folder === "string") record[key] = canonicalFolder(folder);
     }
     return record;
   } catch {
@@ -172,10 +181,13 @@ export function lastServerSessionInRoot(serverLocalIds: ReadonlySet<string>, dir
 
 /** What cc_session_start answers (409) while the server's last session
  * landed in the root (lastServerSessionInRoot). */
-export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false): string {
+export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false, ownPath = false): string {
   return [
     `não abri: a última sessão que o servidor abriu no app Claude${last.title ? ` ("${last.title}")` : ""} caiu na raiz (${last.folder}), sem worktree própria — o app está abrindo sessões novas com a worktree desligada, e a próxima cairia lá também, mexendo direto no checkout principal.`,
-    `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
+    // with the server's own worktrees (lote X) the option must stay OFF: never ask to turn it on (R12-1)
+    ownPath
+      ? `Neste repositório o servidor cria a pasta de cada sessão e abre o app nela, e para isso a opção worktree tem de ficar DESLIGADA: não peça ao dono para ligá-la. Esse caminho está suspenso pelo disjuntor; peça ao dono para deixar a opção worktree desligada e resolver o item "O app Claude abriu … sessões …" em "Precisa de você": o servidor volta a abrir as sessões na pasta dele.`
+      : `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
     fromQueue
       ? `Este pedido veio da fila de sessões e continua nela: o servidor tenta de novo sozinho a cada 5 min e desiste, com aviso, depois de 24 h falhando. Se não der para esperar, use surface "cli" com cli_reason.`
       : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,

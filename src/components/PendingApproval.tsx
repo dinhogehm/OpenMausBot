@@ -1,6 +1,6 @@
 import { memo, useState, type ReactNode } from "react";
 import { ChevronDown, Send, ShieldCheck, TriangleAlert } from "lucide-react";
-import { useStore, type Bot, type Message } from "@/state/store";
+import { useStore, type Action, type Bot, type Message } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t, tFromServer } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
@@ -9,6 +9,17 @@ import { APPROVAL_CODE_CHIP, toolLabel } from "./ApprovalCard";
 import { outboundSummary } from "@/lib/approval-summary";
 import { reviewedSkillSha256 } from "../../shared/skill-request";
 import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
+import { commandPatternLabel, commandSaveable } from "../../shared/command-pattern";
+
+/** "Sempre permitir esse tipo de comando (`cat *`)": the pattern the server will save, when one is safe. */
+function rememberCommandLabel(command: string): string {
+  const pattern = commandPatternLabel(command);
+  return pattern ? `${t("approval.action.alwaysAllowCommand")} (${pattern})` : t("approval.action.alwaysAllowCommand");
+}
+
+function rememberCommandHint(candidate: { command: string; cwd: string }): string {
+  return t("approval.action.alwaysAllowCommandHint", { cwd: candidate.cwd, pattern: commandPatternLabel(candidate.command) ?? candidate.command });
+}
 
 interface ApprovalLabels {
   [tool: string]: LocaleKey;
@@ -133,6 +144,7 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   botName,
   actions,
   more,
+  defaultOpen = false,
 }: {
   pending: Pending;
   count: number;
@@ -141,8 +153,10 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   actions?: ReactNode;
   more?: ReactNode;
   locale?: string;
+  /** This fork: "Precisa de você" shows the exact detail without a click. */
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const outbound = pending.message.card ? outboundSummary(pending.message.card) : undefined;
   const heldNote = outbound?.opaque && pending.heldCode === "approval.held.outbound"
     ? t("approval.opaqueCode")
@@ -233,6 +247,90 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   );
 });
 
+/** One decision a pending approval offers, as the composer shows it. The
+ * same list drives "Precisa de você" (needs-you approvals), so the panel
+ * never offers a decision the chat would not, nor misses one it does. */
+export type ApprovalChoiceId = "cancelTurn" | "deny" | "alwaysAllow" | "alwaysAllowSession" | "rememberCommand" | "allow";
+export interface ApprovalChoice {
+  id: ApprovalChoiceId;
+  label: string;
+  title?: string;
+  look: "quiet" | "danger" | "outline" | "primary";
+  disabled?: boolean;
+  autoFocus?: boolean;
+}
+
+/** The fields of a `decideRequest` a choice sends (all but where it goes). */
+export type ApprovalDecision = Omit<Extract<Action, { type: "decideRequest" }>, "type" | "threadId" | "onError">;
+
+function durable(pending: Pending): boolean {
+  return isRoutineApproval(pending) || isSkillApproval(pending) || isProfileApproval(pending) || Boolean(pending.message.card?.teamSetupRequest);
+}
+
+/** The decisions in the order they are drawn, least destructive last.
+ * `bot`: who asked — "always allow" is remembered against them.
+ * `ownerOrAdmin`: may remember an exact command (null while unknown). */
+export function approvalChoices(pending: Pending, opts: { bot?: Pick<Bot, "id" | "name">; ownerOrAdmin: boolean | null }): ApprovalChoice[] {
+  const isRoutineRequest = isRoutineApproval(pending);
+  const isSkillRequest = isSkillApproval(pending);
+  const isProfileRequest = isProfileApproval(pending);
+  const isTeamSetup = Boolean(pending.message.card?.teamSetupRequest);
+  const durableRequest = durable(pending);
+  const canRememberCommand = opts.ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist) && commandSaveable(pending.commandAllowlist!.command);
+  const reviewedSha256 = pending.message.card?.skillRequest ? reviewedSkillSha256(pending.message.card.skillRequest) : undefined;
+  const choices: ApprovalChoice[] = [];
+  if (!durableRequest) choices.push({ id: "cancelTurn", label: t("approval.action.cancelTurn"), look: "quiet" });
+  choices.push({
+    id: "deny",
+    label: pending.message.card?.teamSetupRequest?.suggestion ? t("approval.action.notNow") : isRoutineRequest || isProfileRequest || isTeamSetup ? t("approval.action.cancel") : t("approval.action.deny"),
+    look: "danger",
+    ...(isTeamSetup ? { autoFocus: true } : {}),
+  });
+  if (!durableRequest && opts.bot && pending.allowKey) {
+    choices.push({ id: "alwaysAllow", label: t("approval.action.alwaysAllow"), title: t("approval.action.stopAsking", { name: opts.bot.name, key: pending.allowKey }), look: "outline" });
+  }
+  if (!durableRequest && !pending.allowKey && !canRememberCommand && pending.allowSession) {
+    choices.push({ id: "alwaysAllowSession", label: t("approval.action.alwaysAllowSession"), title: t("approval.action.alwaysAllowSessionHint"), look: "outline" });
+  }
+  if (canRememberCommand && pending.commandAllowlist) {
+    choices.push({ id: "rememberCommand", label: rememberCommandLabel(pending.commandAllowlist.command), title: rememberCommandHint(pending.commandAllowlist), look: "outline" });
+  }
+  choices.push({
+    id: "allow",
+    label: (isTeamSetup ? pending.message.card?.options[0] : isSkillRequest
+      ? pending.message.card?.skillRequest?.action === "update"
+        ? t("approval.action.update")
+        : t("approval.action.enable")
+      : isRoutineRequest || isProfileRequest
+        ? t("approval.action.confirm")
+        : t("approval.action.allowOnce")) ?? t("approval.action.allowOnce"),
+    look: "primary",
+    ...(isSkillRequest && !reviewedSha256 ? { disabled: true } : {}),
+  });
+  return choices;
+}
+
+/** What a choice sends — null for "Cancelar execução", which stops the turn
+ * instead of answering the card. The one shape the composer and "Precisa de
+ * você" both dispatch as `decideRequest` (POST /api/threads/:id/respond). */
+export function approvalDecision(pending: Pending, id: ApprovalChoiceId, bot?: Pick<Bot, "id">): ApprovalDecision | null {
+  if (id === "cancelTurn") return null;
+  const behavior = id === "deny" ? "deny" as const : "allow" as const;
+  const always = id === "alwaysAllow" || id === "alwaysAllowSession";
+  const reviewedSha256 = pending.message.card?.skillRequest ? reviewedSkillSha256(pending.message.card.skillRequest) : undefined;
+  return {
+    requestId: pending.requestId,
+    behavior,
+    message: behavior === "deny" ? "Denied by the user." : undefined,
+    reviewedSha256: behavior === "allow" ? reviewedSha256 : undefined,
+    // a harness-native card (peer comms) remembers a grant on the bot; a
+    // provider's card hands the allow to the provider for its session
+    alwaysAllow: always && bot && pending.allowKey ? { botId: bot.id, key: pending.allowKey } : undefined,
+    always: always && !pending.allowKey && pending.allowSession ? true : undefined,
+    rememberCommand: id === "rememberCommand" || undefined,
+  };
+}
+
 export function PendingApprovalActions({
   pending,
   threadId,
@@ -254,7 +352,7 @@ export function PendingApprovalActions({
   const isTeamSetup = Boolean(pending.message.card?.teamSetupRequest);
   const isSuggestion = Boolean(pending.message.card?.teamSetupRequest?.suggestion);
   const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest || isTeamSetup;
-  const canRememberCommand = ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist);
+  const canRememberCommand = ownerOrAdmin === true && !durableRequest && !pending.allowKey && Boolean(pending.commandAllowlist) && commandSaveable(pending.commandAllowlist!.command);
   const reviewedSha256 = pending.message.card?.skillRequest
     ? reviewedSkillSha256(pending.message.card.skillRequest)
     : undefined;
@@ -277,7 +375,7 @@ export function PendingApprovalActions({
     : bot && pending.allowKey
       ? { name: t("approval.action.alwaysAllow"), hint: t("approval.action.stopAsking", { name: bot.name, key: pending.allowKey }), run: () => decide("allow", true) }
       : canRememberCommand && pending.commandAllowlist
-        ? { name: t("approval.action.alwaysAllowCommand"), hint: t("approval.action.alwaysAllowCommandHint", { cwd: pending.commandAllowlist.cwd }), run: () => decide("allow", false, true) }
+        ? { name: rememberCommandLabel(pending.commandAllowlist.command), hint: rememberCommandHint(pending.commandAllowlist), run: () => decide("allow", false, true) }
         : !pending.allowKey && pending.allowSession
           ? { name: t("approval.action.alwaysAllowSession"), hint: t("approval.action.alwaysAllowSessionHint"), run: () => decide("allow", true) }
           : null;

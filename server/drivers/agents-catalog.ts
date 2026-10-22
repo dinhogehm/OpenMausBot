@@ -498,13 +498,14 @@ const TOOL_DEFINITIONS = [
   {
     name: "goal_end",
     description:
-      "End goal mode in this conversation. completed only when the deliverable is verified; blocked when you cannot proceed; needs_input when only the person can decide (their next message resumes the goal). Also say the outcome in your reply.",
+      "End goal mode in this conversation. completed only when the deliverable is verified, with a proof someone can check; blocked when you cannot proceed; needs_input when only the person can decide (their next message resumes the goal). Also say the outcome in your reply.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         status: { type: "string", enum: ["completed", "blocked", "needs_input"] },
         detail: { type: "string", minLength: 1, maxLength: 500, description: "What was delivered, or exactly what blocks it." },
+        proof: { type: "string", maxLength: 500, description: "Required for completed: what someone else can check — a link, the sent message's ID, a PR or issue number, a commit, or the command in backticks with its output." },
         thread_id: { type: "string", description: "Optional: end the goal of another of your conversations (e.g. the decision it waited for came here)." },
       },
       required: ["status", "detail"],
@@ -513,7 +514,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "owner_pending",
     description:
-      "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), and ALWAYS why and steps (≥1, with the exact command or link) — add/update without them is refused —, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
+      "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), and ALWAYS why and steps (≥1, with the exact command or link) — add/update without them is refused —, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. When the server asks you to register a question you left (\"[Servidor: pergunta sem passo a passo] Ref <thread>@<askAt>\"), add with replacesAsk set to that exact Ref: only then does the item take the question's place. Not for rooms.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -551,6 +552,7 @@ const TOOL_DEFINITIONS = [
           },
         },
         id: { type: "string", description: "update/resolve: the item's id (resolve: or \"all\")." },
+        replacesAsk: { type: "string", maxLength: 120, description: "add only, answering the server's \"pergunta sem passo a passo\" request: its exact Ref, <thread>@<askAt>." },
       },
       required: ["action"],
     },

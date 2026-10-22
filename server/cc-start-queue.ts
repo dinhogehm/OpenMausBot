@@ -25,6 +25,7 @@
 //   then it leaves the queue and the bot hears that too; while it waits to
 //   retry it reserves no slot.
 import { readFileSync, renameSync } from "node:fs";
+import { z } from "zod";
 import { writeFileAtomic } from "./atomic.ts";
 
 export interface QueuedStart {
@@ -46,6 +47,11 @@ export interface QueuedStart {
   lastReason?: string;
   /** The first of the failures in a row (cleared when only a slot is missing). */
   failingSince?: number;
+  /** A durable start claim whose external outcome has not been recorded yet.
+   * Never replay it automatically after a crash or failed receipt write. */
+  dispatching?: boolean;
+  /** An item the owner delegated (lote del): set by the server only, never from a bot's body. */
+  delegation?: { botId: string; itemId: string };
 }
 
 export const START_QUEUE_MAX = 30;
@@ -92,6 +98,23 @@ export function slotFreeForWork(input: { taken: number; urgentQueued: number; ma
 
 const sameTitle = (a: string, b: string) => a.trim().toLowerCase().replace(/\s+/g, " ") === b.trim().toLowerCase().replace(/\s+/g, " ");
 
+const queuedStartSchema = z.object({
+  id: z.string().min(1),
+  botId: z.string().min(1),
+  threadId: z.string().min(1),
+  replyThreadId: z.string().optional(),
+  body: z.record(z.string(), z.unknown()),
+  title: z.string(),
+  issue: z.string().optional(),
+  priority: z.number().int().min(0).max(2),
+  at: z.number(),
+  retryAt: z.number().optional(),
+  lastReason: z.string().optional(),
+  failingSince: z.number().optional(),
+  dispatching: z.boolean().optional(),
+  delegation: z.object({ botId: z.string().min(1), itemId: z.string().min(1) }).optional(),
+}).passthrough();
+
 export class CcStartQueue {
   private items: QueuedStart[] = [];
   private readonly path: string | null;
@@ -112,7 +135,10 @@ export class CcStartQueue {
     try {
       const raw = JSON.parse(text) as { items?: unknown };
       if (!Array.isArray(raw.items)) throw new Error("no items list");
-      this.items = raw.items.filter((item): item is QueuedStart => Boolean(item) && typeof (item as QueuedStart).id === "string" && typeof (item as QueuedStart).botId === "string" && typeof (item as QueuedStart).threadId === "string");
+      this.items = raw.items.flatMap(item => {
+        const parsed = queuedStartSchema.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      });
       const dropped = raw.items.length - this.items.length;
       if (dropped) console.error(`[cc-start-queue] ${dropped} malformed item(s) in ${path} were left out`);
     } catch (error) {
@@ -128,13 +154,11 @@ export class CcStartQueue {
     }
   }
 
-  private save(): void {
-    if (!this.path) return;
-    try {
-      writeFileAtomic(this.path, `${JSON.stringify({ items: this.items }, null, 2)}\n`, { mode: 0o600 });
-    } catch (error) {
-      console.error(`[cc-start-queue] could not save ${this.path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  private commit(items: QueuedStart[]): void {
+    // Publish a change only after it is durable. A failed write must neither
+    // acknowledge a new start nor remove work that may otherwise be replayed.
+    if (this.path) writeFileAtomic(this.path, `${JSON.stringify({ items }, null, 2)}\n`, { mode: 0o600 });
+    this.items = items;
   }
 
   /** In the order they will open: priority, then arrival. */
@@ -146,7 +170,7 @@ export class CcStartQueue {
    * the queue. One waiting out a retry (a carrier on battery, the app's last
    * folder) reserves nothing — it could not use the slot anyway. */
   urgentCount(now = Date.now()): number {
-    return this.items.filter((item) => item.priority === 0 && (item.retryAt === undefined || item.retryAt <= now)).length;
+    return this.items.filter((item) => !item.dispatching && item.priority === 0 && (item.retryAt === undefined || item.retryAt <= now)).length;
   }
 
   /** Take out the starts that have been failing to open for longer than
@@ -154,10 +178,9 @@ export class CcStartQueue {
   expire(now = Date.now()): QueuedStart[] {
     // counted from the first failure in a row, not from when it was queued:
     // a P1 that waited 23 h for a slot and then met the battery once stays
-    const expired = this.items.filter((item) => item.failingSince !== undefined && now - item.failingSince > START_RETRY_MAX_MS);
+    const expired = this.items.filter((item) => !item.dispatching && item.failingSince !== undefined && now - item.failingSince > START_RETRY_MAX_MS);
     if (!expired.length) return [];
-    this.items = this.items.filter((item) => !expired.includes(item));
-    this.save();
+    this.commit(this.items.filter((item) => !expired.includes(item)));
     return expired;
   }
 
@@ -167,15 +190,13 @@ export class CcStartQueue {
   add(item: QueuedStart): { position: number; id: string; duplicate: boolean } | null {
     const same = this.items.find((each) => each.botId === item.botId && ((item.issue && each.issue === item.issue) || sameTitle(each.title, item.title)));
     if (same) {
-      if (item.priority < same.priority) {
-        same.priority = item.priority;
-        this.save();
+      if (!same.dispatching && item.priority < same.priority) {
+        this.commit(this.items.map(each => each === same ? { ...each, priority: item.priority } : each));
       }
       return { position: this.position(same.id), id: same.id, duplicate: true };
     }
     if (this.items.length >= START_QUEUE_MAX) return null;
-    this.items.push(item);
-    this.save();
+    this.commit([...this.items, item]);
     return { position: this.position(item.id), id: item.id, duplicate: false };
   }
 
@@ -185,17 +206,33 @@ export class CcStartQueue {
 
   /** Take the next one to open: not one in `skip`, nor one waiting out a retry. */
   take(now = Date.now(), skip: ReadonlySet<string> = new Set()): QueuedStart | null {
-    const next = this.ordered().find((item) => !skip.has(item.id) && (item.retryAt === undefined || item.retryAt <= now));
+    const next = this.ordered().find((item) => !item.dispatching && !skip.has(item.id) && (item.retryAt === undefined || item.retryAt <= now));
     if (!next) return null;
-    this.items = this.items.filter((item) => item.id !== next.id);
-    this.save();
+    this.commit(this.items.filter((item) => item.id !== next.id));
     return next;
+  }
+
+  /** Retain a durable receipt before invoking an external start. A restart
+   * keeps the claim visible, but never assumes it is safe to start it again. */
+  claim(now = Date.now(), skip: ReadonlySet<string> = new Set()): QueuedStart | null {
+    const next = this.ordered().find(item => !item.dispatching && !skip.has(item.id) && (item.retryAt === undefined || item.retryAt <= now));
+    if (!next) return null;
+    const claimed = { ...next, dispatching: true };
+    this.commit(this.items.map(item => item.id === next.id ? claimed : item));
+    return claimed;
+  }
+
+  /** Forget a claim only after the external start returned a terminal result. */
+  complete(id: string): void {
+    if (this.items.some(item => item.id === id && item.dispatching)) {
+      this.commit(this.items.filter(item => item.id !== id));
+    }
   }
 
   /** Put one back at its place (it could not open after all). */
   restore(item: QueuedStart): void {
-    this.items = [...this.items.filter((each) => each.id !== item.id), item];
-    this.save();
+    const { dispatching: _dispatching, ...waiting } = item;
+    this.commit([...this.items.filter((each) => each.id !== item.id), waiting]);
   }
 
   of(botId: string): QueuedStart[] {
@@ -205,9 +242,9 @@ export class CcStartQueue {
   /** Drop a bot's queued start by id. */
   remove(botId: string, id: string): QueuedStart | null {
     const found = this.items.find((item) => item.botId === botId && item.id === id) ?? null;
+    if (found?.dispatching) return null; // cancelling a claim cannot prove its session was stopped
     if (found) {
-      this.items = this.items.filter((item) => item !== found);
-      this.save();
+      this.commit(this.items.filter((item) => item !== found));
     }
     return found;
   }
@@ -224,9 +261,12 @@ export function queueListing(queue: CcStartQueue, viewer: { id: string; chief: b
     const mine = item.botId === viewer.id;
     const who = viewer.chief || !mine ? ` · de ${mine ? "você" : botName(item.botId)}` : "";
     const id = viewer.chief || mine ? ` · id ${item.id}` : "";
-    return `${i + 1}. "${item.title}" · prioridade ${priorityLabel(item.priority)} · desde ${when(item.at)}${who}${id}${item.lastReason ? ` · esperando: ${item.lastReason.slice(0, 160)}` : ""}`;
+    const status = item.dispatching
+      ? " · resultado do início não confirmado; não será repetido automaticamente; confira a sessão antes de reconciliar este registro"
+      : item.lastReason ? ` · esperando: ${item.lastReason.slice(0, 160)}` : "";
+    return `${i + 1}. "${item.title}" · prioridade ${priorityLabel(item.priority)} · desde ${when(item.at)}${who}${id}${status}`;
   });
-  return `\nFila de sessões (vagas: ${max} rodando no máximo, divididas entre todos os bots), nesta ordem:\n${lines.join("\n")}\nPara tirar um start seu da fila: cc_session_archive com o id dele.`;
+  return `\nFila de sessões (vagas: ${max} rodando no máximo, divididas entre todos os bots), nesta ordem:\n${lines.join("\n")}\nPara tirar um start seu que ainda aguarda início: cc_session_archive com o id dele. Registros com resultado não confirmado exigem conferir a sessão real; cancelar o registro não encerraria essa sessão.`;
 }
 
 export interface StartResult {
@@ -236,6 +276,9 @@ export interface StartResult {
   busy?: boolean;
   /** Could not open for a reason that may pass: stays queued, tried again later. */
   retry?: boolean;
+  /** The session it opened, or its place in the queue (a delegation follows it, lote del). */
+  sessionId?: string;
+  queueId?: string;
 }
 
 export interface DrainDeps {
@@ -263,10 +306,11 @@ export function drainStartQueue(queue: CcStartQueue, deps: DrainDeps): void {
   }
   const tried = new Set<string>();
   while (deps.slotFree()) {
-    const next = queue.take(deps.now(), tried);
+    const next = queue.claim(deps.now(), tried);
     if (!next) return;
     tried.add(next.id);
     if (!deps.botExists(next.botId)) {
+      queue.complete(next.id);
       deps.log(`queued start "${next.title}" (${next.id}) dropped: its bot ${next.botId} no longer exists`);
       continue;
     }
@@ -300,6 +344,7 @@ export function drainStartQueue(queue: CcStartQueue, deps: DrainDeps): void {
       }
       continue;
     }
+    queue.complete(next.id);
     deps.chip(threadId, started.status === 200 ? `Fila de sessões: "${next.title}" abriu${where}` : `Fila de sessões: "${next.title}" não abriu${where}`, started.status === 200);
     deps.report(next.botId, threadId, `[Fila de sessões do Claude Code] Uma vaga liberou para "${next.title}": ${started.status === 200 ? said : `não abri — ${said}`}${where}`);
   }

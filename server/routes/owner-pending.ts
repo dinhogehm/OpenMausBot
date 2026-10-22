@@ -1,46 +1,146 @@
-// "Precisa de você": the person settles, reminds or answers a bot's open item.
-import type { BotAutonomy, OwnerPending } from "../bot-autonomy.ts";
-import { chipText, ownerPendingAwaitNote, ownerPendingRecommendNote, ownerPendingRecommendText, ownerPendingReplyText, ownerPendingStepsRequestNote, ownerPendingStepsRequestText, ownerPendingVisible } from "../bot-autonomy.ts";
-import type { loadConfig } from "../config.ts";
-import { DATA_DIR } from "../config.ts";
-import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appStillBlockedText, staleUnblockItem, type FolderFlapState } from "../owner-chips.ts";
+// "Precisa de você" (this fork), moved out of server/index.ts's inline
+// routes into the route table (server/routes/README.md): the settled items
+// with what the person answered (GET /api/bots/:id/owner-pending-resolved),
+// and, on one open item, resolve, unsupersede, remind, delegate and reply
+// (POST /api/bots/:id/owner-pending/:item/...); POST
+// /api/bots/:id/tasks/:threadId/ask-steps asks a bot again to register its
+// bare question as an item. The table runs after the auth gate; scope rules
+// stay keyed by path in server/request-auth.ts, which opens none of these to
+// clients (admin scope by default). Everything index.ts owns comes in `deps`.
+import { existsSync } from "node:fs";
+
+import type { ResolvedSender } from "../../shared/wire.ts";
+import { answerKey, duplicateAnswerText, failedSince, onAnswered, type AnswerDedupe } from "../answer-dedupe.ts";
+import {
+  chipText,
+  ownerPendingAwaitNote,
+  ownerPendingRecommendNote,
+  ownerPendingRecommendText,
+  ownerPendingReplyText,
+  ownerPendingStepsRequestNote,
+  ownerPendingStepsRequestText,
+  ownerPendingVisible,
+  type AskPromotion,
+  type BotAutonomy,
+  type OwnerPending,
+} from "../bot-autonomy.ts";
+import type { AppAvailability } from "../cc-sessions.ts";
+import type { StartResult } from "../cc-start-queue.ts";
+import type { AppConfig } from "../config.ts";
+import {
+  answerTouchesMoved,
+  asksBotItemRemoval,
+  DISK_BOT_ITEM_NOT_AUTHORIZED,
+  DISK_DECISION_KEY_PREFIX,
+  DISK_NOT_AUTHORIZED,
+  diskChangedText,
+  diskTextNotice,
+  goneDiskItem,
+  keepsFolders,
+  keyFolders,
+} from "../disk-decision.ts";
 import { routedReplyText } from "../owner-channel.ts";
+import {
+  APP_FLAPPING_CHECK_LABEL,
+  APP_UNBLOCK_CHECK_LABEL,
+  APP_UNBLOCK_DECLINE_LABEL,
+  APP_UNBLOCK_DECLINE_MS,
+  appStillBlockedText,
+  staleUnblockItem,
+  type FolderBlockSeen,
+  type FolderFlapState,
+} from "../owner-chips.ts";
+import { DECISOR_LINE, DECISOR_NOTE_PREFIX, isDecisorRequest } from "../owner-decisor.ts";
+import { delegationBrief, delegationChoice, type DelegatedItemRef, type OwnerDelegationBack } from "../owner-delegate.ts";
+import { supersededLine } from "../owner-pending-guard.ts";
 import { pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, type PowerState } from "../power.ts";
 import { promptWithReply } from "../replies.ts";
 import type { RequestAuth } from "../request-auth.ts";
+import { keepRoutineAsk, ownerAnswersItem, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX } from "../routine-owner-ask.ts";
 import { assertWithinBudget } from "../spend.ts";
 import { queueSteeredMessage } from "../steer-queue.ts";
-import type { Store } from "../store.ts";
+import type { BotRecord, Message, Store } from "../store.ts";
 import type { UsageTrigger } from "../usage-ledger.ts";
-import type { ResolvedSender } from "../../shared/wire.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
-type FolderBlock = Parameters<typeof appStillBlockedText>[0] & { seen?: NonNullable<Parameters<typeof staleUnblockItem>[3]> };
+/** Why a New Session in the Claude app would land in a wrong folder now, as
+ * appFolderBlock (server/index.ts) answers it; null when the app may be used. */
+type AppFolderBlock =
+  | { kind: "reused"; last: { folder: string; title?: string } }
+  | { kind: "root"; last: { folder: string; title?: string } }
+  | { kind: "flapping"; last: { folder: string; title?: string }; seen: FolderBlockSeen[] };
 
-export interface OwnerPendingRouteDeps<B extends FolderBlock> {
-  store: Store;
+/** What startOrQueueDirectMessage (server/index.ts) answers with: the turn's
+ * line, or the queue slot the words wait in. Written out here so the module
+ * needs nothing from index.ts. */
+type DirectMessageOutcome =
+  | { ok: true; queued: true; queueId: string; threadId: string; reason?: unknown }
+  | { ok: true; threadId: string; message: Message };
+
+export interface OwnerPendingRouteDeps {
+  store: Pick<Store, "appendMessage" | "bot" | "taskByThread">;
   autonomy: BotAutonomy;
-  cfg: ReturnType<typeof loadConfig>;
+  cfg: AppConfig;
+  dataDir: string;
+  /** The stop file in the owner's home: while it exists, nothing goes out to the bots. */
+  nuriaStopFile: string;
+  /** The key prefix of the server's own "unblock the app" item. */
   appUnblockKey: string;
-  appFolderBlock(): B | null;
-  appFolderFlaps: { set(state: FolderFlapState): void };
-  ownerDeclines: { set(key: string, until: number): void };
+  /** How long a request for a bare question's steps holds before another may go. */
+  questionStepsAskAgainMs: number;
+  /** The replies' answer-dedupe: the same answer to the same item is taken once. */
+  answerDedupe: AnswerDedupe;
+  /** What the owner declined from "Precisa de você", and until when. */
+  ownerDeclines: { set(key: string, at: number): void };
+  /** The app's folder blocks, counted toward a flip stop. */
+  appFolderFlaps: { set(next: FolderFlapState): void };
   cloudGuestSendRefusal(auth: RequestAuth, threadId: string): string | null;
-  drainQueuedSends(): void;
   messageSender(auth: RequestAuth): ResolvedSender | undefined;
-  ownerTurnThread(botId: string, from: string): string;
-  readPowerNow(): Promise<PowerState | null>;
-  refreshBotRow(botId: string): void;
-  replaceQueuedChoice(botId: string, item: OwnerPending): void;
-  startOrQueueDirectMessage(botId: string, threadId: string, text: string, replyTo: undefined, sendId: undefined, sender: ResolvedSender | undefined, trigger: UsageTrigger): Promise<object>;
   usageTriggerFor(auth: RequestAuth): UsageTrigger;
+  refreshBotRow(botId: string): void;
+  ownerTurnThread(botId: string, from: string): string;
+  /** Goal mode in this thread stopped to ask the person: when, or null. Read per call (set once autonomy exists). */
+  goalNeedsInputForThread(threadId: string): number | null;
+  askQuestionSteps(botId: string, threadId: string, at: number): AskPromotion | null;
+  delegationTime(at: number): string;
+  delegateView(item: OwnerPending, isRepo: (path: string) => boolean): { repo: string } | { onlyYou: string };
+  ccIsGitRepo(path: string): boolean;
+  delegationOwner(bot: BotRecord, item: OwnerPending): { bot: BotRecord; threadId: string } | null;
+  appAvailability(repo: string): { state: AppAvailability; reason: string | null };
+  startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue?: boolean, delegation?: DelegatedItemRef): StartResult;
+  delegationReturned(ref: DelegatedItemRef, back: OwnerDelegationBack): void;
+  delegationChip(item: OwnerPending, text: string, ok?: boolean): void;
+  appFolderBlock(): AppFolderBlock | null;
+  ownOnByName(name: string): boolean;
+  readPowerNow(): Promise<PowerState | null>;
+  /** Runs `work` in turn with a routine's disk pass. */
+  diskItemTurn<T>(work: () => Promise<T>): Promise<T>;
+  recheckDiskItem(
+    item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string,
+    answer?: { kind: string; label?: string; text?: string },
+  ): Promise<{ outcome: "keep" | "replace" | "close"; line: string; note?: string }>;
+  foldersInUse(): string[];
+  allProcessCwds(): Promise<string[] | null>;
+  replaceQueuedChoice(botId: string, item: OwnerPending): void;
+  drainQueuedSends(): void;
+  startOrQueueDirectMessage(
+    botId: string, threadId: string, text: string, replyTo?: Message, sendId?: string, sender?: ResolvedSender, trigger?: UsageTrigger,
+  ): Promise<DirectMessageOutcome>;
 }
 
-export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendingRouteDeps<B>): RouteHandler {
-  const { store, autonomy, cfg, appUnblockKey: APP_UNBLOCK_KEY, appFolderBlock, appFolderFlaps, ownerDeclines, cloudGuestSendRefusal, drainQueuedSends, messageSender, ownerTurnThread, readPowerNow, refreshBotRow, replaceQueuedChoice, startOrQueueDirectMessage, usageTriggerFor } = deps;
+export function createOwnerPendingRoutes(deps: OwnerPendingRouteDeps): RouteHandler {
+  const {
+    store, autonomy, cfg, answerDedupe, ownerDeclines, appFolderFlaps,
+    dataDir: DATA_DIR, nuriaStopFile: NURIA_STOP_FILE, appUnblockKey: APP_UNBLOCK_KEY, questionStepsAskAgainMs: QUESTION_STEPS_ASK_AGAIN_MS,
+    cloudGuestSendRefusal, messageSender, usageTriggerFor, refreshBotRow, ownerTurnThread, goalNeedsInputForThread, askQuestionSteps,
+    delegationTime, delegateView, ccIsGitRepo, delegationOwner, appAvailability, startCcSession, delegationReturned, delegationChip,
+    appFolderBlock, ownOnByName, readPowerNow, diskItemTurn, recheckDiskItem, foldersInUse, allProcessCwds, replaceQueuedChoice,
+    drainQueuedSends, startOrQueueDirectMessage,
+  } = deps;
   return async ({ req, res, path, method, auth, json, readBody }) => {
-    if (!path.startsWith("/api/bots/") || !path.includes("/owner-pending")) return PASS;
-    let m: RegExpMatchArray | null;
+    if (!path.startsWith("/api/bots/") || (!path.includes("/owner-pending") && !path.endsWith("/ask-steps"))) return PASS;
+    /** scratch for the route match, as index.ts's shared `m` */
+    let m: RegExpMatchArray | null = null;
     // the settled items, with what the person answered: the audit trail (INSP-J2 #12)
     m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending-resolved$/);
     if (m && method === "GET") {
@@ -64,6 +164,23 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
       refreshBotRow(bot.id);
       return json(res, 200, { resolved: done.length });
     }
+    // "Os comandos ainda valem": the owner lifts a superseded mark — the bot that marked it may have been wrong (INSP-R13fol #13)
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/unsupersede$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const open = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!open) return json(res, 404, { error: "Este item não está mais aberto." });
+      const notYours = cloudGuestSendRefusal(auth, open.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      if (!open.supersededBy) return json(res, 200, { ok: true });
+      const was = open.supersededBy;
+      autonomy.patchOwnerPending(bot.id, open.id, { supersededBy: undefined });
+      if (store.taskByThread(bot.id, open.threadId)) store.appendMessage(open.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${open.id} — a pessoa disse que os comandos ainda valem (a marca do ${was.id} do ${was.botName} caiu)`, 240), ok: true } });
+      refreshBotRow(bot.id);
+      console.log(`[owner-pending] ${open.id} of ${bot.name}: the owner lifted the superseded mark of ${was.id} (${was.botName})`);
+      return json(res, 200, { ok: true });
+    }
     // "Lembrar <bot>": an answered item the bot let go silent for 2 h. The
     // reminder is a system report (never the person's words), sent once while
     // it waits to be read; the item waits on the bot again (INSP-J2 r2 N3).
@@ -84,6 +201,80 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
       refreshBotRow(bot.id);
       return json(res, 202, { ok: true, deduped: reminded.deduped, threadId: target });
     }
+    // "Pedir de novo" on a bot's bare question (lot J2): the server asks the
+    // bot again, as itself, to register it as an item with why, steps and
+    // options — never in the person's words, never within 15 min of the last
+    // request, never with ~/.nuria/stop.
+    m = path.match(/^\/api\/bots\/([\w-]+)\/tasks\/([\w-]+)\/ask-steps$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      if (!store.taskByThread(bot.id, m[2]!)) return json(res, 404, { error: "Esta conversa não existe mais." });
+      const notYours = cloudGuestSendRefusal(auth, m[2]!);
+      if (notYours) return json(res, 403, { error: notYours });
+      // a request still in its 15 min (its turn may be running right now, the question hidden meanwhile): nothing more is sent
+      const current = autonomy.allAskPromotions().findLast((each) => each.botId === bot.id && each.threadId === m![2] && !each.itemId && each.answeredAt === undefined);
+      if (current && Date.now() - current.askedAt < QUESTION_STEPS_ASK_AGAIN_MS) return json(res, 200, { ok: true, deduped: true, askedAt: current.askedAt });
+      const at = goalNeedsInputForThread(m[2]!);
+      if (at === null) return json(res, 409, { error: `${bot.name} não espera mais uma resposta sua nesta conversa.`, code: "no_question" });
+      if (existsSync(NURIA_STOP_FILE)) return json(res, 409, { error: "O ~/.nuria/stop está ativo: nenhum pedido sai para os bots até ele ser removido. Responda abaixo ou abra a conversa.", code: "stopped" });
+      const asked = askQuestionSteps(bot.id, m[2]!, at);
+      if (!asked) return json(res, 409, { error: `A conversa de ${bot.name} com você não existe mais. Responda abaixo.`, code: "no_channel" });
+      return json(res, 202, { ok: true, deduped: false, askedAt: asked.askedAt });
+    }
+    // "Delegar a um agente" (lote del): the server opens a Claude Code session
+    // for the item the way the Chief does (startCcSession: the same guard,
+    // worktree option and breaker) with the decision the owner chose, else
+    // the recommended one, else the steps. The item waits on the session, out
+    // of the count, until its report settles it. Never an approve, and only
+    // what an agent may do (server/owner-delegate.ts onlyYouReason).
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/delegate$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const item = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!item) return json(res, 404, { error: "Este item já foi resolvido." });
+      const notYours = cloudGuestSendRefusal(auth, item.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      // a double click is one delegation: the replies' answer-dedupe, keyed by the item
+      const key = answerKey(bot.id, item.id, { kind: "delegate", text: "" });
+      const claim = answerDedupe.claim(key);
+      if (!claim.ok) return json(res, 200, { ok: true, duplicate: true, message: claim.sent ? "Este item já foi delegado; não abri outra sessão." : "A delegação deste item ainda está sendo aberta; não abri outra sessão." });
+      onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
+      // one delegation at a time per item
+      if (item.delegation) return json(res, 409, { error: `Este item já está com um agente (delegado ${delegationTime(item.delegation.at)}).`, code: "already_delegated" });
+      const view = delegateView(item, ccIsGitRepo);
+      if ("onlyYou" in view) return json(res, 409, { error: `Só você: ${view.onlyYou}.`, code: "not_delegable" });
+      if (existsSync(NURIA_STOP_FILE)) return json(res, 409, { error: "O ~/.nuria/stop está ativo: nenhuma sessão é aberta até ele ser removido.", code: "stopped" });
+      try {
+        assertWithinBudget(cfg, DATA_DIR);
+      } catch (error) {
+        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
+      }
+      const owner = delegationOwner(bot, item);
+      if (!owner) return json(res, 409, { error: "A conversa de origem deste item não existe mais. Marque-o como resolvido.", code: "no_thread" });
+      const { title, brief } = delegationBrief(item, { botName: bot.name, threadTitle: store.taskByThread(bot.id, item.threadId)?.title, now: Date.now(), time: delegationTime });
+      // the app when it can take the session now; else the terminal, with the reason the server knows
+      const app = appAvailability(view.repo);
+      const body: Record<string, unknown> = { title, brief, repo: view.repo, ...(app.state === "available" ? {} : { surface: "cli", cliReason: `delegação do dono pelo "Precisa de você": ${app.reason ?? "o app Claude não abre sessão neste repositório agora"}` }) };
+      const choice = delegationChoice(item);
+      const ref = { botId: bot.id, itemId: item.id };
+      // marked before the start: the session it creates finds the item delegated
+      autonomy.patchOwnerPending(bot.id, item.id, { delegation: { at: Date.now(), state: "queued", ...(choice && choice !== "none" ? { option: choice.option.label } : {}) }, delegationBack: undefined });
+      const started = startCcSession(owner.bot, owner.threadId, owner.threadId, body, false, ref);
+      if (started.status !== 200 || (!started.sessionId && !started.queueId)) {
+        const reason = String(started.body.error ?? started.body.message ?? "erro desconhecido").slice(0, 600);
+        delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `a sessão não abriu: ${reason}` });
+        return json(res, 409, { error: `A sessão não abriu: ${reason}`, code: "not_opened" });
+      }
+      const now = autonomy.ownerPendingById(bot.id, item.id);
+      if (started.queueId && now?.delegation) autonomy.patchOwnerPending(bot.id, item.id, { delegation: { ...now.delegation, queueId: started.queueId } });
+      delegationChip(item, `Delegado a um agente pelo dono: ${item.title}${started.sessionId ? ` (sessão ${started.sessionId})` : " (na fila de sessões)"}`);
+      refreshBotRow(bot.id);
+      if (owner.bot.id !== bot.id) refreshBotRow(owner.bot.id);
+      console.log(`[owner-delegate] ${item.id} of ${bot.name} delegated: ${started.sessionId ? `session ${started.sessionId}` : `queued ${started.queueId}`} in ${view.repo}${choice && choice !== "none" ? `, decision "${choice.option.label}"` : ""}`);
+      return json(res, 202, { ok: true, ...(started.sessionId ? { sessionId: started.sessionId } : {}), ...(started.queueId ? { queueId: started.queueId } : {}) });
+    }
     // The person answers an item from "Precisa de você": a decision the bot
     // offered (options[n]), their own words, or a request for the steps. The
     // answer goes to the bot that owns the item, in the conversation it came
@@ -103,7 +294,9 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
       let text: string;
       let resolve: boolean;
       // what goes in the item's history (J18)
-      let answer: { kind: "option" | "text" | "ask"; label?: string; text: string };
+      let answer: { kind: "option" | "text" | "ask"; label?: string; text: string; decisor?: true };
+      // the Decisor answers through this same route, in-process: its answer is marked as its own (server/owner-decisor.ts)
+      const byDecisor = isDecisorRequest(req);
       if (body.ask === "steps") {
         text = ownerPendingStepsRequestText(item);
         resolve = false;
@@ -114,6 +307,14 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
         text = ownerPendingRecommendText(item, bot.name);
         resolve = false;
         answer = { kind: "ask", label: "recommend", text };
+      } else if (body.option !== undefined && item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && body.label === ROUTINE_ASK_KEEP_LABEL && item.options?.some((each) => each.label === ROUTINE_ASK_KEEP_LABEL)) {
+        // "Ainda vale" on a routine's item under "Talvez já resolvido": back on top, nothing sent to the bot (INSP-N22 r2 F2)
+        keepRoutineAsk(autonomy, bot.id, item.id, Date.now());
+        refreshBotRow(bot.id);
+        return json(res, 200, { ok: true, resolved: 0, kept: true, message: `"${item.title}" voltou para o topo de "Precisa de você".` });
+      } else if (body.option !== undefined && item.supersededBy) {
+        // another item said this one's commands must not run: its decisions are off (R13-intake #1)
+        return json(res, 409, { error: supersededLine(item.supersededBy), code: "item_superseded" });
       } else if (body.option !== undefined) {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another
@@ -145,14 +346,14 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
           if (block) {
             const name = item.key.slice(APP_UNBLOCK_KEY.length);
             // the item asks, from now on, the gesture that fits what the records show
-            const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : []);
+            const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : [], ownOnByName(name));
             if (want) {
               autonomy.addOwnerPending(bot.id, item.threadId, { ...want, key: item.key });
               refreshBotRow(bot.id);
             }
             // the flip: the diagnosis itself, not only "it changed"
             const diagnosis = block.kind === "flapping" ? `\n\n${(want ?? staleUnblockItem({}, name, "flapping", block.seen))?.why ?? ""}` : "";
-            return json(res, 409, { error: `${appStillBlockedText(block, name)}${diagnosis}`, code: "app_still_blocked" });
+            return json(res, 409, { error: `${appStillBlockedText(block, name, ownOnByName(name))}${diagnosis}`, code: "app_still_blocked" });
           }
         }
         // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it
@@ -172,10 +373,59 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
       } else {
         const reply = typeof body.text === "string" ? body.text.trim() : "";
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
-        resolve = body.resolve === true;
+        // a routine's item closes with the owner's words when they end it ("Já falei com ele"); a question
+        // or a note goes to the bot and the item stays open — in doubt, open (INSP-N22 A3)
+        // a ticket's or issue's item: its action named, or the item closed in so many words (INSP-N22 r3 R6)
+        // answering THIS item from the panel, the owner needs not name it: any affirmative or action closes it (INSP-N22 r5 T2)
+        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && ownerAnswersItem(item, reply));
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
         answer = { kind: "text", text: reply };
       }
+      // any answer to a disk item — a decision or free text ("pode remover todas") — is checked on the Mac first:
+      // a folder used since, or no longer clean, changes the item and the answer is not sent (INSP-R12F r2 R2-1);
+      // otherwise the Chief reads, under the answer, the state found now and to check again before removing (r3 R3-2)
+      // the same answer to the same item, sent again (the app gave up on a slow
+      // request and the person pressed again): taken once (INSP-R12F r5 #3)
+      if (answer.kind !== "ask") {
+        const key = answerKey(bot.id, item.id, answer);
+        const said = answer;
+        // a first that was queued and failed to deliver since (its history says "não enviada") frees the key (r6 D2)
+        const history = () => autonomy.ownerPendingById(bot.id, item.id)?.history ?? autonomy.resolvedOwnerPendingOf(bot.id).findLast((each) => each.id === item.id)?.history;
+        const claim = answerDedupe.claim(key, (since) => failedSince(history(), said, since));
+        if (!claim.ok) return json(res, 200, { ok: true, duplicate: true, message: duplicateAnswerText(claim), resolved: 0 });
+        // settled by what this handler answers, when it answers — never by the client going away (r6 D1)
+        onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
+      }
+      // "Manter" removes nothing: never checked, never refused (INSP-R12F r4). Every other answer is checked on the
+      // Mac and carries the state found now — words that authorize no removal ("sim", "pode decidir por mim…") too,
+      // with the server saying so to the bot and to the owner (INSP-R13fol R2-1)
+      // free text never removes: the owner hears which buttons do (INSP-R13fol R4-2)
+      const diskNotice = item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind === "text" ? diskTextNotice(answer.text, keyFolders(item.key), (item.options ?? []).map((option) => option.label)) : undefined;
+      if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
+        // in turn with a routine's pass: the item read after it, gone if that pass replaced it
+        const check = await diskItemTurn(async () => {
+          const now = autonomy.ownerPendingById(bot.id, item.id);
+          if (now && now.key === item.key) return recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "", answer);
+          // settled by the pass before: what that pass did to it, said as it is (INSP-R12F r5 #1)
+          const settled = autonomy.resolvedOwnerPendingOf(bot.id).findLast((each) => each.id === item.id && each.key === item.key);
+          return goneDiskItem(settled?.resolvedNote);
+        });
+        if (check.outcome !== "keep") return json(res, 409, { error: diskChangedText(check), code: "disk_item_changed" });
+        text = `${text}\n\n${check.line}`;
+      }
+      // the Decisor's answer: the bot reads that it was not the owner who clicked, and the history keeps it
+      if (byDecisor && answer.kind !== "ask") {
+        answer = { ...answer, decisor: true };
+        text = `${DECISOR_LINE}\n${text}`;
+      }
+      // a superseded item's words and asks reach its bot saying so: its commands must not run (INSP-R13fol #16)
+      if (item.supersededBy) text = `${text}\n\n[Servidor: ${supersededLine(item.supersededBy)}]`;
+      // a bot's mixed item whose removal went to the server's item: an answer about those folders authorizes nothing (R5-1)
+      if (!item.key && item.diskMoved?.length && answer.kind !== "ask" && answerTouchesMoved(answer.text, item.diskMoved, item.diskMoved)) text = `${text}\n\n${DISK_NOT_AUTHORIZED}`;
+      // any bot's item about worktrees, mixed or not: a decision or words asking for a removal there
+      // authorizes no worktree removal; a report of what the owner did passes as it is (INSP-R13fol R6-1, R6-2)
+      // a routine's item (keyed) too; only the server's own disk item authorizes, by its buttons (INSP-R13int I6)
+      else if (!item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && asksBotItemRemoval(answer.text, item)) text = `${text}\n\n${DISK_BOT_ITEM_NOT_AUTHORIZED}`;
       try {
         assertWithinBudget(cfg, DATA_DIR);
       } catch (error) {
@@ -216,7 +466,7 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
         else autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, threadId: target, resolved: 0 });
+        return json(res, 202, { ok: true, threadId: target, resolved: 0, ...(diskNotice ? { notice: diskNotice } : {}) });
       }
       if (!resolve) {
         // the item stays open and waits on the bot: what the bot must do next rides in
@@ -232,7 +482,7 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
         autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: false, queued: true, queueId: queued.id });
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0 });
+        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0, ...(diskNotice ? { notice: diskNotice } : {}) });
       }
       let receipt: Awaited<ReturnType<typeof startOrQueueDirectMessage>>;
       try {
@@ -241,12 +491,11 @@ export function createOwnerPendingRoutes<B extends FolderBlock>(deps: OwnerPendi
         // never a silent failure: kept in the history as not delivered, and said on the screen (J18)
         return ownerAnswerFailed(bot.id, item.id, answer, error);
       }
-      const sent = receipt as { queued?: boolean; queueId?: string };
-      autonomy.recordOwnerPendingAnswer(bot.id, item.id, "queueId" in sent && sent.queued ? { ...answer, delivered: false, queued: true, queueId: sent.queueId! } : { ...answer, delivered: true });
-      const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id, by: "owner" }) : [];
+      autonomy.recordOwnerPendingAnswer(bot.id, item.id, "queueId" in receipt && receipt.queued ? { ...answer, delivered: false, queued: true, queueId: receipt.queueId } : { ...answer, delivered: true });
+      const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id, by: "owner", ...(byDecisor ? { note: `${DECISOR_NOTE_PREFIX} decidido pelo Decisor («${answer.label ?? "resposta"}»)` } : {}) }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation
-      return json(res, 202, { ...receipt, text, resolved: done.length });
+      return json(res, 202, { ...receipt, text, resolved: done.length, ...(diskNotice ? { notice: diskNotice } : {}) });
 
       function ownerAnswerFailed(botId: string, id: string, what: typeof answer, error: unknown) {
         const message = error instanceof Error ? error.message : String(error);

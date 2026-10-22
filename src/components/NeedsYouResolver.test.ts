@@ -3,9 +3,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou } from "@/lib/needs-you";
-import { decisionReply, remindOwnerPending } from "@/lib/needs-you-actions";
-import { awaitingLine, decisionNotice, remindNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
+import { createElement } from "react";
+import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou, waitingOnYou } from "@/lib/needs-you";
+import { SidebarNeedsYou } from "./SidebarNeedsYou";
+import { decisionReply, remindOwnerPending, replyToOwnerPending } from "@/lib/needs-you-actions";
+import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
+import { awaitingLine, decisionNotice, remindNotice, replyNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
 // Invented bots and items: no client data.
 const now = new Date(2026, 9, 2, 15, 40).getTime();
@@ -528,16 +531,36 @@ describe("keys on the resolution screen", () => {
     const at = new Date(2026, 9, 2, 14, 0).getTime();
     const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
       { id: "o45", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], history: [
-        { at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "substituída pela nova escolha" },
+        { at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "o servidor reiniciou antes da entrega" },
         { at: at + 60_000, kind: "option", label: "Não", text: "Não.", delivered: false, error: "cancelamento na conversa antes de chegar ao bot" },
       ] },
     ] })])]);
     const { tree, html } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
     const reasons = tree.filter((node) => "data-history-reason" in node.props).map((node) => Children.toArray(node.props.children).join(""));
     // the older one shows its reason; the last one is the banner's, said once there
-    expect(reasons).toEqual(["substituída pela nova escolha"]);
+    expect(reasons).toEqual(["o servidor reiniciou antes da entrega"]);
     expect(html.split("cancelamento na conversa").length - 1).toBe(2);
     expect(String(tree.find((node) => "data-history-reason" in node.props)!.props.className)).not.toContain("sr-only");
+  });
+
+  // J P1 (INSP-J2 r6, R11-visual): the person's own switch is no failure
+  it("draws a choice the person replaced in a neutral tone, saying what replaced it — never red", () => {
+    const at = new Date(2026, 9, 2, 8, 42).getTime();
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o12", title: "Colar os comentários", since: now - 3 * 3_600_000, options: [{ label: "Já colei", reply: "a" }, { label: "Cole você", reply: "b" }], awaitingSince: at + 120_000, history: [
+        { at, kind: "option", label: "Já colei", text: "a", delivered: false, error: CHOICE_REPLACED },
+        { at: at + 120_000, kind: "option", label: "Cole você", text: "b", delivered: false, queued: true },
+      ] },
+    ] })])]);
+    const { tree } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
+    const replaced = tree.find((node) => node.props["data-history-state"] === "replaced")!;
+    const text = renderToStaticMarkup(replaced);
+    expect(text).toContain("Você escolheu “Já colei”");
+    expect(text).toContain("substituída por “Cole você”");
+    expect(text).not.toContain("não enviado");
+    expect(text).not.toMatch(/danger/);
+    expect(String(replaced.props.className)).toContain("text-ink-secondary");
+    expect(tree.some((node) => "data-history-reason" in node.props)).toBe(false);
   });
 
   // INSP-J2 r5 B4: "ainda está na fila" is news, not a failure
@@ -599,6 +622,35 @@ describe("keys on the resolution screen", () => {
     expect(inline.map((node) => node.props["aria-pressed"])).toEqual([undefined, undefined]);
   });
 
+  // INSP-R12F r6 D2: the server took a repeat once and said so; the screen showed "Enviado" as if sent again
+  it("shows the server's notice, in the neutral tone, when the same answer had already gone", async () => {
+    const message = "Essa mesma resposta já foi enviada há 12 s; não mandei de novo.";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, duplicate: true, message, resolved: 0 }), { status: 200 })));
+    const item = items.find((each) => each.pendingId === "o1")!;
+    const dispatch = vi.fn();
+    const decided = await replyToOwnerPending(item, decisionReply(item, 0), dispatch);
+    expect(decided).toEqual({ resolved: 0, info: message });
+    expect(decisionNotice(item, 0, decided)).toBe(message);
+    const typed = await replyToOwnerPending(item, { text: "pode remover todas", resolve: false }, dispatch);
+    expect(replyNotice(item, false, typed)).toBe(message);
+    expect(dispatch).not.toHaveBeenCalled();
+    // a real send still says "Enviado…"
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, resolved: 0 }), { status: 202 })));
+    const sent = await replyToOwnerPending(item, { text: "pode remover todas", resolve: false }, dispatch);
+    expect(sent).toEqual({ resolved: 0 });
+    expect(replyNotice(item, false, sent)).toContain("Chief of Staff");
+    expect(replyNotice(item, false, sent)).not.toBe(message);
+    // INSP-R13fol R2-1: words the server did not read as an authorization — sent, and the owner told so
+    const notice = "O servidor não leu isto como autorização de remoção; para remover, use uma decisão ou cite as pastas.";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, resolved: 0, notice }), { status: 202 })));
+    const unread = await replyToOwnerPending(item, { text: "sim", resolve: false }, dispatch);
+    expect(unread).toEqual({ resolved: 0, notice });
+    expect(replyNotice(item, false, unread)).toBe(`${replyNotice(item, false, sent)} ${notice}`);
+    // the notice is the neutral one, like "ainda está na fila"
+    const shown = view({ selectedKey: keyOf("o1"), notice: message, noticeTone: "info" });
+    expect(shown.find("data-resolver-notice")!.props["data-tone"]).toBe("info");
+  });
+
   it("says a server item the choice closed is resolved, never 'aguardando' (N4)", () => {
     const item = { botName: "Chief of Staff", title: "Ligue o Mac na tomada", options: [{ label: "Vou deixar na bateria", reply: "Vou deixar." }] };
     expect(decisionNotice(item, 0, { resolved: 1 })).toBe("Enviado «Vou deixar na bateria» para Chief of Staff — Ligue o Mac na tomada. Item resolvido.");
@@ -643,5 +695,136 @@ describe("keys on the resolution screen", () => {
     expect(linkLabel("https://github.com/acme/app/issues/40#x")).toBe("a issue #40");
     expect(linkLabel("claude://code/continue?session=local_1")).toBe("a sessão no Claude");
     expect(linkLabel("https://www.docs.example.com/x")).toBe("docs.example.com");
+  });
+});
+
+// Lot J2, as the panel was on 04/10 (redacted): the Monitor's routine
+// "Atendimento: Chat, planilha e issues" opened o14 and o15 inside its runs,
+// and the owner saw "1 item" — only the bare question of its main
+// conversation, with no why, steps nor options.
+describe("items a routine's run or an archived conversation opened, and a bare question (lot J2)", () => {
+  const routine = "Atendimento: Chat, planilha e issues";
+  const steps = [{ text: "Confira a issue", link: "https://github.com/acme/app/issues/9355" }];
+  const choice = [{ label: "Autorizar", reply: "Autorizo criar a linha.", recommended: true as const, why: "É uma linha só, conferida depois." }, { label: "Faço eu", reply: "Eu crio a linha." }];
+  const monitor = bot("monitor", "Monitor Chat Atendimento", [
+    task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 13 * 3_600_000, goalNeedsInputAsk: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.", goalNeedsInputStepsAskedAt: now - 5 * 60_000 }),
+    task("run-a", routine, { routineRunId: "r1", ownerPending: [{ id: "o14", title: "Autorizar a linha nova da #9355 na planilha Atendimento", since: now - 20 * 3_600_000, why: "A demanda não tem linha na planilha.", steps, options: choice }] }),
+    task("run-b", routine, { routineRunId: "r2", ownerPending: [{ id: "o15", title: "Liberar os comentários de registro dos avisos na #9331 e na #9334", since: now - 6 * 3_600_000, why: "O hook barrou os comentários.", steps, options: choice }] }),
+    // a routine's run that ends asking: its own line stays out (only the items count)
+    task("run-c", routine, { routineRunId: "r3", goalNeedsInput: true, goalNeedsInputSince: now - 30 * 3_600_000, goalNeedsInputAsk: "Abro uma conversa nova no Chat?" }),
+    task("old", "Arquivada", { archivedAt: now - 3_600_000, ownerPending: [{ id: "o16", title: "Conferir o aviso enviado", since: now - 2 * 3_600_000, why: "x", steps }] }),
+  ]);
+  const real = needsYouItems([monitor]);
+  const realKey = (id: string) => needsYouKey(real.find((item) => item.pendingId === id || (!item.pendingId && item.threadId === id))!);
+
+  it("lists o14 and o15 from the routine's runs and an archived conversation's item, never a routine run's own question", () => {
+    expect(real.map((item) => item.pendingId ?? item.threadId).sort()).toEqual(["main", "o14", "o15", "o16"]);
+    expect(real.find((item) => item.pendingId === "o14")).toMatchObject({ threadId: "run-a", threadKind: "routine", why: "A demanda não tem linha na planilha." });
+    expect(real.find((item) => item.pendingId === "o16")?.threadKind).toBe("archived");
+    expect(real.find((item) => item.threadId === "main")?.threadKind).toBeUndefined();
+    expect(view({ items: real, selectedKey: null, pane: "list" }).html).toContain("4 itens esperando você");
+  });
+
+  it("says where the item came from, and 'Abrir conversa' opens the routine's run (or the archived one)", () => {
+    const o14 = view({ items: real, selectedKey: realKey("o14") });
+    expect(o14.title).toBe("Autorizar a linha nova da #9355 na planilha Atendimento");
+    expect(o14.html).toContain(`em “${routine}”, execução de rotina`);
+    // never cut on a phone: it wraps (INSP-J2b #4)
+    expect(o14.find("data-resolver-thread-kind", "routine")?.props.className).toBe("min-w-0 max-w-full break-words");
+    expect(o14.html).toContain("Autorizar");
+    o14.press("data-resolver-conversation");
+    expect(o14.calls).toEqual(["conversation:run-a"]);
+    const o16 = view({ items: real, selectedKey: realKey("o16") });
+    expect(o16.html).toContain("em “Arquivada”, conversa arquivada");
+    o16.press("data-resolver-conversation");
+    expect(o16.calls).toEqual(["conversation:old"]);
+  });
+
+  it("shows a bare question as 'Pedindo o passo a passo…' while the bot registers it, then 'Pedir de novo' after 15 min — and it stays answerable", () => {
+    const asking = view({ items: real, selectedKey: realKey("main"), draft: "Siga com a opção A." });
+    expect(asking.title).toBe("A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.");
+    expect(asking.html).toContain("Pedindo o passo a passo para Monitor Chat Atendimento… Ele chega aqui como um item com as opções, no lugar desta pergunta.");
+    expect(asking.find("data-resolver-steps-asking")).toBeDefined();
+    expect(asking.html).not.toContain("data-resolver-ask-steps");
+    expect(asking.html).not.toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+    asking.press("data-resolver-send");
+    expect(asking.calls).toEqual(["reply:main"]);
+    const late = view({ items: real, selectedKey: realKey("main"), now: now + 11 * 60_000 });
+    expect(late.html).toContain("O passo a passo foi pedido para Monitor Chat Atendimento há 16 min e ainda não chegou. Você pode responder abaixo.");
+    late.press("data-resolver-ask-steps");
+    expect(late.calls).toEqual(["steps:undefined"]);
+    // not asked (yet, or ~/.nuria/stop): as before
+    const bare = needsYouItems([bot("monitor", "Monitor Chat Atendimento", [task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 60_000, goalNeedsInputAsk: "Mesclo a #12?" })])]);
+    expect(view({ items: bare, selectedKey: needsYouKey(bare[0]!) }).html).toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+  });
+});
+
+// INSP-N22 r2 F2: a routine's item said once and let go is out of the count, folded under "Talvez já resolvido"
+describe("Talvez já resolvido", () => {
+  const letGo = [bot("monitor", "Monitor Chat", [task("m1", "Atendimento", { ownerPending: [
+    { id: "o7", title: "Responder ao Luis Rossi (widget)", since: now - 60 * 60_000, options: [{ label: "Já resolvi", reply: "Já resolvi essa pendência." }] },
+    { id: "o3", title: "Ver: regras de 30/09 na minha memória permanente", since: now - 4 * 86_400_000, demotedAt: now - 86_400_000,
+      options: [{ label: "Já resolvi", reply: "Já resolvi essa pendência." }, { label: "Ainda vale", reply: "Ainda vale: essa pendência continua comigo." }] },
+  ] })])];
+  it("is not counted, and its section is folded until opened", () => {
+    const items = needsYouItems(letGo);
+    expect(waitingOnYou(items, now).map((each) => each.pendingId)).toEqual(["o7"]);
+    const folded = view({ items });
+    expect(folded.html).toContain("Talvez já resolvido (1)");
+    const demoted = items.find((each) => each.pendingId === "o3")!;
+    expect(folded.find("data-resolver-row", needsYouKey(demoted))).toBeUndefined();
+    folded.press("data-resolver-maybe-section");
+    const calls: string[] = [];
+    const opened = view({ items, showMaybeResolved: true, selectedKey: needsYouKey(demoted), onToggleMaybeResolved: () => calls.push("toggle") });
+    expect(opened.find("data-resolver-row", needsYouKey(demoted))).toBeTruthy();
+    opened.press("data-resolver-maybe-section");
+    expect(calls).toEqual(["toggle"]);
+    // "Já resolvi" and "Ainda vale", as its decisions
+    expect(opened.html).toContain("Ainda vale");
+    expect(opened.html).toContain("Já resolvi");
+  });
+  it("the sidebar: one quiet line, no alert count", () => {
+    const items = needsYouItems(letGo);
+    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items, density: "comfortable", now, onOpen: () => {} }));
+    expect(html).toContain('aria-label="1 itens precisam de você"');
+    expect(html).toContain("Talvez já resolvido (1)");
+    expect(html.match(/data-needs-you-row=/g)).toHaveLength(1);
+  });
+});
+
+describe("a superseded item and a fixed sheet row (R13-intake #1)", () => {
+  const superseded = [bot("chief", "Chief of Staff", [task("c9", "Planilha", { ownerPending: [
+    { id: "o2", title: "Aprovar a criação da linha 190 da planilha", since: now - 17 * 3_600_000, why: "Linha nova.",
+      steps: [{ text: "B190", command: "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'" }], options,
+      superseded: { by: "o1 do Monitor Chat", at: now - 3_600_000, text: "Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses." },
+      rowWarning: "A linha 190 pode ter mudado desde que estes comandos foram escritos: confira antes de rodar." },
+    { id: "o8", title: "Gravar a linha 191", since: now - 7 * 3_600_000, why: "Linha nova.", steps: [{ text: "B191", command: "gog sheets update ID 'Atendimento!B191' --values-json '[[\"x\"]]'" }],
+      rowWarning: "A linha 191 pode ter mudado desde que estes comandos foram escritos: confira antes de rodar." },
+  ] })])];
+  const all = needsYouItems(superseded);
+  const key = (id: string) => needsYouKey(all.find((item) => item.pendingId === id)!);
+
+  it("says by which item, and turns its decisions and commands off", () => {
+    const shown = view({ items: all, selectedKey: key("o2") });
+    expect(shown.html).toContain("Superado pelo item o1 do Monitor Chat: Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses. As decisões e os comandos deste item ficaram desligados.");
+    // the owner can lift the mark: "Os comandos ainda valem" (INSP-R13fol #13)
+    const unmark = view({ items: all, selectedKey: key("o2"), onUnsupersede: (item) => unmark.calls.push(`unsupersede:${item.pendingId}`) });
+    expect(unmark.html).toContain("Os comandos ainda valem");
+    unmark.press("data-resolver-unsupersede");
+    expect(unmark.calls).toEqual(["unsupersede:o2"]);
+    expect(shown.find("data-resolver-superseded", "o1 do Monitor Chat")).toBeTruthy();
+    // no decision to pick
+    expect(shown.html).not.toContain("Aprovar</");
+    expect(shown.calls).toEqual([]);
+    // the command shows, struck through, and its copy is off
+    expect(shown.find("data-resolver-copy", "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'")!.props.disabled).toBe(true);
+    // the row notice gives way to the stronger one
+    expect(shown.find("data-resolver-row-warning")).toBeUndefined();
+  });
+
+  it("warns that a fixed row may have changed, without touching the command", () => {
+    const shown = view({ items: all, selectedKey: key("o8") });
+    expect(shown.html).toContain("A linha 191 pode ter mudado desde que estes comandos foram escritos: confira antes de rodar.");
+    expect(shown.find("data-resolver-copy", "gog sheets update ID 'Atendimento!B191' --values-json '[[\"x\"]]'")!.props.disabled).toBe(false);
   });
 });

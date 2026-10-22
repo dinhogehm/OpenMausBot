@@ -1,13 +1,14 @@
-import { BellDot, CircleAlert, Clock3, Loader2 } from "lucide-react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { BellDot, CircleAlert, Clock3, Loader2 } from "lucide-react";
 import { describe, expect, it } from "vitest";
 import type { Bot, Group, GroupTask, Task } from "@/state/store";
-import { setLocale } from "@/lib/i18n";
-import { BotActivityRow } from "./SidebarBotActivity";
+import { setLocale, t } from "@/lib/i18n";
+import {
+  attentionHasRunningWork, attentionJumpAction, attentionOwnerName, attentionRowStatus, attentionTriggerLabel, attentionUnpinAction, BotActivityRow, crossBotAttentionThreads,
+  crossBotPinnedThreads, sidebarBotActivityTasks, sidebarGroupActivityTasks, threadsWhenTreeHidden,
+} from "./SidebarBotActivity";
 import { botShowsUnread } from "@/lib/bot-unread";
-import { t } from "@/lib/i18n";
-import { attentionHasRunningWork, attentionJumpAction, attentionOwnerName, attentionRowStatus, attentionTriggerLabel, attentionUnpinAction, crossBotAttentionThreads, crossBotPinnedThreads, sidebarBotActivityTasks, sidebarGroupActivityTasks, threadsWhenTreeHidden } from "./SidebarBotActivity";
 
 const task = (threadId: string, title: string, extra: Partial<Task>): Task =>
   ({ threadId, title, createdAt: 0, ...extra }) as Task;

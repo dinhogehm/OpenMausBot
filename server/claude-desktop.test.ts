@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveDesktopSession,
+  withScreenLock,
+  sessionChipsShown,
   CLAUDE_BUNDLE_ID,
   lastAppRepo,
   liveWorktreeNames,
@@ -258,7 +260,10 @@ describe("createDesktopSession", () => {
       const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "gº main": `gº ${chip}` })] });
       const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", liveWorktrees: ["fix-9298-stage-time-rule-572720"] });
       expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("another session's worktree") });
-      expect(app.actions).toEqual(["activate", "menu new session"]);
+      // o73: the option is on, so the branch picker is tried first — it opened nothing here: one click, nothing typed
+      expect(step).toMatchObject({ reason: expect.stringContaining("tried on screen first: clicked the branch chip") });
+      expect(app.actions.filter((action) => !action.startsWith("click"))).toEqual(["activate", "menu new session"]);
+      expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
     }
     // "main" is the repository's own branch: it goes on
     expect(reusedWorktreeChip([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }], ["fix-9298-stage-time-rule-572720"])).toBeNull();
@@ -273,7 +278,9 @@ describe("createDesktopSession", () => {
       const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", baseBranch: "main" });
       expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("not in the root of nuria-platform") });
       expect(step).toMatchObject({ reason: expect.stringContaining("send it a short message") });
-      expect(app.actions).toEqual(["activate", "menu new session"]);
+      expect(step).toMatchObject({ reason: expect.stringContaining("tried on screen first: clicked the branch chip") });
+      expect(app.actions.filter((action) => !action.startsWith("click"))).toEqual(["activate", "menu new session"]);
+      expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
     }
   });
 
@@ -312,7 +319,26 @@ describe("createDesktopSession", () => {
     const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "nuria-platform": "soph-ia" })] });
     const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" });
     expect(step).toMatchObject({ ok: false, retry: true, miss: true });
-    expect(app.actions).toEqual(["activate", "menu new session"]);
+    // o73: the folder picker is tried first (it opened nothing here): one click on the folder chip, nothing typed
+    expect(step).toMatchObject({ reason: expect.stringContaining('tried on screen first: clicked the folder chip ("soph-ia"): nothing opened') });
+    expect(app.actions.filter((action) => !action.startsWith("click"))).toEqual(["activate", "menu new session"]);
+    expect(app.actions.filter((action) => action.startsWith("click"))).toHaveLength(1);
+  });
+
+  it("tells no new-session screen at all apart from a new session in another folder: only the latter asks for a session by hand (R13-dispatch R13-2c)", async () => {
+    // 06/10 from 15:10Z: after New Session the screen showed a conversation — the corridor's lines of a brief — and no field, no chips
+    const convo = ["Never skip, bypass or fake the gate; never push to main, never force.", "Order of a batch: hotfix/PO/P1 first, ahead of any Cl or infrastructure PR, and released on its", "own. PRs that change release scripts (scripts/*release*, watch-production-release, release-", "carrier) ship in a separate carrier "].map((text, i) => ({ text, y: 600 + i * 30 }));
+    const none = fakeApp({ screens: [OPEN_SESSION, convo] });
+    const step = await createDesktopSession(none.driver, { repoName: "nuria-platform", text: "brief" });
+    expect(step).toMatchObject({ ok: false, retry: true, miss: true });
+    expect(!step.ok && step.reason).toContain("New Session did not show a new session's screen (no empty task field and no folder chips");
+    expect(!step.ok && step.reason).not.toContain("by hand");
+    expect(none.actions.some((action) => action.startsWith("paste") || action.startsWith("key"))).toBe(false);
+    // 06/10 14:36Z: a new session, in the folder of the session before (b3a17a95)
+    const previous = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "nuria-platform": "9378-supervisor-papel-..." })] });
+    const other = await createDesktopSession(previous.driver, { repoName: "nuria-platform", text: "brief" });
+    expect(!other.ok && other.reason).toContain("it shows another folder in its chips");
+    expect(!other.ok && other.reason).toContain("open one session there by hand once");
   });
 
   it("never pastes when New Session did not open (the open session's screen stays)", async () => {
@@ -379,6 +405,32 @@ describe("sendToDesktopSession", () => {
     const app = fakeApp({ screens: [[open, field, bar], [open, { text: "Long steer xxxx", y: 820 }, bar], [open, field, bar]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: long, title: open.text })).toEqual({ ok: true });
     expect(app.actions).toContain(`type  ${DESKTOP_MESSAGE_NOTE}`);
+  });
+
+  it("does not take the title in a notification or the conversation for the session's header (19/10 send loop)", async () => {
+    const other = { text: "• QA Produção v (nuria-platform", y: 23 };
+    const banner = { text: "Automação inatividade não dispara: target busy", y: 300 };
+    const app = fakeApp({ screen: [other, banner, field, bar] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "y", title: open.text })).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("nothing was typed") });
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("key") || action.startsWith("click"))).toBe(false);
+  });
+
+  it("opens the session by its sidebar entry when the link left another one on screen, and types only once its header is there", async () => {
+    const other = { text: "• Chief of Staff v (nuria-platform", y: 23 };
+    const entry = { text: "Automação inatividade não dispara", x: 120, y: 300, w: 200 };
+    const typed = { text: "follow-up now", y: 820 };
+    const app = fakeApp({ screens: [[other, entry, field, bar], [other, entry, field, bar], [open, entry, field, bar], [open, typed, bar], [open, { text: "follow-up now", y: 400 }, field, bar]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: open.text })).toEqual({ ok: true });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 220,308", "click 620,828", "paste(all) follow-up now", "key 36"]);
+  });
+
+  it("types nothing when the sidebar entry does not bring the session up either", async () => {
+    const other = { text: "• Chief of Staff v (nuria-platform", y: 23 };
+    const entry = { text: "Automação inatividade não dispara", x: 120, y: 300, w: 200 };
+    const app = fakeApp({ screen: [other, entry, field, bar] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "y", title: open.text })).toMatchObject({ ok: false, miss: true, reason: expect.stringContaining("and by its sidebar entry") });
+    expect(app.actions.filter((action) => action.startsWith("click"))).toEqual(["click 220,308"]);
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("key"))).toBe(false);
   });
 
   it("refuses an id that is not the app's", async () => {
@@ -635,6 +687,9 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(findComposer(R7_SESSION, REAL_SIZE, "nuria-platform")).toMatchObject({ text: R7_FIELD, line: { x: 547, y: 842 }, bar: { text: "+ Q v Automático" } });
     expect(findComposer(S36300F35, REAL_SIZE, "nuria-platform")).toMatchObject({ text: "qual o status do gate da #9330?" });
     expect(findComposer(swap(R7_SESSION, { [R7_FIELD]: "Digite / para comandos" }), REAL_SIZE)).toMatchObject({ text: null, line: { y: 842 } });
+    // the "+" (attach) button OCR reads on the field's line is no draft (18/10, o228–o233)
+    expect(findComposer(swap(R7_SESSION, { [R7_FIELD]: "+ Digite / para comandos" }), REAL_SIZE)).toMatchObject({ text: null, line: { y: 842 } });
+    expect(findComposer(swap(R7_SESSION, { [R7_FIELD]: "+ Digite / para comandos…" }), REAL_SIZE)).toMatchObject({ text: null });
     // a placeholder with no mode bar under it is not a field
     expect(findComposer([{ x: 547, y: 875, w: 200, h: 16, text: "Digite / para comandos" }], REAL_SIZE)).toBeNull();
     expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], REAL_SIZE)).toBeNull();
@@ -973,7 +1028,7 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     // both ways in (the tool call and the queue) go through startCcSession with this text
     const index = ["index.ts", "cc-runtime.ts"].map((file) => readFileSync(join(import.meta.dirname, file), "utf8")).join("\n");
     expect(index).toContain("reusedFolderRefusal(block.last, basename(input.repo), fromQueue)");
-    expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true)");
+    expect(index).toContain("startCcSession(bot, threadId, replyThreadId, item.body, true, item.delegation)");
     expect(index).not.toMatch(/6 de 7 creates|fechá-la sem enviar/);
   });
 
@@ -1101,5 +1156,64 @@ describe("questions, folders and reused worktrees in the app's records", () => {
   it("asks the same gesture wherever it is said: 409, create refusal and the owner's item", () => {
     expect(ROOT_SESSION_HOWTO("nuria-platform", "main")).toContain("worktree OFF");
     expect(ROOT_SESSION_HOWTO("nuria-platform", "main")).not.toMatch(/worktree on\b/);
+  });
+});
+
+describe("one screen step at a time (20/10 00:55: interleaved sends)", () => {
+  it("runs two sends one after the other, each from open to Return, never interleaved", async () => {
+    const localId = "local_6415ced5-d3d5-4055-9d33-58c585c87de3";
+    const open = { text: "Automação inatividade não dispara", y: 60 };
+    const field = { text: "Responder...", y: 820 };
+    const bar = { text: "+ O v Automático", y: 866 };
+    const screens = () => [[open, field, bar], [open, { text: "follow-up now", y: 820 }, bar], [open, { text: "follow-up now", y: 400 }, field, bar]];
+    const a = fakeApp({ screens: screens() });
+    const b = fakeApp({ screens: screens() });
+    const log: string[] = [];
+    const tag = (name: string, driver: typeof a.driver) => ({ ...driver, openUrl: async (url: string) => { log.push(`${name} open`); await driver.openUrl(url); }, key: async (code: number, cmd?: boolean) => { log.push(`${name} return`); await driver.key(code, cmd); } });
+    const [ra, rb] = await Promise.all([
+      sendToDesktopSession(tag("a", a.driver), { localId, text: "follow-up now", title: open.text }),
+      sendToDesktopSession(tag("b", b.driver), { localId, text: "follow-up now", title: open.text }),
+    ]);
+    expect(ra).toEqual({ ok: true });
+    expect(rb).toEqual({ ok: true });
+    expect(log).toEqual(["a open", "a return", "b open", "b return"]);
+  });
+
+  it("a step that throws does not block the next one", async () => {
+    await expect(withScreenLock(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    expect(await withScreenLock(async () => 7)).toBe(7);
+  });
+});
+
+describe("the session is checked by what its id names, not its title (20/10: 6 of 408 sends ok)", () => {
+  const localId = "local_6415ced5-d3d5-4055-9d33-58c585c87de3";
+  const field = { text: "Responder...", y: 820 };
+  const bar = { text: "+ O v Automático", y: 866 };
+  // the app renamed the session, and OMB's own banner covers the top of the screen
+  const banner = { text: "Lead PRODEV precisa de aprovação", y: 40, x: 1100 };
+  const chips = { text: "nuria-platform fix/7903-retirar-metricas-de-pausa", y: 782 };
+
+  it("types into the session whose chips show its own branch, whatever its header says", async () => {
+    const app = fakeApp({ screens: [[banner, chips, field, bar], [banner, chips, { text: "follow-up now", y: 820 }, bar], [banner, chips, { text: "follow-up now", y: 400 }, field, bar]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: "7903 Retirar métricas de pausa sem fonte", marks: ["fix/7903-retirar-metricas-de-pausa"] })).toEqual({ ok: true });
+    expect(app.actions.filter((action) => action.startsWith("paste"))).toEqual(["paste(all) follow-up now"]);
+  });
+
+  it("types nothing when the chips show another session's branch", async () => {
+    const other = { text: "nuria-platform fix/9638-esclarecer-idade-media", y: 782 };
+    const app = fakeApp({ screen: [banner, other, field, bar] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "y", title: "7903 Retirar métricas de pausa sem fonte", marks: ["fix/7903-retirar-metricas-de-pausa"] })).toMatchObject({ ok: false, miss: true });
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("key"))).toBe(false);
+  });
+
+  it("matches a mark only as a whole word under the field", () => {
+    const size = { h: 923 };
+    expect(sessionChipsShown([{ x: 600, y: 782, w: 300, h: 16, text: "repo fix/7903-a" }], size, ["fix/7903-ab"])).toBe(false);
+    expect(sessionChipsShown([{ x: 600, y: 82, w: 300, h: 16, text: "repo fix/7903-ab" }], size, ["fix/7903-ab"])).toBe(false);
+    expect(sessionChipsShown([{ x: 600, y: 782, w: 300, h: 16, text: "repo fix/7903-ab" }], size, ["fix/7903-ab"])).toBe(true);
+    expect(sessionChipsShown([{ x: 600, y: 782, w: 300, h: 16, text: "main" }], size, [])).toBe(false);
+    // a long branch the chip cuts short
+    expect(sessionChipsShown([{ x: 600, y: 782, w: 300, h: 16, text: "nuria-platform fix/7903-retirar-metricas-pausa-sem-fo…" }], size, ["fix/7903-retirar-metricas-pausa-sem-fonte"])).toBe(true);
+    expect(sessionChipsShown([{ x: 600, y: 782, w: 300, h: 16, text: "nuria-platform fix/7903…" }], size, ["fix/7903-retirar-metricas-pausa-sem-fonte"])).toBe(false);
   });
 });

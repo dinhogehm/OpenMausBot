@@ -298,7 +298,7 @@ describe("Group Local VM ownership on the real isolated server", () => {
       await until(async () => {
         const state = await api("GET", "/api/bots?messages=30");
         return state.bots.find((bot: any) => bot.id === bots[2].id)?.messages
-          .some((message: any) => String(message.tool?.name ?? "").startsWith("Waiting for its turn on this computer"));
+          .some((message: any) => String(message.tool?.name ?? "").startsWith("Aguardando a vez neste computador"));
       }, Boolean);
       expect(existsSync(dumpFile)).toBe(false);
       const waitingStatus = await api("GET", `/api/bots/${bots[2].id}/local-computer`);
@@ -460,8 +460,9 @@ describe("Group Local VM ownership on the real isolated server", () => {
       await dump();
       await api("POST", `/api/bots/${bots[1].id}/messages`, { text: "Wait for the shared computer" });
       const transcript = () => api("GET", `/api/threads/${bots[1].threadId}/messages?limit=50`);
-      await until(transcript, value => JSON.stringify(value).includes("Waiting for"));
-      // Only the waiting thread gets the short clock; the holder is deliberately gated.
+      await until(transcript, value => JSON.stringify(value).includes("Aguardando a vez"));
+      // Only the waiting thread gets the short clock; the holder is a
+      // deliberately gated provider. This exercises the real event wiring.
       vmState({ stallThread: bots[1].threadId });
       await new Promise(resolve => setTimeout(resolve, 400));
       expect(JSON.stringify(await transcript())).not.toContain("the turn was stopped");
@@ -570,8 +571,10 @@ describe("Group Local VM ownership on the real isolated server", () => {
       writeFileSync(finishFile, "finish");
       const after: any = await dump();
       expect(computer(after)).toBeTruthy();
-      expect(after.systemPrompt).toContain("Local VM");
-      expect(after.systemPrompt).not.toContain("call select_computer");
+      // the surface paragraph is volatile: it rides the launch's first message
+      const afterContext = `${after.systemPrompt}\n${JSON.stringify(after.prompt)}`;
+      expect(afterContext).toContain("Local VM");
+      expect(afterContext).not.toContain("call select_computer");
       await idle(bot.id);
       const state = await api("GET", "/api/bots?messages=30");
       const saved = state.bots.find((b: any) => b.id === bot.id);
@@ -646,8 +649,8 @@ describe("Group Local VM ownership on the real isolated server", () => {
         await api("PATCH", `/api/bots/${bot.id}/tasks/${task.threadId}`, { surface: "vm" });
         rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true });
         await api("POST", `/api/bots/${bot.id}/messages`, { text, threadId: task.threadId });
-        const sent = await dump() as { systemPrompt: string };
-        expect(sent.systemPrompt).toContain("Local VM");
+        const sent = await dump() as { systemPrompt: string; prompt?: unknown };
+        expect(`${sent.systemPrompt}\n${JSON.stringify(sent.prompt)}`).toContain("Local VM");
         expect(sent.systemPrompt).not.toContain("You can act on the user's computer");
         const c = computer(sent);
         expect(c).toBeTruthy();
@@ -741,13 +744,13 @@ describe("Group Local VM ownership on the real isolated server", () => {
     try {
       await api("PATCH", `/api/bots/${bots[0].id}`, { computer: "local" });
       await send(group.id);
-      const sent = await dump() as { systemPrompt: string };
+      const sent = await dump() as { systemPrompt: string; prompt?: unknown };
       const c = computer(sent);
       expect(c).toBeTruthy();
       expect(c.env.OMB_CUA_COMMAND).toBe("/fixture/cua-driver");
       expect(c.args.some((arg: string) => arg.includes("container-mcp"))).toBe(false);
       expect(sent.systemPrompt).toContain("You can act on the user's computer");
-      expect(sent.systemPrompt).toContain("tell them it is on this computer");
+      expect(`${sent.systemPrompt}\n${JSON.stringify(sent.prompt)}`).toContain("tell them it is on this computer");
       expect((await gate(c)).status).toBe(200);
       writeFileSync(finishFile, "finish");
       await idle(bots[0].id);
@@ -920,7 +923,7 @@ describe("Group Local VM ownership on the real isolated server", () => {
       vmState({ containers: ["shared"], stopped: ["shared"] });
       await api("POST", `/api/bots/${auto.id}/messages`, { text: "Use the stopped shared VM when available" });
       await until(async () => JSON.stringify((await api("GET", `/api/threads/${auto.threadId}/messages`)).messages)
-        .includes("Parked — it continues automatically when the computer is free"), Boolean);
+        .includes("Em espera — continua sozinho quando o computador ficar livre"), Boolean);
       const parked = await until(() => api("GET", "/api/bots?messages=0"), state => {
         const task = state.bots.find((bot: any) => bot.id === auto.id)?.tasks.find((task: any) => task.threadId === auto.threadId);
         return task?.activity === "parked.computer" || existsSync(dumpFile);
@@ -969,8 +972,8 @@ describe("Group Local VM ownership on the real isolated server", () => {
       const activities = (botId: string) => (state.bots.find((b: any) => b.id === botId)?.messages ?? [])
         .filter((m: any) => m.kind === "activity")
         .map((m: any) => m.tool?.name ?? "");
-      expect(activities(auto.id).join("|")).not.toContain("Waiting for its turn");
-      expect(activities(holder.id).join("|")).not.toContain("Waiting for its turn");
+      expect(activities(auto.id).join("|")).not.toContain("Aguardando a vez");
+      expect(activities(holder.id).join("|")).not.toContain("Aguardando a vez");
     } finally {
       writeFileSync(finishFile, "finish");
       await api("POST", `/api/bots/${auto.id}/interrupt`, {}); await api("POST", `/api/bots/${holder.id}/interrupt`, {});
@@ -1003,13 +1006,13 @@ describe("Group Local VM ownership on the real isolated server", () => {
       await until(async () => {
  const state = await api("GET", "/api/bots?messages=30");
         return (state.bots.find((b: any) => b.id === auto.id)?.messages ?? [])
-          .some((m: any) => m.kind === "activity" && String(m.tool?.name ?? "").startsWith("Waiting for its turn on this computer"));
+          .some((m: any) => m.kind === "activity" && String(m.tool?.name ?? "").startsWith("Aguardando a vez neste computador"));
       }, Boolean);
       await api("POST", `/api/bots/${holder.id}/interrupt`, {}); await idle(holder.id);
       await until(async () => {
         const state = await api("GET", "/api/bots?messages=30");
         return (state.bots.find((b: any) => b.id === auto.id)?.messages ?? [])
-          .some((m: any) => m.kind === "activity" && String(m.tool?.name ?? "").startsWith("Computer free"));
+          .some((m: any) => m.kind === "activity" && String(m.tool?.name ?? "").startsWith("Computador livre"));
       }, Boolean);
       expect(await check(autoComputer)).toEqual({ held: false, helpOpen: false });
     } finally {
@@ -1076,7 +1079,7 @@ describe("Group Local VM ownership on the real isolated server", () => {
       const state = await api("GET", "/api/bots?messages=30");
       const activities = (state.bots.find((b: any) => b.id === auto.id)?.messages ?? [])
         .filter((m: any) => m.kind === "activity").map((m: any) => m.tool?.name ?? "");
-      expect(activities.join("|")).not.toContain("Waiting for its turn");
+      expect(activities.join("|")).not.toContain("Aguardando a vez");
     } finally {
       writeFileSync(finishFile, "finish");
       await api("POST", `/api/bots/${auto.id}/interrupt`, {}); await idle(auto.id);
@@ -1103,7 +1106,7 @@ describe("Group Local VM ownership on the real isolated server", () => {
       const state = await api("GET", "/api/bots?messages=30");
       const activities = (state.bots.find((b: any) => b.id === next.id)?.messages ?? [])
         .filter((m: any) => m.kind === "activity").map((m: any) => m.tool?.name ?? "");
-      expect(activities.join("|")).not.toContain("Waiting for its turn");
+      expect(activities.join("|")).not.toContain("Aguardando a vez");
     } finally {
       writeFileSync(finishFile, "finish");
       await api("POST", `/api/bots/${auto.id}/interrupt`, {}); await api("POST", `/api/bots/${next.id}/interrupt`, {});

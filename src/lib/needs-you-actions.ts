@@ -2,8 +2,9 @@
 // server: answer it (a decision, the person's words, or a request for the
 // steps), or mark it resolved. The server sends the answer to the bot in the
 // item's conversation; the row updates through the bot frame it broadcasts.
-import { api, ApiError, type Action } from "@/state/store";
+import { api, ApiError, type Action, type Message } from "@/state/store";
 import type { NeedsYouItem } from "@/lib/needs-you";
+import { approvalDecision, pendingApprovals, type ApprovalChoiceId } from "@/components/PendingApproval";
 
 /** A decision carries the label the person saw with its position: the
  * server refuses it (409) when the bot rewrote the options since. */
@@ -29,7 +30,7 @@ export async function sendToConversation(item: NeedsYouItem, text: string, dispa
   }
 }
 
-export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number }> {
+export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number; info?: string; notice?: string }> {
   if (!item.pendingId) throw new Error("not an owner_pending item");
   const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/reply`, {
     method: "POST",
@@ -39,7 +40,13 @@ export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendin
   if (receipt?.queued && typeof receipt.threadId === "string" && typeof receipt.queueId === "string" && typeof receipt.text === "string") {
     dispatch({ type: "pendingQueued", threadId: receipt.threadId, queueId: receipt.queueId, text: receipt.text, reason: receipt.reason === "capacity" || receipt.reason === "group-turn" ? receipt.reason : undefined });
   }
-  return { resolved: Number(receipt?.resolved ?? 0) };
+  // the same answer sent again (the app gave up and the person pressed again): the server
+  // took it once, and says so — news for the neutral notice, not a new send (INSP-R12F r6 D2)
+  if (receipt?.duplicate === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
+  // "Ainda vale" on an item under "Talvez já resolvido": back on top, nothing sent to the bot (INSP-N22 r2 F2)
+  if (receipt?.kept === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
+  // sent, with what the server says of it ("não leu isto como autorização de remoção", INSP-R13fol R2-1)
+  return { resolved: Number(receipt?.resolved ?? 0), ...(typeof receipt?.notice === "string" && receipt.notice ? { notice: receipt.notice } : {}) };
 }
 
 /** "Lembrar <bot>" (INSP-J2 r2 N3): the server reminds the bot, as itself. */
@@ -55,7 +62,60 @@ export async function remindOwnerPending(item: NeedsYouItem): Promise<{ deduped:
   }
 }
 
+/** "Pedir de novo" on a bot's bare question (lot J2): the server asks the
+ * bot, as itself, to register it as an item with steps; the row says
+ * "Pedindo…" through the bot frame it broadcasts. */
+export async function askQuestionSteps(item: NeedsYouItem): Promise<{ deduped: boolean }> {
+  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/tasks/${encodeURIComponent(item.threadId)}/ask-steps`, { method: "POST" });
+  return { deduped: receipt?.deduped === true };
+}
+
+/** "Delegar a um agente" (lote del): the server opens a Claude Code session
+ * for the item; the row turns "delegado" through the bot frame it
+ * broadcasts. A second click is told so, never a second session. */
+export async function delegateOwnerPending(item: NeedsYouItem): Promise<{ info?: string; sessionId?: string; queued?: boolean }> {
+  if (!item.pendingId) throw new Error("not an owner_pending item");
+  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/delegate`, { method: "POST", body: "{}" });
+  if (receipt?.duplicate === true && typeof receipt.message === "string") return { info: receipt.message };
+  return { ...(typeof receipt?.sessionId === "string" ? { sessionId: receipt.sessionId } : {}), ...(typeof receipt?.queueId === "string" ? { queued: true } : {}) };
+}
+
+/** "Os comandos ainda valem": the superseded mark is lifted (INSP-R13fol #13). */
+export async function unsupersedeOwnerPending(item: NeedsYouItem): Promise<void> {
+  if (!item.pendingId) return;
+  await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/unsupersede`, { method: "POST" });
+}
+
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {
   if (!item.pendingId) return;
   await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/resolve`, { method: "POST" });
+}
+
+/** A decision on an open card the conversation stopped on (an approval, a
+ * provider question), from "Precisa de você": the same `decideRequest` the
+ * chat's composer dispatches — POST /api/threads/:id/respond, no other way
+ * in. Settles when the server took it; the item leaves the list through the
+ * bot frame that follows (the conversation stops waiting). "Cancelar
+ * execução" stops the turn, as in the chat. */
+export type RequestChoice = { approval: ApprovalChoiceId } | { answer: string };
+export function answerRequest(item: NeedsYouItem, request: Message, choice: RequestChoice, dispatch: (action: Action) => void): Promise<void> {
+  const requestId = request.card?.requestId;
+  if (!requestId) return Promise.reject(new Error("not an open request"));
+  return new Promise((resolve, reject) => {
+    const settle = { onDone: () => resolve(), onError: (message: string) => reject(new Error(message)) };
+    if ("answer" in choice) {
+      dispatch({ type: "decideRequest", threadId: item.threadId, requestId, behavior: "answer", message: choice.answer, ...settle });
+      return;
+    }
+    const pending = pendingApprovals([request])[0];
+    if (!pending) { reject(new Error("not an approval")); return; }
+    // who asked: in a room the card's speaker, else the item's bot ("Sempre permitir" is theirs)
+    const decision = approvalDecision(pending, choice.approval, { id: request.from?.botId ?? item.botId });
+    if (!decision) {
+      dispatch({ type: "interrupt", botId: item.botId, threadId: item.threadId });
+      resolve();
+      return;
+    }
+    dispatch({ type: "decideRequest", threadId: item.threadId, ...decision, ...settle });
+  });
 }

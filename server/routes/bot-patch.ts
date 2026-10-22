@@ -393,13 +393,13 @@ export function createBotPatchRoutes(deps: BotPatchRouteDeps): RouteHandler {
       const targetSelection = normalizedSelection ?? existingBot?.modelSelection;
       if (normalizedSelection && movedTask) {
         const mode = approvalModeFor(movedTask);
-        if (mode === "custom" &&
+        if ((mode === "full" || mode === "custom") &&
           (!supportsApprovalMode(normalizedSelection, mode) || engineSwitchNeedsAsk(mode, movedTask.modelSelection, normalizedSelection))) {
           return json(res, 400, { error: "Choose Ask for the selected thread before changing providers with elevated permissions" });
         }
       }
       if (
-        requestedApprovalMode === "custom" &&
+        (requestedApprovalMode === "full" || requestedApprovalMode === "custom") &&
         (body.approvalMode !== undefined || normalizedSelection !== undefined) &&
         (!targetSelection || !supportsApprovalMode(targetSelection, requestedApprovalMode) ||
           (existingBot && normalizedSelection && engineSwitchNeedsAsk(requestedApprovalMode, existingBot.modelSelection, normalizedSelection)))

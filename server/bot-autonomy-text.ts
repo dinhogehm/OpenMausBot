@@ -82,14 +82,15 @@ export function clipLines(lines: string[], max: number): string[] {
   return kept;
 }
 
-export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder()): string {
+export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder(), refsLine: string | null = null): string {
   return [
     `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
     ...watchLines(wake),
     // a standing watch's note was written when it was set: it can be stale by now
-    wake.watch?.standing && wake.watch.reasonAt !== undefined && now - wake.watch.reasonAt >= 3_600_000
-      ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
+    wake.watch?.standing && now - noteWrittenAt(wake) >= 3_600_000
+      ? `Your note for this moment, written ${wake.watch.reasonAt === undefined ? "more than " : ""}${minutesLabel(now - noteWrittenAt(wake))} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
       : `Your note for this moment: ${wake.reason}`,
+    ...(refsLine ? [refsLine] : []),
     ...(goal && goal.status === "active"
       ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`, ...GOAL_RULES]
       : ["Do what the note says. If it still is not ready, call wake_when or wake_me again; if it is, report the result here."]),
@@ -218,7 +219,7 @@ export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: str
 
 /** "Preciso de você", "Continuam com você", "Decisão para você"…: the bot
  * asks the person for something in plain words, not only with a "?". */
-export const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
+export const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|(?:precisa(?:m)?|depende(?:m)?) d[ao] (?:sua|seu) (?:decis[ãa]o|autoriza[çc][ãa]o|aprova[çc][ãa]o|confirma[çc][ãa]o|resposta|aval|ok|go|libera[çc][ãa]o|escolha|aceite|aten[çc][ãa]o|retorno|valida[çc][ãa]o|revis[ãa]o|parecer|sinal|palavra)\b|depende(?:m)? de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|deix(?:o|ei|ar|amos) (?:essa |esta |a )?decis[ãa]o com voc[êe]|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|aguardando voc[êe]|aguardando (?:a |o )?(?:sua|seu) (?:decis[ãa]o|autoriza[çc][ãa]o|aprova[çc][ãa]o|confirma[çc][ãa]o|resposta|aval|ok|go|libera[çc][ãa]o|escolha|aceite|aten[çc][ãa]o|retorno|valida[çc][ãa]o|revis[ãa]o|parecer|sinal|palavra)\b|esperando (?:por )?voc[êe]|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
 
 /** Since when the bot has been waiting on the person: the first of its
  * replies, after the person's last message, that asks them something (a
@@ -234,7 +235,7 @@ export function ownerAskAt(messages: ReadonlyArray<{ role: string; kind: string;
     if (message.role === "user" && message.peerAsk) break;
     if (message.role !== "bot" || message.kind !== "text" || message.from) continue;
     const text = (message.text ?? "").replace(/[\s*_`)\]\p{Extended_Pictographic}\uFE0F]+$/u, "");
-    if ((text.endsWith("?") || OWNER_ASK.test(text)) && now - message.at < maxAgeMs) return message.at;
+    if ((text.endsWith("?") || sentencesOf(text).some(asksOwner)) && now - message.at < maxAgeMs) return message.at;
   }
   return null;
 }
@@ -258,10 +259,10 @@ export function ownerAskText(text: string, max = 200, knownNames: readonly strin
     .filter((each) => /\p{L}{3}/u.test(each));
   const at = sentences.findLastIndex((each) => each.endsWith("?"));
   const found = at >= 0
-    // a short question carries the sentence before it ("A #P passou no gate. Mesclo?": INSP-J r1 #4)
+    // a short question carries the sentence before it ("A #9350 passou no gate. Mesclo?": INSP-J r1 #4)
     ? (usefulWords(sentences[at]!) < 2 && at > 0 ? `${sentences[at - 1]} ${sentences[at]}` : sentences[at]!)
-    : sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
-  // the vocative is who, not what ("Osvaldo, a sessão da #Q…": R10-visual N12c)
+    : sentences.find(asksOwner) ?? sentences[0] ?? "";
+  // the vocative is who, not what ("Osvaldo, a sessão da #9058…": R10-visual N12c)
   const vocative = leadingVocative(found);
   const said = vocative ? found.replace(/^[\s*_>"'“-]*[^,]+,\s*/u, "") : found;
   // a sentence that followed the mention starts lower-case ("@Chief, preciso…"): a title starts upper-case
@@ -297,6 +298,8 @@ export function echoAsk(text: string, itemIds: readonly string[] = []): boolean 
   // a question asks something of its own, even short ("Mesclo?", "Confirma?")
   // or naming an item ("Quer que eu responda à cliente agora (o4)?"): never an echo (INSP-J r1 #4)
   if (/\?\s*\)?\s*$/.test(plain)) return false;
+  // it says the person is not needed ("já é meu", "não depende de decisão sua"): nothing to ask (R11-visual N15)
+  if (NOT_ASK.test(plain) && !sentencesOf(plain).some(asksOwner)) return true;
   // another item by its id, said and nothing asked ("O Monitor abriu a pendência o6.")
   if (/\b(?:pend[êe]ncias?|itens?|pedidos?)\s+o\d+\b/i.test(plain) || /\(o\d+\)/.test(plain)) return true;
   const ids = new Set(itemIds.map((id) => id.toLowerCase()));
@@ -347,4 +350,81 @@ export function ownerPendingStepsRequestText(item: Pick<OwnerPending, "title">):
  * transcript): the exact tool call it answers with. */
 export function ownerPendingStepsRequestNote(item: Pick<OwnerPending, "id">): string {
   return `[Nota do OpenMausBot, não escrita pela pessoa] A pessoa abriu a pendência ${item.id} em "Precisa de você" e pediu o passo a passo. Reescreva-a com owner_pending update, id ${item.id}: why (1–2 frases: por que importa e o que acontece se esperar), steps (passos numerados e práticos, cada um com o comando exato em command ou o link em link quando houver) e options (as decisões, se for uma escolha: label curto como "Aprovar" e reply com a resposta que você deve receber). Não abra outra pendência; responda à pessoa em uma frase.`;
+}
+
+export function noteWrittenAt(wake: Pick<BotWake, "createdAt" | "watch">): number {
+  return wake.watch?.standing ? wake.watch.reasonAt ?? wake.createdAt : wake.createdAt;
+}
+
+export const NEEDS_INPUT_PR_CHECK_MAX = 8;
+
+export function goalCitedPrs(text: string): Array<{ number: number; slug?: string; explicit: boolean }> {
+  const found = prsCited(text).map((pr) => ({ ...pr, explicit: true }));
+  const seen = new Set(found.map((pr) => pr.number));
+  for (const match of text.matchAll(/(?<![\w/])#(\d{3,7})\b/g)) {
+    const number = Number(match[1]);
+    if (seen.has(number)) continue;
+    seen.add(number);
+    found.push({ number, explicit: false });
+  }
+  return found;
+}
+
+export interface CitedPrState {
+  number: number;
+  /** gh's state: MERGED, CLOSED, OPEN, or "?" when it could not be read. */
+  state: string;
+  /** Cited as "PR #N" or a PR link (not a bare "#N"). */
+  explicit?: boolean;
+  /** When it was merged or closed (gh's mergedAt / closedAt), if it was. */
+  changedAt?: number;
+}
+
+export type CitedPrsOutcome =
+  | { kind: "merged"; chip: string; report: string }
+  | { kind: "closed"; signature: string; chip: string; report: string };
+
+export function citedPrsOutcome(states: readonly CitedPrState[], askedAt: number): CitedPrsOutcome | null {
+  if (!states.length || !states.some((each) => each.explicit === true)) return null;
+  if (!states.every((each) => each.state === "MERGED" || each.state === "CLOSED")) return null;
+  if (!states.some((each) => each.changedAt !== undefined && each.changedAt > askedAt)) return null;
+  const listOf = (state: string) => states.filter((each) => each.state === state).map((each) => `#${each.number}`).join(", ");
+  const merged = listOf("MERGED");
+  const closed = listOf("CLOSED");
+  if (!closed) {
+    return {
+      kind: "merged",
+      chip: `Pergunta sem objeto: ${merged} mergeada${states.length > 1 ? "s" : ""}. O objetivo foi retomado para conferir o resultado`,
+      report: `[Servidor: pergunta sem objeto] As PRs que a pergunta deste objetivo citava foram mergeadas (${merged}), então ela ficou sem objeto e o objetivo voltou a andar. Merge não é entrega: confira o estado real do que o objetivo pede (produção, issue, cliente) e só encerre com goal_end completed citando a prova. Se ainda depender do dono, pergunte de novo com o estado atual.`,
+    };
+  }
+  return {
+    kind: "closed",
+    signature: states.map((each) => `${each.number}:${each.state}`).sort().join(","),
+    chip: `PR citada fechada sem merge: ${closed}. O objetivo continua esperando o dono`,
+    report: `[Servidor: PR fechada sem merge] A pergunta deste objetivo citava ${closed} (fechada sem merge)${merged ? ` e ${merged} (mergeada)` : ""}. Fechar não é entregar: pode ter sido abandono ou troca por um lote. O objetivo continua esperando a resposta do dono. Confira para onde o trabalho foi e, se a pergunta mudou, diga a ele na sua resposta o estado atual e o que precisa dele.`,
+  };
+}
+
+export const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|nenhum[ao]?s?\s+(?:\p{L}+\s+){0,2}(?:fica|ficam|continua|continuam|depende|dependem|precisa|precisam|est[áa]|est[ãa]o|espera|esperam|aguarda|aguardam)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|dono)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
+
+export const CLAUSE_CUT = /\s*(?:,?\s*(?<![\p{L}])(?:mas|por[ée]m|s[óo] que|contudo|entretanto|todavia)(?![\p{L}])|;|,\s*s[óo](?![\p{L}]))\s*/iu;
+
+export const asksOwner = (sentence: string): boolean => sentence.split(CLAUSE_CUT).some((clause) => OWNER_ASK.test(clause) && !NOT_ASK.test(clause));
+
+export const asksOwnerSentence = (sentence: string, also?: RegExp): boolean =>
+  sentence.split(CLAUSE_CUT).some((clause) => (OWNER_ASK.test(clause) || Boolean(also?.test(clause))) && !NOT_ASK.test(clause));
+
+export const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?…])\s+|\n+/);
+
+export function ownerAskIndex(sentence: string, also?: RegExp): number {
+  let from = 0;
+  for (const clause of sentence.split(CLAUSE_CUT)) {
+    const at = sentence.indexOf(clause, from);
+    from = at + clause.length;
+    if (NOT_ASK.test(clause)) continue;
+    const found = [OWNER_ASK.exec(clause), also?.exec(clause) ?? null].filter((match): match is RegExpExecArray => match !== null).map((match) => match.index);
+    if (found.length) return at + Math.min(...found);
+  }
+  return -1;
 }

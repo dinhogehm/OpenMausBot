@@ -55,4 +55,18 @@ export interface WireOwnerPending {
   awaitingSince?: number;
   /** When the bot last rewrote it (owner_pending update). */
   updatedAt?: number;
+  /** A routine's item said once and let go: under "Talvez já resolvido", out of the count and the chip. */
+  demotedAt?: number;
+  /** "Delegar a um agente" (lote del): the server would open a Claude Code session for it. */
+  delegable?: true;
+  /** Not delegable: why only the person can do it ("mexe no hook ou no revisor"). */
+  onlyYou?: string;
+  /** Delegated, while its session runs (or waits for a slot): out of the count. */
+  delegation?: { at: number; state: "queued" | "running"; option?: string; sessionId?: string; sessionTitle?: string; link?: string };
+  /** Back from a delegation (partial, stopped by the hook, never opened): on top, with why. */
+  delegationBack?: { at: number; outcome: "parcial" | "barrado" | "falhou"; text: string; command?: string };
+  /** Another item said this one's commands must not run (R13-intake #1): decisions and commands off, with by which ("o1 do Monitor"). */
+  superseded?: { by: string; at: number; text: string };
+  /** Its commands write a fixed sheet row and are older than 6 h: the row may have changed (what the server read, when it could). */
+  rowWarning?: string;
 }

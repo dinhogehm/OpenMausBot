@@ -2,7 +2,8 @@ export const BOOT_PROBE_FAST_INTERVAL_MS = 25;
 export const BOOT_PROBE_FAST_WINDOW_MS = 5_000;
 export const BOOT_PROBE_INTERVAL_MS = 500;
 
-export const SERVER_BOOT_TIMEOUT_MS = 60_000;
+/** A loaded Mac (big data, a routine backlog) can take minutes to answer: a slow boot is waited for, not abandoned. */
+export const SERVER_BOOT_TIMEOUT_MS = 180_000;
 export const SERVER_LISTENING_GRACE_MS = 180_000;
 const LISTENING_LINE = "openmausbot server on ";
 
@@ -88,4 +89,11 @@ export async function pollServerIdentity({
     if (now() >= deadline()) return { outcome: "timeout", waitedMs: now() - startedAt };
     return { outcome: "ready", latencyMs: now() - startedAt };
   }
+}
+
+/** After a failed boot on a port: only a port that is truly someone else's ("foreign-owner") or a child that died
+ * (it may have hit EADDRINUSE) moves to the next port; a slow child is tried again on the SAME port, so a slow boot
+ * never strands the app on 18799/28799 where the companion and the scripts do not look. */
+export function portAfterFailure(reason) {
+  return reason === "foreign-owner" || reason === "exited" ? "next" : "same";
 }

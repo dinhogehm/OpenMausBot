@@ -1,9 +1,9 @@
-import { sidebarStamp } from "@/lib/message-stamp";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { initialState, type Bot } from "@/state/store";
+import { sidebarStamp } from "@/lib/message-stamp";
 
 vi.mock("./DesktopCapabilities", () => ({
   useDesktopCapabilities: () => ({}),
@@ -161,10 +161,16 @@ describe("BotListItem", () => {
     });
 
     it("times the open row by the last reply, not by the hang-up", () => {
-      const markup = draw(bot({
-        messages: [spoken, { id: "b1", role: "bot", kind: "text", text: "Sunny in Pune.", at: at(1) }, record] as Bot["messages"],
-      }), { selected: true });
-      expect(markup).toContain(sidebarStamp(at(1)));
+      const now = vi.spyOn(Date, "now").mockReturnValue(at(30));
+      try {
+        const markup = draw(bot({
+          messages: [spoken, { id: "b1", role: "bot", kind: "text", text: "Sunny in Pune.", at: at(1) }, record] as Bot["messages"],
+        }), { selected: true });
+        expect(markup).toContain(sidebarStamp(at(1)));
+        expect(markup).not.toContain(sidebarStamp(at(2)));
+      } finally {
+        now.mockRestore();
+      }
     });
 
     it("names the step the bot is on while it works, when the call ended under it", () => {

@@ -101,7 +101,10 @@ export interface Routine {
   durationMinutes: number;
   /** Optional wall-clock safety limit. Missing means the run is unlimited. */
   timeoutMinutes?: number;
+  /** Absent or "queue": an occurrence due while the previous run is active is coalesced into one pending run; "skip" drops it. */
   overlap?: "skip" | "queue";
+  /** "own": runs in a lane of its own, without waiting behind the bot's other routines. */
+  lane?: "own";
   /** Each run starts with the previous run's report. */
   continuity?: boolean;
   /** Also run once each time OpenMausBot starts. */
@@ -174,7 +177,10 @@ export interface RoutineInput {
   durationMinutes?: number;
   /** `null` explicitly removes the limit; omission preserves it on updates. */
   timeoutMinutes?: number | null;
+  /** Absent or "queue": an occurrence due while the previous run is active is coalesced into one pending run; "skip" drops it. */
   overlap?: "skip" | "queue";
+  /** "own" gives the routine its own lane; `null` removes it on updates. */
+  lane?: "own" | null;
   /** Each run starts with the previous run's report. */
   continuity?: boolean;
   runOnStartup?: boolean;

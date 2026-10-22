@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { EVENTS_DIR } from "../config.ts";
 import { redactSecrets } from "../redact.ts";
+import { runLabeled } from "../loop-stall.ts";
 import { capThreadLog, currentThreadLogCap } from "../thread-log-rotation.ts";
 import { newId, type ProviderInstance, type RuntimeEvent, type RuntimeEventListener } from "../contracts.ts";
 
@@ -41,8 +42,17 @@ function isTerminalEvent(event: RuntimeEvent): boolean {
   return event.type === "runtime.error" && event.terminal === true;
 }
 
+/** "index.ts:5952" — where a listener subscribed, so a stall names the handler, not "anonymous". */
+function subscriptionSite(): string {
+  const frames = (new Error().stack ?? "").split("\n").slice(3);
+  const frame = frames.find((line) => !line.includes("/harness/bus.")) ?? frames[0] ?? "";
+  const match = /([^/\\(\s]+:\d+):\d+\)?\s*$/.exec(frame);
+  return match?.[1] ?? "subscriber";
+}
+
 export class EventBus {
   private listeners = new Set<RuntimeEventListener>();
+  private sites = new WeakMap<RuntimeEventListener, string>();
   private unsubscribes = new Map<string, () => void>();
   private pendingLogWarnings = new Map<string, RuntimeEvent>();
   private pendingText = new Map<string, { event: TextDelta; timer: ReturnType<typeof setTimeout> }>();
@@ -244,7 +254,7 @@ export class EventBus {
   private deliver(event: RuntimeEvent) {
     for (const listener of Array.from(this.listeners)) {
       try {
-        listener(event);
+        runLabeled(`bus ${event.type} → ${this.sites.get(listener) ?? "subscriber"}`, () => listener(event));
       } catch (e) {
         console.error("bus: listener threw", e);
       }
@@ -252,6 +262,7 @@ export class EventBus {
   }
 
   subscribe(listener: RuntimeEventListener): () => void {
+    this.sites.set(listener, subscriptionSite());
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }

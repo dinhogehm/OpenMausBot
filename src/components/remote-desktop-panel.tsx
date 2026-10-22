@@ -5,6 +5,7 @@ import { CalendarClock, CalendarDays, Globe, ImageOff, Loader2, Monitor, Plus, X
 import { cn } from "@/lib/cn";
 import { useCaptionChrome } from "@/components/DesktopCapabilities";
 import { usePageVisible } from "@/lib/page-visible";
+import { previewCaptureMs, useWindowFocusedRef } from "@/lib/capture-pace";
 import { isRemoteScreenshotContention, remoteScreenshotSource } from "@/lib/remote-desktop";
 import type { Routine } from "@/lib/routines";
 import { scheduleLabel } from "@/lib/schedule-label";
@@ -69,6 +70,7 @@ export function RemoteDesktopPanel({ bot }: { bot: Bot }) {
   const [previewUnavailable, setPreviewUnavailable] = useState(false);
   const [viewerOpen, setViewerOpen] = useState(false);
   const pageVisible = usePageVisible();
+  const windowFocused = useWindowFocusedRef();
   const previewBusy = useRef(bot.busy);
   useEffect(() => { previewBusy.current = bot.busy; }, [bot.busy]);
   const [creatingRoutine, setCreatingRoutine] = useState(false);
@@ -125,7 +127,7 @@ export function RemoteDesktopPanel({ bot }: { bot: Bot }) {
     let contentionSince: number | null = null;
     const shoot = async () => {
       if (requestRunning || controller.signal.aborted) return;
-      if (Date.now() - lastAttemptAt < (retryDelay ?? (previewBusy.current ? 4000 : 30_000))) return;
+      if (Date.now() - lastAttemptAt < previewCaptureMs({ busy: previewBusy.current === true, focused: windowFocused.current, retryDelay })) return;
       requestRunning = true;
       retryDelay = null;
       try {

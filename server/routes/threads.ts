@@ -70,8 +70,11 @@ export function createThreadRoutes(deps: ThreadRouteDeps): RouteHandler {
     const cliOwnerToken = deps.cliOwnerToken();
     if (method === "GET" && path === "/api/bots") {
       try { groupUsageReader.refresh(); } catch { }
-      const limit = pageSize(url.searchParams.get("messages"));
-      if (limit === null) return json(res, 400, { error: "messages must be a non-negative whole number" });
+      // Without ?messages= the list used to inline every bot's and room's whole transcript (tens of MB, minutes of
+      // synchronous reads on a large messages.db). It now answers the newest page; ?messages=all asks for everything.
+      const rawLimit = url.searchParams.get("messages");
+      const limit = rawLimit === "all" ? undefined : rawLimit === null ? DEFAULT_PAGE : pageSize(rawLimit);
+      if (limit === null) return json(res, 400, { error: "messages must be a non-negative whole number or \"all\"" });
       // tasks stays explicit: clients expect [] where wireBot() would omit the key.
       const shownBots = store.bots.filter((bot) => visible.bot(bot.id));
       const queued = publicBotQueuedMessages();

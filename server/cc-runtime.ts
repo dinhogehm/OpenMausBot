@@ -1,61 +1,47 @@
 // Claude Code sessions a bot manages, run by the server: turns, worktrees, the release hold, the start queue and the app watches.
+import { createCcOwnRuntime } from "./cc-own-runtime.ts";
+import { createCcOwnerRuntime } from "./cc-owner-runtime.ts";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
-import { type WireCcAlert, type WireOwnerPending, type WireCcSession } from "../shared/wire.ts";
+import { type WireCcAlert, type WireOwnerPending, type WireCcSession, type WireTask } from "../shared/wire.ts";
 import { DATA_DIR } from "./config.ts";
 import { augmentedPath } from "./env-path.ts";
-import { toolCallsWith, userTextMessagesWith } from "./message-db.ts";
-import { ownerWrote } from "./incidents.ts";
+import { toolCallsWith } from "./message-db.ts";
+
 import { BotAutonomy, chipText, STANDING_DEFAULT_LABEL, watchLabel } from "./bot-autonomy.ts";
 import { watchIgnoreWarnings } from "./wake-watch.ts";
-import { CC_MAX_RUNNING, CC_TURN_TIMEOUT_MS, CcSessionLedger, ccProcAlive, PS_BIN, PS_ENV, ccReportForOwner, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, repoCorridor, cliSurfaceRefusal, appStalledReason, recentAppFailure, issueTitle, clientIssue, type AppAvailability, hotfixWithReleaseScripts, corridorVersionOf, repoPackageManager, repoScripts, useRepoScripts, parseCcStream, type CcSession } from "./cc-sessions.ts";
-import {
-  DESKTOP_IDLE_SECONDS,
-  ensureHelper,
-  findDesktopSession,
-  lastAssistantText,
-  macDesktopDriver,
-  newMarker,
-  lastAppRepo,
-  liveWorktreeNames,
-  liveRecordFolders,
-  lastAppWorktreeFolder,
-  lastServerSessionInRoot,
-  reusedFolderRefusal,
-  rootAnchorSession,
-  rootFolderRefusal,
-  readDesktopRecord,
-  
-  recordsUsingFolder,
-  transcriptMentions,
-  transcriptPath,
-  transcriptTurnEnded,
-  transcriptOpenQuestion,
-  transcriptWrittenAt,
-  type DesktopDriver,
-} from "./claude-desktop.ts";
-import { desktopBriefText, issueNumber, liveSessionForIssue, uniqueSessionTitle, reviveScreenFailures, screenWaitOf, reportFor as desktopReportFor, takeFreshQueued, type DesktopWorkDeps } from "./desktop-work.ts";
-import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
-import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
+import { CC_MAX_RUNNING, CC_TURN_TIMEOUT_MS, CcSessionLedger, ccProcAlive, PS_BIN, PS_ENV, ccReportForOwner, ccTurnArgs, parseCcStartInput, repoCorridor, cliSurfaceRefusal, appStalledReason, recentAppFailure, issueTitle, clientIssue, type AppAvailability, hotfixWithReleaseScripts, corridorVersionOf, repoPackageManager, repoScripts, useRepoScripts, parseCcStream, type CcSession, appFailureRead, CC_APP_FULL_REFUSAL } from "./cc-sessions.ts";
+import { DESKTOP_IDLE_SECONDS, newMarker, lastAppRepo, lastAppWorktreeFolder, lastServerSessionInRoot, reusedFolderRefusal, rootFolderRefusal } from "./claude-desktop.ts";
+import { issueNumber, liveSessionForIssue, uniqueSessionTitle, reviveScreenFailures, screenWaitOf, reportFor as desktopReportFor, takeFreshQueued } from "./desktop-work.ts";
+
+import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree, gateLabel, mergeProcesses, sessionGates, type BgProcess } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { claimedPrNumbers, claimsInToolCalls, githubSlug, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded } from "./prod-delivery.ts";
+import { claimsInToolCalls, githubSlug, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded } from "./prod-delivery.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { appFlappingPending, appUnblockPending, flappingRefusal, type FolderBlockSeen, type FolderFlapState, noteFolderBlock, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
-import { CHANNEL_ORDER_WORDS, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
-import { channelTurnThread } from "./owner-channel.ts";
-import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
-import { DECLINED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailures, releaseInLoop, ReleaseWatchState } from "./release-watch.ts";
+import { appFlappingPending, appUnblockPending, flappingRefusal, type FolderBlockSeen, type FolderFlapState, noteFolderBlock, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
+import { SharedState } from "./shared-state.ts";
+
+import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog, type ReleaseInFlight, releaseResumeHold } from "./release-priority.ts";
+import { DECLINED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailures, releaseInLoop, ReleaseWatchState, RELEASE_FAILURES_ALERT, LAST_FAILURE_FILE } from "./release-watch.ts";
 import { cloudHomeConfiguration } from "./cloud-home.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+
 import { Store, type BotRecord } from "./store.ts";
-import { TASK_WORKSPACES_DIR } from "./workspace.ts";
-import type { WireTask } from "../shared/wire.ts";
+
+import { type DelegatedItemRef } from "./owner-delegate.ts";
+import { fixedRowWarning } from "./owner-pending-guard.ts";
+import { type ProductivityCollector } from "./productivity-collector.ts";
+import { PipelineBoardService } from "./pipeline-board-live.ts";
+import { presetPeriod } from "../shared/productivity.ts";
+import { NowStatusService } from "./now-status.ts";
+import { execGh } from "./productivity-github.ts";
+
+import { breakerRepo, ownBreakerCli, planOwnWorktree } from "./own-worktrees.ts";
 
 export interface CcRuntimeDeps {
   CLOUD_HOME: ReturnType<typeof cloudHomeConfiguration>;
@@ -73,6 +59,14 @@ export interface CcRuntimeDeps {
   refreshBotRow: (botId: string) => void;
   releaseAlertToChief: (text: string, report: string, logPrefix?: string) => void;
   releaseWatch: { state: ReleaseWatchState | null; lastAt: number; quiet: Set<string> };
+  fullAccessForSource: (botId: string, threadId: string) => boolean;
+  productivityEnabled: boolean;
+  productivity: Pick<ProductivityCollector, "report" | "releaseRuns" | "refreshLogs" | "boardSource">;
+  readProductionTag: () => Promise<string | null>;
+  broadcast: (payload: Record<string, unknown>, options?: { adminOnly?: boolean }) => void;
+  nuriaStopFile: string;
+  assertBudget: () => void;
+  releaseDelegationAnswer: (botId: string, itemId: string) => void;
   store: Store;
   setThreadSignals: (signals: (threadId: string) => ThreadSignals) => void;
 }
@@ -81,8 +75,7 @@ type ThreadSignals = Pick<WireTask, "watches" | "watchesLost" | "ccAlerts" | "ow
 
 /** Built once, where server/index.ts used to declare all of this inline. */
 export function createCcRuntime(deps: CcRuntimeDeps) {
-  const { CLOUD_HOME, DESKTOP_MANAGED, alertAutomationTrouble, autonomy, autonomyTestMs, carrierPowerCheck, chiefDeskThread, cloudOwnerOnlyThread, finishGoalWithChip, mainThreadOf, ownerThreadGone, readHaltedRelease, refreshBotRow, releaseAlertToChief, releaseWatch, store, setThreadSignals } = deps;
-  // ── what a bot's conversations know about each other (server/shared-state.ts)
+  const { DESKTOP_MANAGED, alertAutomationTrouble, autonomy, autonomyTestMs, carrierPowerCheck, chiefDeskThread, mainThreadOf, readHaltedRelease, refreshBotRow, releaseAlertToChief, releaseWatch, fullAccessForSource, productivityEnabled, productivity, readProductionTag, broadcast, nuriaStopFile, assertBudget, store, setThreadSignals } = deps;
   const sharedState = new SharedState(join(DATA_DIR, "bots"));
 
   // ── Claude Code sessions a bot manages (server/cc-sessions.ts) ─────────
@@ -92,7 +85,7 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
   // anything is reported: what the boot says goes to the conversation they named.
 
   /** Once per session: the PRs its orders handed it before claimedPrs existed
-   * ("assuma a PR #N", 01/10 18:13, to the 29da943f), read back from the
+   * ("assuma a PR #9328", 01/10 18:13, to the 29da943f), read back from the
    * bots' tool calls in messages.db (read only) — INSP-H r1 #1. */
   function backfillClaimedPrs(): void {
     const pending = ccLedger.all().filter((session) => session.claimsReadAt === undefined);
@@ -119,6 +112,7 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
   // A restart cut these turns off: tell each owner, or nobody would ever resume them.
   // (the Chief's desk gets one summary of all of them: no chip twice there)
   let bootDesk: string | null = null;
+  // The Chief resumption report waits for cut-lease reconciliation in the first autonomy tick.
 
   /** Standing watches armed before the warning existed, with an `ignore` that
    * swallows lines a person changed: said once in their conversation. */
@@ -179,166 +173,85 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
     const when = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     const name = (botId: string) => store.bot(botId)?.name ?? botId;
-    const rerun = leases.filter((lease) => !lease.stale);
-    const asked = leases.filter((lease) => lease.stale);
+    // This fork: each cut lease as resumeCutLeases gave it back (bot-autonomy.ts RecoveredLease)
+    const open = leases.filter((lease) => !lease.dropped && !lease.continued);
+    const continued = leases.filter((lease) => !lease.dropped && lease.continued);
+    const dropped = leases.filter((lease) => lease.dropped);
+    const outward = open.filter((lease) => lease.outward !== undefined);
+    const rerun = open.filter((lease) => lease.outward === undefined && !lease.stale);
+    const asked = open.filter((lease) => lease.outward === undefined && lease.stale);
+    const kindPt = (lease: { kind: string }) => (lease.kind === "wake" ? "despertador/vigia" : "relatórios");
     const text = [
       "[Relatório de retomada — o servidor reiniciou]",
-      ...(rerun.length ? ["Reenviado automaticamente (turnos cortados pelo restart, retomados como devidos):", ...rerun.map((lease) => `- ${name(lease.botId)} · ${lease.kind === "wake" ? "despertador/vigia" : "relatórios"} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
+      ...(rerun.length ? ["Reenviado automaticamente (turnos cortados pelo restart, retomados como devidos):", ...rerun.map((lease) => `- ${name(lease.botId)} · ${kindPt(lease)} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
+      ...(outward.length ? ["NÃO repetido (o turno já tinha agido para fora antes do corte; o bot foi perguntado, com o que já fez — confira que nada saiu duas vezes):", ...outward.map((lease) => `- ${name(lease.botId)} · ${kindPt(lease)} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what} — ${lease.outward!.length ? `já feito: ${lease.outward!.slice(0, 8).join(", ")}` : "não deu para conferir o que ele já tinha feito"}`)] : []),
       ...(asked.length ? ["NÃO repetido (mais de 6 h; o bot foi perguntado se ainda vale):", ...asked.map((lease) => `- ${name(lease.botId)} · ${lease.kind} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
+      ...(continued.length ? ["Não reenviado (o turno tinha passado trabalho a colegas ou esperava uma resposta; ele mesmo continua de onde parou quando ela chegar, ou já continuou depois do restart):", ...continued.map((lease) => `- ${name(lease.botId)} · ${kindPt(lease)} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
+      ...(dropped.length ? ["Descartado (parado pela pessoa, ou a conversa foi encerrada, antes da retomada):", ...dropped.map((lease) => `- ${name(lease.botId)} · ${kindPt(lease)} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
       ...(sessions.length ? ["Sessões do Claude Code interrompidas (o turno foi cortado e o processo claude não sobreviveu; o dono de cada uma recebeu o relatório):", ...sessions.map((session) => `- "${session.title}" (${session.id}) de ${name(session.ownerBotId)}`)] : []),
       ...(survived.length ? ["Sessões do Claude Code cujo processo claude seguiu rodando (o servidor acompanha até o fim do turno e o relatório chega como de costume; NÃO retome nem mande outra mensagem para elas agora):", ...survived.map((session) => `- "${session.title}" (${session.id}, PID ${session.proc?.pid}) de ${name(session.ownerBotId)}`)] : []),
       "Confira o que ficou pendente e retome o que for preciso.",
     ].join("\n");
-    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(serverRestartedChip({ interrupted: sessions.length, survived: survived.length, rerun: rerun.length, asked: asked.length }), 200), ok: asked.length === 0 && sessions.length === 0 } });
+    // a turn its own root carries on counts as resumed; one not run again for what it did, as one to confirm
+    const toConfirm = asked.length + outward.length;
+    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(serverRestartedChip({ interrupted: sessions.length, survived: survived.length, rerun: rerun.length + continued.length, asked: toConfirm }), 200), ok: toConfirm === 0 && sessions.length === 0 } });
     autonomy.addReport(chief.id, desk, text);
   }
   const ccProcesses = new Map<string, CcChildProcess>();
+  /** Sessions whose ended turn is being checked for what it left running (its background job). */
+  const ccLeftoverChecks = new Set<string>();
   // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
   const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
   // OMB_CC_TURN_TIMEOUT_MS shortens the turn cut for end-to-end tests only.
   const ccTurnTimeoutMs = Number(process.env.OMB_CC_TURN_TIMEOUT_MS) > 0 ? Number(process.env.OMB_CC_TURN_TIMEOUT_MS) : CC_TURN_TIMEOUT_MS;
+  // The gate wait (INSP-R13res A1, R2 B6). A turn past its limit while a gate
+  // of its session runs is not cut: on a cut Claude Code kills its own
+  // background shells, the gate with them. The cut waits for the gate, checked
+  // once a minute, and the rule is the same for a turn the server runs and for
+  // one followed after a restart: never past this long from the turn's start.
+  // The wait of a ci:local queued behind a release is a separate excuse, never
+  // added to it: the cut comes at whichever ends later, so a turn lasts at
+  // most what the release queue alone allowed before (~6,5 h), or 3 h.
+  // Unknown (ps or lsof failed) counts as a gate still running: the next check
+  // decides, and the ceiling still holds (R2 B2). OMB_CC_GATE_WAIT_MAX_MS
+  // shortens it for tests.
+  const ccGateWaitMaxMs = Number(process.env.OMB_CC_GATE_WAIT_MAX_MS) > 0 ? Number(process.env.OMB_CC_GATE_WAIT_MAX_MS) : 3 * 3_600_000;
+  /** How long a cut waited for the gate, as it was (R2 B7): "depois de esperar 90 min pelo gate". */
+  const gateWaitPt = (waitedMs: number) => (waitedMs > 0 ? `depois de esperar ${spanPt(waitedMs)} pelo gate` : "já além do teto de espera do gate");
+  const gateWaitEn = (waitedMs: number) => (waitedMs > 0 ? `after waiting ${spanPt(waitedMs)} for it` : "already past the gate wait's ceiling");
+  /** How often a gate wait is checked again. */
+  const ccGateRecheckMs = Math.min(60_000, ccTurnTimeoutMs);
+  /** Sessions whose cut waits for their gate, and since when: a delegated item does not time out meanwhile. */
+  const ccGateWaits = new Map<string, number>();
+  /** Every session's claude: never a gate, even when its prompt names one (R2 B3). */
+  const ccClaudePids = (): number[] => [
+    ...[...ccProcesses.values()].map((child) => child.pid ?? 0),
+    ...ccLedger.all().map((session) => session.proc?.pid ?? 0),
+  ].filter((pid) => pid > 0);
+  /** "3 h", "90 min": how long, for the owner. */
+  const spanPt = (ms: number) => (ms >= 3_600_000 ? `${Math.round(ms / 360_000) / 10} h`.replace(".", ",") : `${Math.max(1, Math.round(ms / 60_000))} min`);
+  /** The turn's worktree, when it has one: only there a gate is the session's. */
+  const worktreeFolder = (folder: string | undefined) => (folder && folder.includes("/.claude/worktrees/") ? folder : null);
   const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. When you merge a batch of PRs: hotfix/P0/P1 work (by label, title or the linked issue's priority) goes first, ahead of CI or infrastructure PRs, released on its own; PRs that change release scripts (release, carrier, merge-gate or production-watch scripts) go last, in a separate release, with a dry run first. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report. Write your reports and summaries — everything the person reads in the app — in Brazilian Portuguese (pt-BR); keep code, commands and identifiers as they are.";
   /** The footer of a first turn: the general rules, plus the repository's own corridor. */
   const ccTurnFooter = (session: CcSession): string => `${CC_TURN_FOOTER}${repoCorridor(session.repo)}`;
   /** Headless runs only: nothing wakes such a session after its turn ends. */
   const CC_CLI_FOOTER = "\nYou run headless: nothing wakes you after you stop. Never end your turn waiting on a background job or a notification — run gates in the foreground and wait for them (up to 80 min), or report the PID, the log/receipt path and what to check.";
 
-  function ccIsGitRepo(dir: string): boolean {
-    if (!dir.startsWith(homedir()) || !existsSync(dir)) return false;
+  function ccIsGitRepo(path: string): boolean {
+    if (!path.startsWith(homedir()) || !existsSync(path)) return false;
     try {
-      return execFileSyncCc("git", ["-C", dir, "rev-parse", "--is-inside-work-tree"], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } }).toString().trim() === "true";
+      return execFileSyncCc("git", ["-C", path, "rev-parse", "--is-inside-work-tree"], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } }).toString().trim() === "true";
     } catch {
       return false;
     }
   }
 
-  /** The owning conversation, plus the thread the last order came from, plus
-   * the conversation with the owner when the reports go there. */
-  function ccThreads(session: CcSession): string[] {
-    const threads = [session.ownerThreadId];
-    if (session.replyThreadId && session.replyThreadId !== session.ownerThreadId) threads.push(session.replyThreadId);
-    const reportTo = sessionReportThread(session);
-    if (!threads.includes(reportTo)) threads.push(reportTo);
-    return threads.filter((threadId) => store.taskByThread(session.ownerBotId, threadId));
-  }
-
-  /** The conversation the owner named for talking to them (shared-state), while open. */
-  function ownerChannelOf(botId: string): string | null {
-    try {
-      const named = sharedState.ownerThread(botId)?.threadId ?? null;
-      return named && openThreadOf(botId, named) ? named : null;
-    } catch {
-      return null; // not set up yet (module load)
-    }
-  }
-
-  /** Where a session's report wakes its bot: the conversation the owner named,
-   * when there is one — the bot answers the owner from where it is woken, and
-   * reports woken elsewhere had the Chief writing to the owner in two
-   * conversations 3 s apart (R9-followup #1). A session whose own conversation
-   * runs a goal reports there: that goal is waiting for it. */
-  function sessionReportThread(session: CcSession): string {
-    return ownerTurnThread(session.ownerBotId, session.ownerThreadId);
-  }
-
-  /** Where a turn woken on the owner's behalf from `from` runs: the owner's
-   * channel when there is one (owner-channel.ts), unless `from` runs a goal. */
-  function ownerTurnThread(botId: string, from: string): string {
-    return channelTurnThread({ channel: ownerChannelOf(botId), from, goalActive: autonomy.goalFor(from)?.status === "active" });
-  }
-
-  /** The owner named a conversation: the Claude Code sessions their bot runs
-   * from its other conversations report there from now on (not those of a
-   * conversation running a goal). Said once, with a chip in each. */
-  function moveWorkToOwnerThread(botId: string, ownerThreadId: string, why: string): void {
-    if (!openThreadOf(botId, ownerThreadId)) return;
-    const moved: CcSession[] = [];
-    for (const session of ccLedger.all()) {
-      if (session.ownerBotId !== botId || session.status === "archived" || session.ownerThreadId === ownerThreadId) continue;
-      if (autonomy.goalFor(session.ownerThreadId)?.status === "active") continue;
-      const from = session.ownerThreadId;
-      session.ownerThreadId = ownerThreadId;
-      if (session.replyThreadId === ownerThreadId) delete session.replyThreadId;
-      moved.push(session);
-      if (store.taskByThread(botId, from)) {
-        store.appendMessage(from, { role: "bot", kind: "activity", tool: { name: chipText(sessionChips.movedAway(session.title), 240), ok: true }, threadRef: { botId, threadId: ownerThreadId, title: store.taskByThread(botId, ownerThreadId)?.title ?? "conversa com o dono" } });
-      }
-    }
-    if (!moved.length) return;
-    ccLedger.save();
-    const list = moved.map((session) => `"${session.title}" (${session.id.slice(0, 8)}, ${session.status})`).join(", ");
-    store.appendMessage(ownerThreadId, { role: "bot", kind: "activity", tool: { name: chipText(sessionChips.movedHere(moved.map((session) => session.title), why), 240), ok: true } });
-    console.log(`[shared-state] ${store.bot(botId)?.name ?? botId}: ${moved.length} session(s) now report to the conversation with the owner (${ownerThreadId}): ${list}`);
-    refreshBotRow(botId);
-  }
-
-  /** At boot: each bot's last channel order, read back from the history
-   * (messages.db, read only). An order given before this build — or before
-   * the last turns a record reads — still names the conversation with the
-   * owner; where the owner wrote last never takes its place (R9-followup #1). */
-  function adoptOwnerChannels(): void {
-    for (const bot of store.bots) {
-      try {
-        const tasks = store.tasks(bot.id).filter((task) => !CLOUD_HOME || cloudOwnerOnlyThread(task.threadId));
-        const ids = tasks.map((task) => task.threadId);
-        const rows = userTextMessagesWith(ids, CHANNEL_ORDER_WORDS, 200)
-          .filter((row) => ownerWrote(row.message) && !store.groupByThread(row.threadId))
-          .map((row) => ({ threadId: row.threadId, at: row.message.at, text: row.message.text ?? "" }));
-        const found = lastChannelOrder(rows, (ref) => threadByRef(ids, ref));
-        if (!found) continue;
-        const task = store.taskByThread(bot.id, found.target);
-        if (!task || !openThreadOf(bot.id, found.target)) {
-          console.log(`[shared-state] ${bot.name}: the owner's last channel order (${new Date(found.order.at).toISOString()}) names ${found.target}, which is no longer open — not adopted`);
-          continue;
-        }
-        if (!sharedState.adoptChannelOrder(bot.id, found.order, { threadId: found.target, title: task.title })) continue;
-        const when = new Date(found.order.at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
-        console.log(`[shared-state] ${bot.name}: the conversation with the owner is ${found.target} (their channel order of ${new Date(found.order.at).toISOString()}, read back from the history)`);
-        store.appendMessage(found.target, { role: "bot", kind: "activity", tool: { name: chipText(ownerChannelChip(when), 240), ok: true } });
-        moveWorkToOwnerThread(bot.id, found.target, `ordem do dono de ${when}`);
-      } catch (error) {
-        console.error(`[shared-state] ${bot.name}: could not read back the owner's channel order: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    // a channel already on record (set by an earlier build) moved nothing then:
-    // the sessions still tied to older conversations move now — idempotent,
-    // a session already in the channel is left as it is (R10-followup #2)
-    for (const bot of store.bots) {
-      const channel = ownerChannelOf(bot.id);
-      if (channel) moveWorkToOwnerThread(bot.id, channel, "o canal com o dono já estava definido");
-    }
-  }
-
-  function ccChip(session: CcSession, text: string, ok = true): void {
-    for (const threadId of ccThreads(session)) {
-      store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Claude Code "${session.title.slice(0, 60)}": ${text}`, ok } });
-    }
-    // the owner's row carries the session's state (failed, stalled, question)
-    refreshBotRow(session.ownerBotId);
-  }
-
-  /** A chip of the server's own about a session, short and in the owner's
-   * words (server/owner-chips.ts), in its conversations — but not in `skip`
-   * (the Chief's desk when its summary already says it, INSP-H r1 #10). */
-  function ccChipShort(session: CcSession, text: string, ok = true, skip?: string | null): void {
-    for (const threadId of ccThreads(session)) {
-      if (threadId === skip) continue;
-      store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok } });
-    }
-    refreshBotRow(session.ownerBotId);
-  }
-
-  /** A session's report wakes its owner — in the conversation the owner named
-   * when there is one (sessionReportThread), else in its own conversation and
-   * the thread that gave the order. */
-  function ccReport(session: CcSession, text: string): void {
-    const to = sessionReportThread(session);
-    autonomy.addReport(session.ownerBotId, to, text);
-    if (to !== session.ownerThreadId || ownerChannelOf(session.ownerBotId)) return;
-    if (session.replyThreadId && session.replyThreadId !== session.ownerThreadId && store.taskByThread(session.ownerBotId, session.replyThreadId)) {
-      autonomy.addReport(session.ownerBotId, session.replyThreadId, text);
-    }
-  }
+  const { ownerChannelOf, sessionReportThread, ownerTurnThread, moveWorkToOwnerThread, adoptOwnerChannels, ccChip, ccChipShort, ccReport, retireThreadWork, noteClaimedPrs, delegationTime, delegateView, delegationOwner, delegationChip, delegationOpened, delegationReturned, reconcileDelegations, wireDelegation } = createCcOwnerRuntime({
+    ...deps, sharedState, ccLedger, ccLeftoverChecks, ccGateWaits,
+    get ccStartQueue() { return ccStartQueue; },
+    execCc: (file, args, cwd) => execCc(file, args, cwd), openThreadOf,
+  });
 
   // ── the GitHub token sessions run with (server/session-token.ts) ────────
   const sessionToken = new SessionToken(process.env.OMB_CC_BIN ? { read: () => { throw new Error("tests use no Keychain"); } } : {});
@@ -366,14 +279,25 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
   /** One headless turn. Its exit hands the report to the owning conversation,
    * unless a reply was queued meanwhile, which then runs as the next turn. */
   function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
+    const fullAccess = fullAccessForSource(session.ownerBotId, session.ownerThreadId);
+    session.lastTurnPermissionMode = fullAccess ? "bypassPermissions" : session.permissionMode;
     const expectedCwd = join(session.repo, ".claude", "worktrees", session.worktree);
-    const cwd = first ? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
+    // the first turn runs in the worktree the server made, or in the repository for claude -w to make one
+    const cwd = first ? session.cliWorktree?.path ?? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
     ccLedger.markRunning(session);
     const lines: string[] = [];
     let buffer = "";
     let timedOut = false;
     let settled = false;
+    // where this turn works, as its init event says: its gate runs there
+    let initCwd: string | undefined;
     const keep = (line: string) => {
+      if (initCwd === undefined && line.includes('"subtype":"init"')) {
+        try {
+          const said = (JSON.parse(line) as { cwd?: unknown }).cwd;
+          if (typeof said === "string") initCwd = said;
+        } catch { /* not the event */ }
+      }
       // Tool output can be huge; only the init and result events matter here.
       if (line.includes('"subtype":"init"') || line.includes('"type":"result"') || !line.startsWith("{")) {
         lines.push(line);
@@ -382,7 +306,7 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     };
     let child: CcChildProcess;
     try {
-      child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${ccTurnFooter(session)}${CC_CLI_FOOTER}` : prompt, first), {
+      child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${ccTurnFooter(session)}${CC_CLI_FOOTER}` : prompt, first, fullAccess), {
         cwd,
         // a token without admin rights for the platform's sessions, when the owner keeps one
         env: { ...process.env, PATH: augmentedPath(), ...sessionTokenEnv(session) },
@@ -459,7 +383,14 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     };
     const sampler = setInterval(sample, 30_000);
     sampler.unref();
+    // the gate this turn's cut waited for, past the ceiling: cut with it, and how long it waited (INSP-R13res A1, R2 B7)
+    let gateCut = "";
+    let gateWaitedMs = 0;
+    let gateWaitSince = 0;
+    // the last gates a check could see: an unknown check keeps them (R2 B2)
+    let gatesSeen: BgProcess[] = [];
     const cutOrWait = () => {
+      if (settled) return;
       const now = Date.now();
       const due = turnStartedAt + ccTurnTimeoutMs + queuedMs + (queuedSince ? now - queuedSince : 0);
       if (queuedSince || now < due) {
@@ -467,10 +398,39 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
         timer.unref();
         return;
       }
-      timedOut = true;
-      if (overdueReason) ccChip(session, `turno cortado: ${overdueReason}`, false);
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+      // A gate of this session still at work: on a cut Claude Code kills its
+      // background shells, the gate with them. The cut waits for the gate (the
+      // turn goes on, and hears its result) up to the ceiling.
+      // its worktree as its init event said it, else as the ledger knows it, else
+      // where a first turn's `-w` makes it (a claude slow to start has said nothing yet)
+      let expected: string | undefined;
+      try { expected = realpathSync(expectedCwd); } catch { /* not made yet */ }
+      const folder = worktreeFolder(initCwd ?? session.cwd ?? expected);
+      void (folder ? sessionGates(folder, ccClaudePids()) : Promise.resolve([])).catch(() => null).then((found) => {
+        if (settled) return;
+        if (found) gatesSeen = found;
+        const running = found === null || found.length > 0;
+        if (running && Date.now() < turnStartedAt + ccGateWaitMaxMs) {
+          if (!gateWaitSince) {
+            gateWaitSince = Date.now();
+            ccGateWaits.set(session.id, gateWaitSince);
+            ccChip(session, `turno passou de ${Math.round(ccTurnTimeoutMs / 60_000)} min, mas o gate (${gateLabel(gatesSeen)}) da sessão ainda roda; o corte espera o gate terminar (até ${spanPt(ccGateWaitMaxMs)} de turno)`);
+          }
+          console.log(`[cc-sessions] ${session.id}: past the turn limit, gate check: ${found === null ? "unknown (ps/lsof failed)" : `running (${found.map((gate) => gate.pid).join(", ")})`}: the cut waits`);
+          timer = setTimeout(cutOrWait, ccGateRecheckMs);
+          timer.unref();
+          return;
+        }
+        if (gateWaitSince) gateWaitedMs = Date.now() - gateWaitSince;
+        ccGateWaits.delete(session.id);
+        // past the ceiling: the gate it waited for, or the last one seen when this check could not tell
+        if (running && (found?.length || gatesSeen.length)) gateCut = gateLabel(found?.length ? found : gatesSeen);
+        console.log(`[cc-sessions] ${session.id}: cut at the turn limit, gate check: ${!folder ? "no worktree known" : found === null ? "unknown" : found.length ? `running (${found.map((gate) => gate.pid).join(", ")}), past the ceiling` : "none"}`);
+        timedOut = true;
+        if (overdueReason) ccChip(session, `turno cortado: ${overdueReason}`, false);
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+      });
     };
     let timer = setTimeout(cutOrWait, ccTurnTimeoutMs);
     timer.unref();
@@ -495,7 +455,10 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
       clearInterval(sampler);
       ccProcesses.delete(session.id);
       if (buffer) keep(buffer);
+      ccGateWaits.delete(session.id);
       const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
+      // cut with its gate running: said in the same write as the cut (R2 B1)
+      if (gateCut && timedOut && !outcome.ok) outcome.error = `${outcome.error ?? "its turn was cut"}; it was cut while its gate (${gateCut}) still ran, ${gateWaitEn(gateWaitedMs)}`;
       ccLedger.finishTurn(session, outcome);
       // this turn was the resumption after a cut: at most one per cut in a row
       const resumedAfterCut = session.resumedAfterCut === true;
@@ -528,303 +491,54 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
         ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn was cut at the ${limitMin}-min limit twice in a row: the second turn was the server's resumption after the first cut. The server does not resume it again. Check whether it is stuck — a loop, a wait that never ends — then send it a message with cc_session_send, or stop it.)`);
         return;
       }
+      // cut past the gate's ceiling, and nothing of it outlived the cut: said as it is
+      const gateLost = () => {
+        ccChip(session, `turno cortado com ${spanPt(ccGateWaitMaxMs)} de turno, ${gateWaitPt(gateWaitedMs)} (${gateCut}) — gate interrompido pelo corte, sem resultado`, false);
+        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn passed the ${limitMin}-min limit while its gate (${gateCut}) ran; it was cut at the ${spanPt(ccGateWaitMaxMs)} ceiling from the turn's start, ${gateWaitEn(gateWaitedMs)}, and the gate was stopped with it: there is no gate result. Check why the gate ran that long before having it run again.)`);
+      };
       if ((session.status === "idle" || cut) && tree && folder && folder.includes("/.claude/worktrees/")) {
-        void backgroundProcesses(folder, tree).then((found) => {
-          // after a cut only a group of its own counts (the gate); the claude's own group (MCP servers) dies with it
-          const left = cut ? cutLeftovers(found, tree.rootPid) : found;
+        // until it is known whether a job is left, a delegated item does not settle on this turn
+        ccLeftoverChecks.add(session.id);
+        void Promise.all([backgroundProcesses(folder, tree), cut ? sessionGates(folder, [tree.rootPid, ...ccClaudePids()]).then((gates) => gates ?? []).catch(() => []) : Promise.resolve([])]).finally(() => ccLeftoverChecks.delete(session.id)).then(([found, gates]) => {
+          // after a cut only a group of its own counts (the gate), and a gate
+          // that outlived the cut wherever it runs (nohup); the claude's own
+          // group (MCP servers) dies with it
+          const left = cut ? mergeProcesses(cutLeftovers(found, tree.rootPid), gates) : found;
           if (!left.length || (session.status !== "idle" && !(cut && session.status === "failed"))) {
-            ccReport(session, desktopReportFor(desktopWork, session));
+            if (gateCut && cut) gateLost();
+            else ccReport(session, desktopReportFor(desktopWork, session));
             return;
           }
-          session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now(), ...(cut ? { afterCut: true as const } : {}) };
-          ccLedger.save();
-          ccChip(session, cut
+          followBgJob(session, left, cut, limitMin, () => ccChip(session, cut
             ? `turno cortado em ${limitMin} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
-            : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
-          ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ${cut ? `was cut at the ${limitMin}-min limit` : "ended"} with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.${cut ? " One of them may be what stalled the turn; the server resumes it once at most — cut again, it waits for you." : ""})`);
+            : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`));
         }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
         return;
       }
-      ccReport(session, desktopReportFor(desktopWork, session));
+      if (gateCut && cut) gateLost();
+      else ccReport(session, desktopReportFor(desktopWork, session));
     };
     child.on("error", (error) => finish(null, null, `could not run ${ccBin()}: ${error.message}`));
     child.on("close", (code, signal) => finish(code, signal));
   }
 
-  // ── Claude Code sessions in the Claude desktop app (server/claude-desktop.ts)
-  // The person follows these in the app. Screen actions (open, send, archive)
-  // wait for an idle, unlocked Mac and run one at a time; following them only
-  // reads files. The flow itself lives in server/desktop-work.ts.
-  let desktopDriver: DesktopDriver | null = null;
-  const desktopState = { busy: false };
-
-  async function getDesktopDriver(): Promise<DesktopDriver> {
-    if (!desktopDriver) {
-      const env = { ...process.env, PATH: augmentedPath() };
-      desktopDriver = macDesktopDriver(await ensureHelper(DATA_DIR, DESKTOP_HELPER_SOURCE, env), env);
-    }
-    return desktopDriver;
+  /** What a turn left running in its worktree, followed as the session's
+   * background job: the tick resumes the session with a new turn once it is
+   * all gone (watchBackgroundJobs), once at most after a cut. `chip` says it
+   * where the session is followed; the report tells the owner. */
+  function followBgJob(session: CcSession, left: readonly BgProcess[], cut: boolean, limitMin: number, chip: () => void): void {
+    session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now(), ...(cut ? { afterCut: true as const } : {}) };
+    ccLedger.save();
+    chip();
+    ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ${cut ? `was cut at the ${limitMin}-min limit` : "ended"} with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.${cut ? " One of them may be what stalled the turn; the server resumes it once at most — cut again, it waits for you." : ""})`);
   }
 
-  /** The brief typed into the app: it opens with the folder check, since the
-   * app may land the new session in a folder that is not its own. */
-  function desktopBrief(session: CcSession, brief: string, since = Date.now()): string {
-    session.desktop!.folderGuarded = true;
-    return desktopBriefText(session.title, session.desktop!.marker, brief, ccTurnFooter(session), since);
-  }
-
-  const DUAL_DECISIONS_LOG = join(homedir(), ".laya", "hooks", "dual-decisions.log");
-
-  const desktopWork: DesktopWorkDeps = {
-    ledger: ccLedger,
-    now: Date.now,
-    getDriver: getDesktopDriver,
-    readRecord: (localId) => readDesktopRecord(localId),
-    findSession: (marker, since) => findDesktopSession(marker, since),
-    transcriptOf: (cliSessionId) => transcriptPath({ cliSessionId }),
-    lastText: (transcript) => lastAssistantText(transcript),
-    turnEnded: transcriptTurnEnded,
-    openQuestion: transcriptOpenQuestion,
-    mentions: transcriptMentions,
-    writtenAt: transcriptWrittenAt,
-    repoName: (session) => basename(session.repo),
-    chip: ccChip,
-    report: ccReport,
-    ownerPending: (session, item) => {
-      // in the conversation with the owner, where they were told to look
-      const threadId = sessionReportThread(session);
-      if (!store.taskByThread(session.ownerBotId, threadId)) return;
-      autonomy.addOwnerPending(session.ownerBotId, threadId, item);
-      refreshBotRow(session.ownerBotId);
-    },
-    resolveOwnerPending: (key) => {
-      for (const item of autonomy.resolveOwnerPending({ key })) refreshBotRow(item.botId);
-    },
-    hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
-    hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
-    liveWorktrees: () => liveWorktreeNames(undefined, true),
-    baseBranch: (session) => repoBaseBranch(session.repo),
-    // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
-    rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),
-    folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
-    log: (line) => console.log(`[claude-desktop] ${line}`),
-    onArchived: (session) => {
-      void reportArchivedWorktrees(session, session.desktop?.removeWorktree === true).catch((error) => console.warn(`[worktrees] archive report of ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`));
-    },
-  };
-
-
-  /** The branch origin/HEAD points to ("main"), what a new app session must show. */
-  function repoBaseBranch(repo: string): string {
-    try {
-      const ref = String(execFileSyncCc("git", ["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } })).trim();
-      return ref.replace(/^origin\//, "") || "main";
-    } catch {
-      return "main";
-    }
-  }
-
-  /** Worktrees whose work is already in the production tag, in the
-   * repositories the sessions use: every 6 h the Chief gets the ones a person
-   * may remove, with the command, and those kept and why — only when that
-   * changed. The server removes none (R8 G3, server/nested-worktrees.ts). */
-  const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string> } = { lastAt: 0, running: false, lastKey: new Map() };
-  /** `git` with git's stderr on the error, async, with a timeout. */
-  const gitAsync = (args: string[]) => new Promise<string>((resolve, reject) => {
-    execFileCc("git", args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath(), GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout, stderr) => {
-      if (error) reject(Object.assign(error, { stderr: String(stderr ?? "") }));
-      else resolve(String(stdout));
-    });
+  const { desktopState, getDesktopDriver, desktopBrief, ownStore, ownWorktreesOn, ownBreaker, ownPathActive, ownOnByName, settleOwnBreaker, ownPlanTaken, ownPrepareState, startSeededCli, refreshOwnSeeds, desktopWork, registeredWorktreePaths, releasedCleanup, gitAsync, allProcessCwds, foldersInUse, canonPath, duKb, cleanReleasedWorktrees, reportArchivedWorktrees } = createCcOwnRuntime({
+    ...deps, ccLedger, ccProcesses, ccTurnFooter, ownerChannelOf, sessionReportThread, ccChip, ccChipShort, ccReport, runCcTurn,
+    execCc: (file, args, cwd) => execCc(file, args, cwd),
+    get releaseHold() { return releaseHold; }, refreshReleaseHold, startCcSession,
+    ourAppLocalIds: () => ourAppLocalIds(), appFolderBlock,
   });
-  /** Every process's cwd (`lsof -a -d cwd -Fpn`), or null when it cannot be read. */
-  const allProcessCwds = () => new Promise<string[] | null>((resolve) => {
-    execFileCc("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn"], { timeout: 60_000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }, (_error, stdout) => {
-      // lsof exits 1 when it could not read another user's process: the output still counts
-      const found = parseLsofCwd(String(stdout ?? ""));
-      resolve(found.length ? found.map((proc) => proc.cwd) : null);
-    });
-  });
-  /** Codex sessions of the last week: the folders they work in (`session_meta.cwd`). */
-  function recentCodexFolders(now: number): string[] {
-    const root = join(homedir(), ".codex", "sessions");
-    const folders = new Set<string>();
-    const walk = (dir: string, depth: number) => {
-      let names: string[];
-      try { names = readdirSync(dir); } catch { return; }
-      for (const name of names) {
-        const path = join(dir, name);
-        if (depth < 3) { walk(path, depth + 1); continue; }
-        if (!name.endsWith(".jsonl")) continue;
-        try {
-          if (now - statSync(path).mtimeMs > 7 * 86_400_000) continue;
-          for (const folder of codexRolloutFolders(readHead(path, 256 * 1024))) folders.add(folder);
-        } catch { /* unreadable: skipped */ }
-      }
-    };
-    walk(root, 0);
-    return [...folders];
-  }
-  function readHead(path: string, bytes: number): string {
-    const fd = openSync(path, "r");
-    try {
-      const buffer = Buffer.alloc(bytes);
-      return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)).toString("utf8");
-    } finally { closeSync(fd); }
-  }
-  /** Folders agents work in: our sessions, the app's sessions, every bot's
-   * open conversation (its folder or its task-workspace), rooms, Codex. */
-  function foldersInUse(opts: { quietWorkspaces?: Map<string, string> } = {}): string[] {
-    const folders: string[] = ccLedger.all().filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!);
-    if (process.platform === "darwin") folders.push(...liveRecordFolders());
-    const now = Date.now();
-    const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
-    for (const bot of store.bots) {
-      if (bot.cwd) folders.push(bot.cwd);
-      for (const task of store.tasks(bot.id)) {
-        if (task.archivedAt) continue;
-        if (typeof task.cwd === "string") folders.push(task.cwd);
-        const workspace = join(TASK_WORKSPACES_DIR, bot.id, task.threadId);
-        // for the disk report only: a closed conversation's workspace, or one
-        // quiet for 72 h and not running, is told as information (INSP-J r1 #7a)
-        if (opts.quietWorkspaces) {
-          const quietSince = task.updatedAt ?? task.createdAt;
-          if (task.closedBy) { opts.quietWorkspaces.set(workspace, `conversa "${task.title.slice(0, 40)}" fechada`); continue; }
-          if (!task.busy && !autonomy.goalFor(task.threadId) && now - quietSince > STALE_OUTSIDE_TAG_MS) { opts.quietWorkspaces.set(workspace, `conversa "${task.title.slice(0, 40)}" aberta, parada desde ${day(quietSince)}`); continue; }
-        }
-        folders.push(workspace);
-      }
-    }
-    for (const group of store.groups ?? []) {
-      if (group.cwd) folders.push(group.cwd);
-      if (group.pinnedCwd) folders.push(group.pinnedCwd);
-    }
-    folders.push(...recentCodexFolders(Date.now()));
-    return folders;
-  }
-  const canonPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
-  /** A folder's size in KB (`du -sk`, at most 2 min), or null. */
-  const duKb = (path: string) => new Promise<number | null>((resolve) => {
-    execFileCc("/usr/bin/du", ["-sk", path], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? null : Number(/^(\d+)/.exec(String(stdout).trim())?.[1]) || null));
-  });
-  async function cleanReleasedWorktrees(): Promise<void> {
-    if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
-    releasedCleanup.running = true;
-    releasedCleanup.lastAt = Date.now();
-    try {
-      // without every process's cwd and argv nothing can be judged in use: no report
-      const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
-      if (!cwds || !rows.length) return;
-      const inUse = foldersInUse();
-      // the idle task-workspaces are told with closed and quiet conversations too (information only)
-      const quietWorkspaces = new Map<string, string>();
-      const inUseForDisk = foldersInUse({ quietWorkspaces });
-      const lines: string[] = [];
-      const mtime = (file: string) => { try { return statSync(file).mtimeMs; } catch { return null; } };
-      const activity = (path: string) => worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime });
-      const stale: StaleFolder[] = [];
-      for (const repo of new Set(ccLedger.all().map((session) => session.repo))) {
-        const git = (args: string[]) => gitAsync(["-C", repo, ...args]);
-        let tagSha: string | null = null;
-        try {
-          tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-          if (tagSha) await git(["cat-file", "-e", `${tagSha}^{commit}`]);
-        } catch { continue; } // no tag, or its commit is not fetched here: nothing can be judged
-        if (!tagSha) continue;
-        const plan = await planReleasedWorktrees(repo, tagSha, {
-          git, inUse, processCwds: cwds, processCommands: rows.map((row) => row.command), now: Date.now(), canon: canonPath, lastActivity: activity,
-        });
-        stale.push(...(plan.stale ?? []));
-        const { line, key } = releasedPlanLine(basename(repo), plan, releasedCleanup.lastKey.get(repo));
-        releasedCleanup.lastKey.set(repo, key);
-        if (!line) continue;
-        console.log(`[worktrees] ${repo}: judged only the ${plan.scope?.inTag ?? "?"} of ${plan.scope?.total ?? "?"} worktrees contained in ${PRODUCTION_TAG}: ${plan.candidates.length} may be removed (${plan.candidates.map((candidate) => candidate.path).join(", ") || "none"}); kept ${plan.kept.join(", ") || "none"}`);
-        // what was judged comes first: "nenhuma pode ser removida" is about those in the tag only (R10-resilience D)
-        const scope = releasedScopeLine(basename(repo), plan, PRODUCTION_TAG);
-        if (scope) lines.push(scope);
-        lines.push(line);
-        if (plan.candidates.length) lines.push(`Para remover (sem --force; confira antes): ${plan.candidates.map((candidate) => candidate.command).join(" ; ")}`);
-      }
-      // the task-workspaces of conversations no longer open, idle for days
-      const workspaces: Array<{ path: string; lastActivity: number | null; note?: string }> = [];
-      try {
-        for (const bot of readdirSync(TASK_WORKSPACES_DIR)) {
-          const botDir = join(TASK_WORKSPACES_DIR, bot);
-          let threads: string[] = [];
-          try { threads = readdirSync(botDir); } catch { continue; }
-          for (const thread of threads) {
-            const path = join(botDir, thread);
-            const at = existsSync(join(path, ".git")) ? activity(path) ?? mtime(path) : mtime(path);
-            const note = quietWorkspaces.get(path);
-            workspaces.push({ path, lastActivity: at, ...(note ? { note } : {}) });
-          }
-        }
-      } catch { /* no task-workspaces here */ }
-      stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath }));
-      const staleKey = stale.map((each) => each.path).sort().join("\n");
-      const staleNews = staleKey !== (releasedCleanup.lastKey.get("\u0000stale") ?? "");
-      releasedCleanup.lastKey.set("\u0000stale", staleKey);
-      if (staleNews && stale.length) {
-        // every one measured (du, 2 min each at most), so the report orders by size, not by disk order (INSP-J r1 #7b)
-        for (const each of stale) each.sizeKb = await duKb(each.path);
-        console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
-      }
-      const staleTold = staleNews ? staleFoldersReport(stale) : null;
-      if (!lines.length && !staleTold) return;
-      const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
-      const desk = chief ? chiefDeskThread(chief) : null;
-      if (chief && desk && store.taskByThread(chief.id, desk)) {
-        const plans = lines.filter((line) => !line.startsWith("Para remover") && !/: avaliei para remoção só/.test(line));
-        if (plans.length) store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Worktrees já em produção — ${plans[0]}${plans.length > 1 ? " …" : ""}`, 240), ok: true } });
-        if (staleTold) store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(staleTold.chip, 240), ok: true } });
-        const parts = [
-          ...(lines.length ? [`Worktrees já em produção — estas podem ser removidas por uma pessoa, depois de conferir:\n${lines.join("\n")}`] : []),
-          ...(staleTold ? [staleTold.report] : []),
-        ];
-        autonomy.addReport(chief.id, desk, `[Servidor: worktrees e disco] O servidor não remove nada. ${parts.join("\n\n")}\nAo falar com o dono, diga o escopo: "nenhuma pode ser removida" vale só para as contidas na tag; as paradas fora dela são decisão dele.`);
-      }
-    } finally {
-      releasedCleanup.running = false;
-    }
-  }
-
-  /** An archived session's worktrees (G12, server/nested-worktrees.ts): the
-   * merged ones it left inside its folder and — `includeOwn` — its own. The
-   * server removes none: the bot gets the ones a person may remove, with the
-   * command, and the ones that stay and why. Async: it waits for the
-   * session's own claude to exit (its cwd would keep the worktree "in use"). */
-  async function reportArchivedWorktrees(session: CcSession, includeOwn: boolean): Promise<void> {
-    const folder = session.cwd;
-    if (!folder || !existsSync(folder)) {
-      if (includeOwn && folder?.includes("/.claude/worktrees/")) ccChip(session, `A worktree ${folder} já não existia.`);
-      return;
-    }
-    for (let waited = 0; ccProcesses.has(session.id) && waited < 15_000; waited += 250) await new Promise((resolve) => setTimeout(resolve, 250));
-    const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
-    if (!cwds || !rows.length) {
-      ccChip(session, "worktrees não conferidas (sem a lista de processos)", false);
-      return;
-    }
-    const deps = {
-      repo: session.repo,
-      git: (args: string[]) => gitAsync(["-C", session.repo, ...args]),
-      processCwds: cwds,
-      processCommands: rows.map((row) => row.command),
-      foldersInUse: foldersInUse().filter((path) => canonPath(path) !== canonPath(folder)),
-      ownLockMarkers: [session.id, ...(session.desktop?.localId ? [session.desktop.localId] : [])],
-      canon: canonPath,
-    };
-    const nested = await planNestedWorktrees(folder, deps);
-    // The app reuses worktrees of archived sessions for new ones: never offer
-    // one that another live session (ours or the app's) works in.
-    const own = includeOwn && folder.includes("/.claude/worktrees/") ? await planArchivedWorktree(folder, deps, [
-      ...ccLedger.all().filter((other) => other.id !== session.id && other.cwd === folder && other.status !== "archived").map((other) => `"${other.title}"`),
-      ...recordsUsingFolder(folder, session.desktop?.localId).map((record) => `"${record.title ?? record.sessionId}" (app)`),
-    ]) : { candidates: [], kept: [] };
-    const { chip, report } = archiveCleanupNote(folder, { candidates: [...nested.candidates, ...own.candidates], kept: [...nested.kept, ...own.kept] });
-    if (!chip) return;
-    ccChip(session, chip, !nested.kept.length && !own.kept.length);
-    ccReport(session, `[Arquivamento de "${session.title}" (${session.id}): worktrees] ${report}`);
-  }
 
   /** Headless sessions whose turn ended with a background job: resume each
    * once its processes are all gone (same pid and start time). One still
@@ -907,6 +621,13 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
       ...(item.awaitingSince ? { awaitingSince: item.awaitingSince } : {}),
       // when the bot last rewrote it: an older "não foi entregue" is over then (INSP-J2 r4 A2)
       ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
+      // a routine's item said once and let go: under "Talvez já resolvido", out of the count (INSP-N22 r2 F2)
+      ...(item.demotedAt ? { demotedAt: item.demotedAt } : {}),
+      // "Delegar a um agente": the button, why not, or the delegation running or back (lote del)
+      ...wireDelegation(item),
+      // another item said its commands must not run; a fixed sheet row that may have changed (R13-intake #1)
+      ...(item.supersededBy ? { superseded: { by: `${item.supersededBy.id} do ${item.supersededBy.botName}`, at: item.supersededBy.at, text: item.supersededBy.text } } : {}),
+      ...(() => { const warning = fixedRowWarning(item, Date.now()); return warning ? { rowWarning: warning } : {}; })(),
     }));
     return {
       ...(watches.length ? { watches } : {}),
@@ -922,58 +643,28 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     execFileCc(file, args, { cwd, timeout: 30_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
   });
 
-  /** A conversation closed, archived or deleted: its goal ends (with a chip)
-   * and the Claude Code sessions it owned report to the bot's main
-   * conversation from now on, instead of to a thread nobody reads. */
-  function retireThreadWork(botId: string, threadId: string, why: string): void {
-    const bot = store.bot(botId);
-    if (!bot) return;
-    const goal = autonomy.goalFor(threadId);
-    if (goal?.status === "active") finishGoalWithChip(threadId, "stopped", `a conversa foi ${why}`);
-    else if (goal?.status === "needs-input") autonomy.resolveNeedsInput(threadId, `a conversa foi ${why}`, "blocked");
-    ownerThreadGone(botId, threadId, why);
-    const main = [chiefDeskThread(bot, threadId), bot.threadId].find((candidate) => candidate && candidate !== threadId && store.taskByThread(botId, candidate) && !store.taskByThread(botId, candidate)?.archivedAt);
-    const moved: CcSession[] = [];
-    for (const session of ccLedger.all()) {
-      if (session.ownerBotId !== botId || session.status === "archived") continue;
-      if (session.replyThreadId === threadId) delete session.replyThreadId;
-      if (session.ownerThreadId !== threadId || !main) continue;
-      session.ownerThreadId = main;
-      moved.push(session);
-    }
-    ccLedger.save();
-    if (!main || !moved.length) return;
-    const list = moved.map((session) => `"${session.title}" (${session.id}, ${session.status})`).join(", ");
-    store.appendMessage(main, { role: "bot", kind: "activity", tool: { name: chipText(`${moved.length} sessão(ões) do Claude Code passaram para esta conversa (a de origem foi ${why}): ${list}`, 240), ok: true } });
-    autonomy.addReport(botId, main, `[The conversation that owned these Claude Code sessions was ${why}; they report here from now on.] ${list}. Check what each still needs (cc_session_list) and carry on here.`);
-    refreshBotRow(botId);
-  }
-
-  /** "Assuma a PR #N" in an order to a session: that PR is its own from now
-   * on (prod-delivery.ts), though its branch is not the session's. Only an
-   * explicit hand-over; a PR the session's report names never is (R9-followup #2). */
-  function noteClaimedPrs(session: CcSession, text: string): void {
-    const claimed = claimedPrNumbers(text);
-    if (!claimed.length) return;
-    session.claimedPrs = [...new Set([...(session.claimedPrs ?? []), ...claimed])];
-    if (session.delivery?.notOwned) session.delivery.notOwned = session.delivery.notOwned.filter((number) => !claimed.includes(number));
-    ccLedger.save();
-    ccChipShort(session, sessionChips.claimed(session.title, claimed));
-  }
-
   /** Send a message to a session the way cc_session_send would, from the
    * server: now if it is idle, else after its current turn. */
-  function sendToSessionFromServer(session: CcSession, text: string): void {
+  function sendToSessionFromServer(session: CcSession, text: string): boolean {
+    if (session.surface === "app" && fullAccessForSource(session.ownerBotId, session.ownerThreadId)) {
+      if (session.blockedOn !== CC_APP_FULL_REFUSAL) {
+        session.blockedOn = CC_APP_FULL_REFUSAL;
+        ccLedger.save();
+        ccChip(session, CC_APP_FULL_REFUSAL, false);
+      }
+      return false;
+    }
     if (session.surface === "app" && session.desktop) {
       if (session.status === "idle" && !session.desktop.pending && !session.desktop.sent) {
         session.desktop.pending = { kind: "send", text, since: Date.now(), attempts: 0 };
         session.status = "running";
         ccLedger.save();
       } else ccLedger.enqueue(session, text);
-      return;
+      return true;
     }
     if (session.status !== "running" && !ccProcesses.has(session.id) && ccSlotFreeForWork()) runCcTurn(session, text, false);
     else ccLedger.enqueue(session, text);
+    return true;
   }
 
   // ── the production release first (server/release-priority.ts) ──────────
@@ -1025,7 +716,7 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     const ownerPid = readAdmissionFile("deploy-lease", "owner.pid");
     if (!ownerPid) return null;
     const startedAt = Number(readAdmissionFile("deploy-lease", "started"));
-    return { ownerPid, label: readAdmissionFile("deploy-lease", "label") ?? "", start: readAdmissionFile("deploy-lease", "start"), startedAt: startedAt > 0 ? startedAt : undefined };
+    return { ownerPid, label: readAdmissionFile("deploy-lease", "label") ?? "", start: readAdmissionFile("deploy-lease", "start"), startedAt: startedAt > 0 ? startedAt : undefined, checkout: readAdmissionFile("deploy-lease", "checkout") };
   }
   function readReleaseIntents(): ReleaseIntent[] | null {
     // admission-control.sh creates intents/ on every acquire: missing while a
@@ -1038,12 +729,62 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     }
   }
 
+  /** "Agora" (lot Y): the delivery line's state for the panel at the top of the
+   * sidebar — production, the release on its way, open PRs and their gate, the
+   * ci:local, release alerts and today's throughput — recomputed every minute,
+   * pushed to the screens when it changes. Read-only; same inputs, same panel. */
+  const nowStatus = new NowStatusService({
+    dataDir: DATA_DIR,
+    enabled: productivityEnabled,
+    report: () => productivity.report("day", presetPeriod("day", 1, Date.now())),
+    runs: () => productivity.releaseRuns(),
+    refreshLogs: () => productivity.refreshLogs(),
+    outLog: RELEASE_OUT_LOG,
+    releaseStartedFile: join(ADMISSION_DIR, "release-started.json"),
+    readLease: readAdmissionLease,
+    readDeployLease,
+    leaseSince: () => { try { return statSync(join(ADMISSION_DIR, "lease", "owner.pid")).mtimeMs; } catch { return null; } },
+    inFlight: (rows) => {
+      // intents/ unreadable is undecided, never "no release" (admission-control.sh creates it on every acquire)
+      const intents = readReleaseIntents();
+      if (intents === null) throw new Error("release intents unreadable");
+      return releaseInFlight({ rows, lease: readAdmissionLease(), deployLease: readDeployLease(), intents, alive: (pid) => rows.some((row) => row.pid === pid) });
+    },
+    ps: psTable,
+    gh: execGh,
+    git: (args) => execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), ...args]),
+    sessions: () => ccLedger.all().filter((session) => session.status !== "archived").map((session) => ({
+      sessionId: session.id,
+      ...(ccProcesses.get(session.id)?.pid ? { claudePid: ccProcesses.get(session.id)!.pid } : {}),
+      ...(session.bgJob ? { jobPids: session.bgJob.pids, ...(session.bgJob.starts ? { jobStarts: session.bgJob.starts } : {}) } : {}),
+      ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
+    })),
+    sessionInfo: (sessionId) => {
+      const session = ccLedger.get(sessionId);
+      return session ? { sessionId, title: session.title, botId: session.ownerBotId, threadId: session.ownerThreadId } : null;
+    },
+    failing: () => {
+      const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
+      const declined = readTail(DECLINED_SHA_FILE, 200).trim();
+      if (!failed || failed.count < RELEASE_FAILURES_ALERT || (declined && (declined.startsWith(failed.sha) || failed.sha.startsWith(declined)))) return null;
+      // when it last failed: the watcher's last-failure record, else the err log's last write (never the read)
+      const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
+      return { ...failed, at: mtime(LAST_FAILURE_FILE) ?? mtime(RELEASE_ERR_LOG) };
+    },
+    readTag: readProductionTag,
+    declined: () => readTail(DECLINED_SHA_FILE, 200).trim() || null,
+    onChange: (status) => broadcast({ kind: "now", status }, { adminOnly: true }),
+    log: (line) => console.log(line),
+  });
+
   /** A production release on its way on this Mac (release-priority.ts
    * releaseInFlight), read at most once a minute: while one is, no session is
    * told to resume (INSP-S r1 S-1). `label` null: none; "?" while the
    * admission state cannot be read (undecided, so nobody is told either). A
-   * release past the ceiling has likely hung and holds nothing. */
-  const releaseHold: { label: string | null; at: number; running: boolean } = { label: null, at: 0, running: false };
+   * release past the ceiling has likely hung and holds nothing. In its network
+   * phase (lote W2, "deploying") the machine is free: only the session in the
+   * checkout the release deploys from is held (R11 #2; `found`/`checkout`). */
+  const releaseHold: { label: string | null; found: ReleaseInFlight | null; checkout: string | null; at: number; running: boolean } = { label: null, found: null, checkout: null, at: 0, running: false };
   // a test's minute is shorter (OMB_AUTONOMY_MINUTE_MS)
   const RELEASE_HOLD_EVERY_MS = autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000;
   async function refreshReleaseHold(): Promise<void> {
@@ -1051,6 +792,8 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     releaseHold.running = true;
     try {
       let label: string | null;
+      let found: ReleaseInFlight | null = null;
+      let checkout: string | null = null;
       try {
         const lease = readAdmissionLease();
         const deployLease = readDeployLease();
@@ -1058,30 +801,74 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
         if (!lease && !deployLease && !intents.length) label = null;
         else {
           const rows = await psTable();
-          const found = releaseInFlight({ rows, lease, deployLease, intents, alive: (pid) => rows.some((row) => row.pid === pid) });
-          label = found && !found.overdue ? releaseHoldText(found) : null;
+          found = releaseInFlight({ rows, lease, deployLease, intents, alive: (pid) => rows.some((row) => row.pid === pid) });
+          checkout = deployLease?.checkout ?? null;
+          label = releaseResumeHold(found);
         }
       } catch {
         label = "?";
       }
-      if (label !== releaseHold.label) console.log(`[cc-sessions] release hold: ${label === null ? "none" : label === "?" ? "admission state unreadable" : label}`);
+      const said = label ?? (found?.state === "deploying" && !found.overdue ? `none (${releaseHoldText(found)})` : null);
+      if (label !== releaseHold.label || found?.state !== releaseHold.found?.state) console.log(`[cc-sessions] release hold: ${said === null ? "none" : label === "?" ? "admission state unreadable" : said}`);
       releaseHold.label = label;
+      releaseHold.found = found;
+      releaseHold.checkout = checkout;
       releaseHold.at = Date.now();
     } finally {
       releaseHold.running = false;
     }
   }
+  /** The release hold this server last read, for this session: in the release's
+   * network phase only the session in the checkout it deploys from is held. */
+  const releaseHoldOf = (session: Pick<CcSession, "cwd">): string | null => {
+    if (releaseHold.label !== null || releaseHold.found?.state !== "deploying" || !session.cwd) return releaseHold.label;
+    let cwd = session.cwd;
+    try { cwd = realpathSync(cwd); } catch { /* gone: compared as recorded */ }
+    return releaseResumeHold(releaseHold.found, cwd, releaseHold.checkout);
+  };
   /** resumeNeeded under the release hold this server last read. */
-  const resumeOf = (session: CcSession, now = Date.now()) => resumeNeeded(session, now, { release: releaseHold.label });
+  const resumeOf = (session: CcSession, now = Date.now()) => resumeNeeded(session, now, { release: releaseHoldOf(session) });
   /** What a row shows: the session still holds its PR while a release runs,
    * so the mark stays, "on hold" — parked behind the release, or with one on
    * its way — instead of vanishing and coming back (INSP-S r2 S2-3). The bots
    * are told nothing meanwhile (resumeOf). */
   const wireResumeOf = (session: CcSession, now = Date.now()): WireCcSession["resume"] | null => {
-    const held = session.resumeAfterTag ? "parked" as const : releaseHold.label ? "release" as const : null;
+    const held = session.resumeAfterTag ? "parked" as const : releaseHoldOf(session) ? "release" as const : null;
     const need = resumeNeeded(held === "parked" ? { ...session, resumeAfterTag: undefined } : session, now);
     return need ? { ...need, ...(held ? { held } : {}) } : null;
   };
+
+  // ── "Esteira" (lot Z): the delivery pipeline board ──
+  // Built from the productivity collector's cache plus the live state held
+  // here (sessions, "Precisa de você", the release hold, the admission lease);
+  // the open PRs are read for it through gh, read-only, only when it is asked for.
+  const pidAlive = (pid: number) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  };
+  const pipelineBoard = new PipelineBoardService({
+    enabled: productivityEnabled,
+    limitsFile: join(DATA_DIR, "pipeline-board", "limits.json"),
+    source: () => productivity.boardSource(),
+    refreshLogs: () => productivity.refreshLogs(),
+    sessions: () => ccLedger.all(),
+    ownerPending: () => autonomy.allOwnerPending(),
+    botNames: () => new Map(store.bots.map((bot) => [bot.id, bot.name])),
+    releaseHold: () => releaseHold.label,
+    admission: () => {
+      const lease = readAdmissionLease();
+      return {
+        lease: lease && pidAlive(Number(lease.ownerPid)) ? { kind: lease.kind, label: lease.label ?? "" } : null,
+        intents: (readReleaseIntents() ?? []).filter((intent) => pidAlive(intent.pid)).map((intent) => intent.label),
+      };
+    },
+    log: (line) => console.log(line),
+  });
 
   async function preemptCiForReleaseTick(): Promise<void> {
     if (!DESKTOP_MANAGED || process.env.VITEST || releasePriority.running || Date.now() - releasePriority.lastAt < 20_000) return;
@@ -1175,12 +962,12 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
       }
       const message = resumeAfterRelease(wait, { tagSha: sha, failures, declined: readTail(DECLINED_SHA_FILE, 200).trim(), halted: readHaltedRelease()?.sha ?? null, at: Date.now() });
       if (!message) continue;
+      if (!sendToSessionFromServer(session, message)) continue;
       delete session.resumeAfterTag;
       ccLedger.save();
       const moved = Boolean(sha && sha !== wait.fromSha);
       ccChip(session, moved ? `a tag de produção andou (${sha!.slice(0, 8)}) — sessão retomada para relançar o ci:local` : `o release que tomou a vez (${wait.releaseSha?.slice(0, 9)}) não saiu — sessão retomada para relançar o ci:local`);
       console.log(`[release-priority] resumed session ${session.id}: ${moved ? `tag moved to ${sha!.slice(0, 9)}` : `release ${wait.releaseSha} failed again, was refused or halted`}`);
-      sendToSessionFromServer(session, message);
     }
   }
 
@@ -1206,9 +993,12 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
   /** Existing work may take a slot: one stays free for each P1 waiting. */
   const ccSlotFreeForWork = () => slotFreeForWork({ taken: ccLedger.slotsTaken(), urgentQueued: ccStartQueue.urgentCount(), max: CC_MAX_RUNNING });
 
-  function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false): StartResult {
+
+  function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false, delegation?: DelegatedItemRef): StartResult {
     const input = parseCcStartInput(body, ccIsGitRepo);
     if (!input.ok) return { status: 400, body: { error: input.error } };
+    const fullAccess = fullAccessForSource(bot.id, threadId);
+    const surface = fullAccess ? "cli" : body.surface;
     // One live session per issue: a second would redo the same work.
     const duplicate = liveSessionForIssue(ccLedger.all(), input.repo, issueNumber(input.title, input.brief));
     if (duplicate) {
@@ -1222,13 +1012,16 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
     const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
     // why it runs headless, as the server knows it (recorded on its chip)
-    let cliOnRecord = cliReason;
-    if (body.surface === "cli") {
+    let cliOnRecord = fullAccess ? "Acesso total autorizado pelo dono: terminal" : cliReason;
+    // the breaker of the server's worktrees tripped and the owner was asked: straight to the cli, no app try (R13-dispatch R13-2)
+    const breakerCli = surface !== "cli" && process.platform === "darwin" && ownWorktreesOn(input.repo) ? ownBreakerCli(ownBreaker.get(), breakerRepo(input.repo)) : null;
+    if (breakerCli) cliOnRecord = breakerCli;
+    if (surface === "cli" && !fullAccess) {
       // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
       const { state: app, reason: appReason } = appAvailability(input.repo);
       // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
       if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo, appFolderBlock());
-      const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null });
+      const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null, appFailureRead: appFailureRead(ccLedger.all(), input.repo, Date.now()) });
       if ("refusal" in decided) return { status: 409, body: { error: decided.refusal } };
       cliOnRecord = decided.onRecord;
     }
@@ -1241,56 +1034,87 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     if (gate === "busy") return { status: 409, body: { error: "busy" }, busy: true };
     if (gate === "queue") {
       // urgency from the bot's explicit priority, else the title; never the brief
-      const priority = startPriority(input.title, body.priority);
-      const queued = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, ...(issueNumber(input.title, input.brief) ? { issue: issueNumber(input.title, input.brief) } : {}), priority, at: Date.now() });
+      // a delegated item's start never borrows urgency from the item's title: it waits as the lowest (INSP-DEL A10)
+      const priority = delegation ? startPriority("", "low") : startPriority(input.title, body.priority);
+      const queued = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, ...(issueNumber(input.title, input.brief) ? { issue: issueNumber(input.title, input.brief) } : {}), priority, at: Date.now(), ...(delegation ? { delegation } : {}) });
       if (queued === null) return { status: 409, body: { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code ocupando as vagas e a fila de espera está cheia (${START_QUEUE_MAX}); espere uma relatar, ou tire um start seu da fila (cc_session_archive com o id dele)` } };
+      if (ccStartQueue.of(bot.id).some(item => item.id === queued.id && item.dispatching)) {
+        return { status: 409, body: { error: `o início de "${input.title}" tem resultado não confirmado (id ${queued.id}); não enfileirei nem iniciei outra sessão. Confira cc_session_list e a sessão real antes de reconciliar esse registro.` } };
+      }
       const why = taken >= CC_MAX_RUNNING ? `as ${CC_MAX_RUNNING} vagas do Claude Code estão ocupadas` : "há starts esperando na fila (um novo não passa na frente deles)";
+      // a delegation: the same start already queued is not this one, and the owner reads no bot hint (INSP-DEL A11)
+      if (delegation && queued.duplicate) return { status: 409, body: { error: `um start igual ("${input.title}") já está na fila de sessões (id ${queued.id}); não enfileirei outro` } };
       if (queued.duplicate) {
         return { status: 200, body: { message: `"${input.title}" já estava na fila de sessões (#${queued.position}, id ${queued.id}); não enfileirei de novo. Encerre o turno agora.` } };
       }
       store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Fila de sessões: "${input.title}" é a #${queued.position} (prioridade ${priorityLabel(priority)}); abre sozinha quando uma vaga liberar`, 240), ok: true } });
-      return { status: 200, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
+      return { status: 200, queueId: queued.id, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
     }
-    if (body.surface !== "cli" && process.platform === "darwin") {
+    if (surface !== "cli" && !breakerCli && process.platform === "darwin") {
+      const appId = randomUUID();
+      // The server makes the session's worktree and opens the app right in it
+      // (lote X): the app's last folder, and the worktree it would reuse, do
+      // not matter then — no 409 for them. Should the app not open there, the
+      // create goes on through New Session, checked as below at that moment.
+      // the repository's real path: the brief's folder check compares `pwd -P` with it
+      const realRepo = (() => { try { return realpathSync(input.repo); } catch { return input.repo; } })();
+      // (not while its breaker is tripped: two sessions in a row landed elsewhere — the old way, 409 and gesture)
+      const ownPlan = ownPathActive(input.repo)
+        ? planOwnWorktree(realRepo, { title: input.title, issue: issueNumber(input.title, input.brief), sessionId: appId }, (plan) => ownPlanTaken(realRepo, plan))
+        : null;
       // New Session in the app opens in the folder of its latest
       // session; another repository cannot be picked from here. Say so
       // before touching the screen instead of failing five times. From the
       // queue it may pass (the person opens one there): it keeps its place.
-      const lastRepo = lastAppRepo();
+      const lastRepo = ownPlan ? null : lastAppRepo();
       if (lastRepo && lastRepo !== input.repo) {
         return { status: 409, body: { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` }, retry: fromQueue };
       }
-      const block = appFolderBlock();
+      const block = ownPlan ? null : appFolderBlock();
       if (block) {
         // only the owner can unblock it: one item for them, however many starts hit this (R9-dispatch R9-2)
         const asked = askOwnerToUnblockApp(bot, threadId, input.repo, block);
         const refusal = block.kind === "flapping" ? flappingRefusal(block.seen, basename(input.repo), fromQueue)
-          : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
+          : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue, ownWorktreesOn(input.repo));
         return { status: 409, body: { error: `${refusal}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
       }
-      const appId = randomUUID();
-      const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
+      const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: ownPlan ? realRepo : input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
       if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
       const issue = issueNumber(input.title, input.brief);
       if (issue) session.desktop!.issue = issue;
-      session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
+      const classicText = desktopBrief(session, input.brief);
+      session.desktop!.pending = { kind: "create", text: classicText, since: Date.now(), attempts: 0 };
+      // the app's text is made once the worktree exists (its folder check names it)
+      if (ownPlan) session.desktop!.own = { path: ownPlan.path, branch: ownPlan.branch, state: "planned", brief: input.brief, classicText };
+      if (delegation) delegationOpened(delegation, session);
       if (corridor) session.corridorVersion = corridorVersionOf(corridor);
       session.status = "running";
       ccLedger.save();
-      ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
-      noteClaimedPrs(session, input.brief);
+      ccChip(session, ownPlan ? `criando a worktree ${ownPlan.dir} (${ownPlan.branch}, de origin/main); depois abre no app Claude quando o Mac estiver livre` : "na fila para abrir no app Claude quando o Mac estiver livre");
+      noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
       const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
-      return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+      const where = ownPlan ? `numa worktree que o servidor cria agora para ela (${ownPlan.path}, branch ${ownPlan.branch}, com as dependências clonadas quando a semente está em dia)` : `em ${basename(input.repo)} com worktree própria`;
+      return { status: 200, sessionId: session.id, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, ${where}, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
     }
     const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
     if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
     if (corridor) session.corridorVersion = corridorVersionOf(corridor);
+    if (delegation) delegationOpened(delegation, session);
     ccLedger.save();
-    runCcTurn(session, input.brief, true);
+    // the worktree made and seeded by the server first, as for the app (R13-gate G2); elsewhere claude -w makes a bare one
+    if (process.platform === "darwin" && ownWorktreesOn(input.repo)) {
+      // running while its worktree is made (not a turn yet: runCcTurn counts it)
+      session.status = "running";
+      session.progressAt = Date.now();
+      ccLedger.save();
+      // one at a time, in the order of the starts: a P1 the queue opened first spawns first (INSP-R13dis 3);
+      // each for 3 min at most, then aborted, waited for, and the old way (R2-1, R3-1/2)
+      void startSeededCli(session, input.brief);
+    } else runCcTurn(session, input.brief, true);
     ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
-    noteClaimedPrs(session, input.brief);
+    noteClaimedPrs(session, delegation ? input.title : input.brief); // a delegated item's text claims no PR (INSP-DEL A12)
     if (cliOnRecord) ccChipShort(session, sessionChips.cli(session.title, `${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`));
-    return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+    return { status: 200, sessionId: session.id, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
   }
 
   /** Whether the Claude app can take a new session in `repo` now: not on this
@@ -1298,9 +1122,15 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
    * reused-folder 409 ("blocked"), else "available". */
   function appAvailability(repo: string): { state: AppAvailability; reason: string | null } {
     if (process.platform !== "darwin") return { state: "unavailable", reason: null };
-    const lastRepo = lastAppRepo();
-    if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
-    if (appFolderBlock()) return { state: "blocked", reason: null };
+    // its breaker tripped with the owner asked: new sessions go to the cli, so one asked for there is not refused (R13-2)
+    const tripped = ownWorktreesOn(repo) ? ownBreakerCli(ownBreaker.get(), breakerRepo(repo)) : null;
+    if (tripped) return { state: "unavailable", reason: tripped };
+    // with a worktree the server makes, the app's last folder and the one it would reuse do not matter (lote X)
+    if (!ownPathActive(repo)) {
+      const lastRepo = lastAppRepo();
+      if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
+      if (appFolderBlock()) return { state: "blocked", reason: null };
+    }
     // the Mac locked, or a create stuck in the queue: the app opens nothing now (INSP-H r2 #2)
     const stalled = appStalledReason(ccLedger.all(), repo, screenWatch.lockedSince, Date.now());
     return stalled ? { state: "unavailable", reason: stalled } : { state: "available", reason: null };
@@ -1351,7 +1181,7 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
       console.log(`[claude-desktop] the owner chose to keep ${name}'s sessions in the terminal until ${new Date(declinedUntil).toISOString()}: not asked again`);
       return null;
     }
-    const want = block?.kind === "flapping" ? appFlappingPending(name, block.seen) : appUnblockPending(name, block?.kind ?? "reused");
+    const want = block?.kind === "flapping" ? appFlappingPending(name, block.seen) : appUnblockPending(name, block?.kind ?? "reused", ownWorktreesOn(repo));
     const item = autonomy.addOwnerPending(bot.id, thread, { ...want, key: `${APP_UNBLOCK_KEY}${name}` });
     refreshBotRow(bot.id);
     return item.id;
@@ -1409,12 +1239,21 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
   function settleAppUnblock(): void {
     if (process.platform !== "darwin" || Date.now() - appUnblockWatch.lastAt < 2 * 60_000) return;
     appUnblockWatch.lastAt = Date.now();
-    const open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
+    let open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
+    if (!open.length) return;
+    // the server makes the worktrees of these repositories' sessions (lote X): no gesture of the owner is needed there
+    const ownNames = new Set([...new Set(ccLedger.all().map((session) => session.repo))].filter(ownPathActive).map((repo) => basename(repo)));
+    for (const key of new Set(open.map((item) => item.key!).filter((key) => ownNames.has(key.slice(APP_UNBLOCK_KEY.length))))) {
+      for (const done of autonomy.resolveOwnerPending({ key })) refreshBotRow(done.botId);
+      console.log(`[claude-desktop] the owner's "destravar o app" item (${key}) is closed: the server now makes each session's worktree and opens the app in it, so no gesture is needed`);
+    }
+    open = open.filter((item) => !ownNames.has(item.key!.slice(APP_UNBLOCK_KEY.length)));
     if (!open.length) return;
     const block = appFolderBlock();
     if (block) {
       for (const item of open) {
-        const want = staleUnblockItem(item, item.key!.slice(APP_UNBLOCK_KEY.length), block.kind, block.kind === "flapping" ? block.seen : []);
+        const name = item.key!.slice(APP_UNBLOCK_KEY.length);
+        const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : [], ownOnByName(name));
         if (!want) continue;
         autonomy.addOwnerPending(item.botId, item.threadId, { ...want, key: item.key! });
         refreshBotRow(item.botId);
@@ -1450,7 +1289,17 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
       mainThread: (botId, except) => mainThreadOf(botId, except),
       start: (item, threadId, replyThreadId) => {
         const bot = store.bot(item.botId);
-        return bot ? startCcSession(bot, threadId, replyThreadId, item.body, true) : { status: 404, body: { error: "o bot não existe mais" } };
+        if (!bot) return { status: 404, body: { error: "o bot não existe mais" } };
+        // a delegated start checks the stop and the budget again when it leaves the queue: they held at the click, maybe not now (INSP-DEL A10)
+        if (item.delegation) {
+          if (existsSync(nuriaStopFile)) return { status: 409, body: { error: "o ~/.nuria/stop está ativo: a delegação espera na fila até ele ser removido" }, retry: true };
+          try {
+            assertBudget();
+          } catch (error) {
+            return { status: 409, body: { error: error instanceof Error ? error.message : String(error) } };
+          }
+        }
+        return startCcSession(bot, threadId, replyThreadId, item.body, true, item.delegation);
       },
       chip: (threadId, text, ok) => { store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok } }); },
       report: (botId, threadId, text) => autonomy.addReport(botId, threadId, text),
@@ -1472,7 +1321,7 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
 
   /** A session archived in the Claude app by someone, not by the server: its
    * PRs still open are left without a session. The owner hears which, and the
-   * person gets a "Precisa de você" item (INSP-F F1: ffd6ee1a / #N) — in
+   * person gets a "Precisa de você" item (INSP-F F1: ffd6ee1a / #9328) — in
    * the conversation that owned it, or in the bot's main one when that one
    * was closed. The logic is server/archived-outside.ts. */
   const archivedOutsideWatch = { running: false };
@@ -1526,13 +1375,13 @@ export function createCcRuntime(deps: CcRuntimeDeps) {
     // ...and these went on working: followed to the end of their turn (followSurvivingSessions)
     for (const session of ccLedger.survivedOnLoad) ccChipShort(session, sessionChips.survived(session.title, session.turns), true, bootDesk);
     if (ccLedger.survivedOnLoad.length) ccLedger.save();
-    reportResumptionToChief();
     retireWorkOfClosedThreads();
     renameResultsThreads();
     warnArmedIgnores();
     // App sessions an older build failed over a screen step are alive in the
     // app: back to idle on load, so they take messages again.
     if (process.platform === "darwin") reviveScreenFailures(desktopWork);
+    if (!process.env.VITEST || process.env.OMB_NOW_IN_TESTS === "1") nowStatus.start();
   }
-  return { bootCcRuntime, sharedState, ccLedger, ccProcesses, ccTurnTimeoutMs, ownerTurnThread, moveWorkToOwnerThread, ccChip, ccChipShort, ccReport, runCcTurn, desktopState, desktopWork, cleanReleasedWorktrees, reportArchivedWorktrees, watchBackgroundJobs, execCc, retireThreadWork, noteClaimedPrs, releaseHold, refreshReleaseHold, resumeOf, wireResumeOf, preemptCiForReleaseTick, ccStartQueue, ccSlotFreeForWork, startCcSession, watchScreenLock, APP_UNBLOCK_KEY, ownerDeclines, appFolderFlaps, appFolderBlock, settleAppUnblock, drainCcStartQueue, openThreadOf, watchArchivedOutside };
+  return { bootCcRuntime, sharedState, ccLedger, ccProcesses, ccTurnTimeoutMs, ownerTurnThread, moveWorkToOwnerThread, ccChip, ccChipShort, ccReport, runCcTurn, desktopState, desktopWork, cleanReleasedWorktrees, reportArchivedWorktrees, watchBackgroundJobs, execCc, retireThreadWork, noteClaimedPrs, releaseHold, refreshReleaseHold, resumeOf, wireResumeOf, preemptCiForReleaseTick, ccStartQueue, ccSlotFreeForWork, startCcSession, watchScreenLock, APP_UNBLOCK_KEY, ownerDeclines, appFolderFlaps, appFolderBlock, settleAppUnblock, drainCcStartQueue, openThreadOf, watchArchivedOutside, reportResumptionToChief, worktreeFolder, ccClaudePids, ccGateWaitMaxMs, ccGateWaits, spanPt, pidAlive, gateWaitEn, followBgJob, ccGateRecheckMs, releaseHoldOf, reconcileDelegations, ownPrepareState, refreshOwnSeeds, settleOwnBreaker, canonPath, gitAsync, ownerChannelOf, foldersInUse, allProcessCwds, duKb, delegationTime, delegateView, ccIsGitRepo, delegationOwner, appAvailability, delegationReturned, delegationChip, ownOnByName, nowStatus, ownStore, ownBreaker, registeredWorktreePaths, pipelineBoard, RELEASE_HOLD_EVERY_MS, releasedCleanup };
 }

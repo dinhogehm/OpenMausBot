@@ -96,3 +96,11 @@ export class IntakeLock {
     for (const [botId, running] of this.running) if (running === threadId) this.running.delete(botId);
   }
 }
+
+/** Whether a routine of a bot may start now. One in its own lane (the
+ * Esteira) only needs the bot itself to be able to take a turn; any other
+ * waits while the bot's intake turn runs in another conversation. */
+export function routineLaneState(input: { ownLane: boolean; intakeBusyElsewhere: () => boolean; dispatchState: () => "ready" | "busy" | "missing" }): { state: "ready" | "busy" | "missing"; waitedOnIntake: boolean } {
+  if (input.ownLane || !input.intakeBusyElsewhere()) return { state: input.dispatchState(), waitedOnIntake: false };
+  return { state: "busy", waitedOnIntake: true };
+}

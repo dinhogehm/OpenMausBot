@@ -53,6 +53,12 @@ function settleCard(pending: Pending, behavior: string, source: "user" | "system
   pending.bus.store.patchMessage(pending.threadId, pending.messageId, {
     card: { ...existing.card, answered: behavior, dismissed: source !== "user" },
   });
+  // Concurrent contacts can each need a decision. Settling one card must
+  // not hide another pending approval in this same source thread.
+  if ([...pendingComms.values()].some(other =>
+    other.fromBotId === pending.fromBotId && other.threadId === pending.threadId,
+  )) return;
+  // The last peer card is answered: hand the activity back to the turn.
   const store = pending.bus.store;
   const task = store.projectBotForTask(pending.fromBotId, pending.threadId);
   if (task) {

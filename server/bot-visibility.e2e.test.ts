@@ -582,7 +582,8 @@ posixOnly("per-bot visibility on a shared workspace", () => {
       await api("DELETE", `/api/bots/${made.id}`, undefined, BOSS);
     } finally {
       bob.close();
-      await api("PATCH", `/api/bots/${ids.board}`, { chiefOfStaff: false, approvalMode: "full" }, BOSS);
+      // fork: Board stays at Ask, which is also the no-level default.
+      await api("PATCH", `/api/bots/${ids.board}`, { chiefOfStaff: false }, BOSS);
     }
   }, 60_000);
 

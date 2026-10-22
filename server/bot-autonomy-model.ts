@@ -1,3 +1,7 @@
+import { hasCheckableProof } from "./result-contract.ts";
+import type { OwnerDelegation, OwnerDelegationBack } from "./owner-delegate.ts";
+import type { RowCheck, Superseded } from "./owner-pending-guard.ts";
+import { OWNER_ASK, goalCitedPrs } from "./bot-autonomy-text.ts";
 // A bot's wakes, watches, promises, goals and owner_pending items: their shapes, limits and input parsing.
 import { type SelfWrite } from "./watch-echo.ts";
 
@@ -137,6 +141,9 @@ export interface BotGoal {
   lastDispatchAt?: number;
   detail?: string;
   finishedAt?: number;
+  /** While waiting on the person: the cited PRs' states the bot was last told
+   * about (citedPrsOutcome "closed"), so the same news is told once. */
+  prNotice?: string;
 }
 
 /** Reports waiting to be handed to a conversation (Claude Code sessions the
@@ -176,7 +183,7 @@ export const STALE_PREFIX = "[Este turno foi interrompido por um restart do serv
 export const DISPATCH_RETRY_MAX_MINUTES = 10;
 
 /** What a restart found cut off, for the resumption report. */
-export interface RecoveredLease { botId: string; threadId: string; kind: InFlight["kind"]; startedAt: number; stale: boolean; what: string }
+export interface RecoveredLease { botId: string; threadId: string; kind: InFlight["kind"]; startedAt: number; stale: boolean; what: string; outward?: string[]; continued?: boolean; dropped?: boolean }
 
 export const INTERRUPTED_PREFIX = "[A execução anterior foi interrompida por um restart do servidor antes de terminar; retome daqui.]";
 
@@ -230,6 +237,28 @@ export interface OwnerPending {
   awaitingSince?: number;
   /** Last time the bot rewrote it (owner_pending update). */
   updatedAt?: number;
+  /** A routine's item (server/routine-owner-ask.ts): the last time the routine said it. */
+  lastSaidAt?: number;
+  /** A routine's item: runs of its routine in a row that did not name it since it was last said (or kept). */
+  quietRuns?: number;
+  /** A routine's item said once and let go (48 h and 2 runs without it): out of the count, under "Talvez já resolvido". */
+  demotedAt?: number;
+  /** The owner said "Ainda vale": back on top, the 48 h and 2 runs count again from here. */
+  keptAt?: number;
+  /** A routine's item: the routine that said it (its runs are counted by it, not by a name that may change). */
+  routineId?: string;
+  /** The owner delegated it to a Claude Code session (lote del): out of the count while it runs. */
+  delegation?: OwnerDelegation;
+  /** It came back from a delegation (partial, stopped by the hook, never opened): on top, with why. */
+  delegationBack?: OwnerDelegationBack;
+  /** Another bot's item (or another of its own) said this one's commands must not run (R13-intake #1): decisions and commands off. */
+  supersededBy?: Superseded;
+  /** What the server last read of the fixed sheet rows its commands write (R13-intake #1), one per row. */
+  rowChecks?: RowCheck[];
+  /** A disk item's folders kept out, each "name (why)" (INSP-R13fol #8). */
+  diskKept?: string[];
+  /** A bot's mixed item: the folders whose removal was taken to the server's disk item — an answer naming them authorizes nothing (R5-1). */
+  diskMoved?: string[];
 }
 
 /** One answer of the person to an item (J18). */
@@ -249,6 +278,8 @@ export interface OwnerPendingAnswer {
   queueId?: string;
   /** Why it did not reach the bot. */
   error?: string;
+  /** Given by the Decisor (server/owner-decisor.ts) on the owner's behalf, not clicked by the owner. */
+  decisor?: true;
 }
 
 /** What of the items a session may see: those whose conversation it may
@@ -275,6 +306,8 @@ export function ownerPendingRemindReport(item: Pick<OwnerPending, "id" | "title"
 export interface ResolvedOwnerPending extends OwnerPending {
   resolvedAt: number;
   resolvedBy: "owner" | "bot" | "server";
+  /** How, when it says more than who ("respondida na conversa"). */
+  resolvedNote?: string;
 }
 
 export interface OwnerPendingStep {
@@ -376,10 +409,13 @@ export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown
 /** A settled item as kept for audit: who, what, when and what the person
  * answered — not its why/steps/options, so the ledger (rewritten on every
  * save) stays small (INSP-J2 #12). */
-export function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"]): ResolvedOwnerPending {
+export function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"], note?: string): ResolvedOwnerPending {
   return {
     id: item.id, botId: item.botId, threadId: item.threadId, title: item.title, createdAt: item.createdAt, resolvedAt, resolvedBy,
+    ...(note ? { resolvedNote: note } : {}),
     ...(item.key ? { key: item.key } : {}),
+    // a routine's item keeps the words it quoted: the routine repeating the SAME pendency is told from a new one (INSP-N22 A2)
+    ...(item.key?.startsWith("routine-ask:") && item.why ? { why: item.why } : {}),
     ...(item.history?.length ? { history: item.history.slice(-OWNER_PENDING_HISTORY_MAX) } : {}),
   };
 }
@@ -577,6 +613,12 @@ export interface Ledger {
   reports?: PendingReports[];
   inFlight?: InFlight[];
   standingLost?: StandingLost[];
+  /** Questions a bot left in a conversation, asked once to become items (lot J2). */
+  askPromotions?: AskPromotion[];
+  /** Per bot, the number of its last "oN": ids only go up, never reused (R12-followup #3). */
+  ownerPendingSeq?: Record<string, number>;
+  /** "Push e remover" answered: the commits the server looks for on the remote after the turn that carries the answer (INSP-R13fol R2-4). */
+  diskPushChecks?: DiskPushCheck[];
 }
 
 /** A conversation whose last standing watch was cancelled: a watcher bot
@@ -657,16 +699,21 @@ export function parseGoalInput(body: { goal?: unknown; maxTurns?: unknown; maxHo
   return { ok: true, goal, maxTurns, maxHours };
 }
 
-export type GoalEndInput = { ok: true; status: GoalEndStatus; detail: string } | { ok: false; error: string };
+export type GoalEndInput = { ok: true; status: GoalEndStatus; detail: string; proof?: string } | { ok: false; error: string };
 
-export function parseGoalEndInput(body: { status?: unknown; detail?: unknown }): GoalEndInput {
+export function parseGoalEndInput(body: { status?: unknown; detail?: unknown; proof?: unknown }): GoalEndInput {
   const raw = typeof body.status === "string" ? body.status.trim().replace("_", "-") : "";
   if (raw !== "completed" && raw !== "blocked" && raw !== "needs-input") {
     return { ok: false, error: "status must be completed, blocked or needs_input" };
   }
   const detail = clip(body.detail, GOAL_DETAIL_MAX);
   if (!detail) return { ok: false, error: "detail is required: what was delivered, or exactly what blocks it" };
-  return { ok: true, status: raw, detail };
+  if (raw !== "completed") return { ok: true, status: raw, detail };
+  const proof = clip(body.proof, GOAL_DETAIL_MAX);
+  if (!proof || !hasCheckableProof(proof)) {
+    return { ok: false, error: "proof is required for completed: what someone else can check (a link, the sent message's ID, a PR or issue number, a commit, or the command in backticks with its output). Without one, end as blocked or needs_input." };
+  }
+  return { ok: true, status: raw, detail: `${detail} — prova: ${proof}`, proof };
 }
 
 /** Where a wake is kept: the conversation's one ordinary wake, or its standing watch beside it. */
@@ -681,3 +728,149 @@ export const STANDING_MAX_PER_THREAD = 5;
 export const standingKey = (threadId: string, label = STANDING_DEFAULT_LABEL) => `${threadId}${STANDING}\u0000${label}`;
 
 export const wakeKey = (wake: Pick<BotWake, "threadId" | "watch">): string => (wake.watch?.standing ? standingKey(wake.threadId, wake.watch.label) : wake.threadId);
+
+export const OUTWARD_CUT_PREFIX = "[Este turno foi interrompido por um restart do servidor e NÃO foi repetido automaticamente,";
+
+export const OUTWARD_CUT_LABELS = 8;
+
+export function outwardCutNote(labels: readonly string[]): string {
+  const shown = labels.slice(0, OUTWARD_CUT_LABELS).join(", ");
+  const more = labels.length > OUTWARD_CUT_LABELS ? ` e mais ${labels.length - OUTWARD_CUT_LABELS}` : "";
+  const why = labels.length
+    ? ` porque já tinha agido para fora antes do corte: ${shown}${more}.`
+    : " porque não deu para conferir o que ele já tinha feito para fora antes do corte.";
+  return `${OUTWARD_CUT_PREFIX}${why} Não repita nada disso: confira antes o estado real (o push, o merge, o release, a mensagem enviada) e faça só o que ainda falta; se não der para confirmar, pergunte ao dono.]`;
+}
+
+export type LeaseRecovery =
+  /** nothing outward, nothing that goes on: due again, once (as before) */
+  | { kind: "rerun" }
+  /** its turn already acted outward: not run again; the bot is asked, with what it did */
+  | { kind: "outward"; labels: string[] }
+  /** its own root goes on (the work it handed out, the person's cards): that is the continuation */
+  | { kind: "continued" };
+
+export function leaseRecoveryFor(
+  lease: Pick<InFlight, "startedAt">,
+  found: { roots: ReadonlyArray<{ createdAt: number }>; outward: readonly string[] },
+): LeaseRecovery {
+  if (found.roots.some((root) => root.createdAt >= lease.startedAt)) return { kind: "continued" };
+  if (found.outward.length) return { kind: "outward", labels: [...found.outward] };
+  return { kind: "rerun" };
+}
+
+export interface AskPromotion {
+  botId: string;
+  /** The conversation that asked. */
+  threadId: string;
+  /** When it asked (the line's "since"): one request per question. */
+  askAt: number;
+  /** What it asked, as the panel shows it. */
+  text: string;
+  /** When the server asked the bot (again, when the person asked it to). */
+  askedAt: number;
+  /** Where the request went: the owner's channel, or the conversation itself. */
+  reportThreadId: string;
+  /** The item the bot opened for it, linked by owner_pending add replacesAsk. */
+  itemId?: string;
+  /** That item's conversation and birth: with its id, the one item (ids were
+   * reused before the counter — the Monitor had two "o2"; R12-followup #3). */
+  itemThreadId?: string;
+  itemCreatedAt?: number;
+  /** When the server saw the person answer it in the conversation itself (settled once). */
+  answeredAt?: number;
+}
+
+export const ASK_PROMOTIONS_MAX = 100;
+
+export const QUESTION_REPORT_PREFIX = "[Servidor: pergunta sem passo a passo]";
+
+export function questionStepsAutoReport(ask: Pick<AskPromotion, "threadId" | "askAt" | "text">, threadTitle?: string): string {
+  const where = threadTitle ? ` na conversa «${threadTitle.slice(0, 80)}»` : "";
+  return `${QUESTION_REPORT_PREFIX} Ref ${ask.threadId}@${ask.askAt}. Você terminou um turno${where} com uma pergunta ao dono: «${ask.text.slice(0, 300)}». Em "Precisa de você" ela aparece só como título, sem por quê, sem passos e sem opções. Registre-a com owner_pending add: replacesAsk "${ask.threadId}@${ask.askAt}" (é o que liga o item a esta pergunta), title (o que o dono decide, em uma frase), why (1–2 frases: por que importa e o que acontece se esperar), steps (passos práticos, com o comando em command ou o link em link quando houver) e options (as respostas possíveis, UMA com recommended: true e why). O item substitui a pergunta na tela. Se a pergunta não vale mais, não abra nada. Não escreva ao dono só por isto.`;
+}
+
+export function questionReportRef(text: string): { threadId: string; askAt: number } | null {
+  if (!text.startsWith(QUESTION_REPORT_PREFIX)) return null;
+  const ref = /^ Ref ([\w-]+)@(\d+)\./.exec(text.slice(QUESTION_REPORT_PREFIX.length));
+  return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
+}
+
+export function parseReplacesAsk(value: unknown): { threadId: string; askAt: number } | null {
+  const ref = typeof value === "string" ? /^([\w-]+)@(\d+)$/.exec(value.trim()) : null;
+  return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
+}
+
+export const ANSWERED_IN_CONVERSATION = "respondida na conversa";
+
+export function answerToAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, askAt: number, askText: string): { at: number; text: string } | null {
+  const refs = new Set(askText.match(/#\d+/g) ?? []);
+  const asks = (text: string) => /\?[\s*_`)\]]*$/.test(text);
+  let first = true;
+  for (const message of messages.filter((each) => each.at > askAt).toSorted((a, b) => a.at - b.at)) {
+    const text = (message.text ?? "").trim();
+    if (message.role === "bot" && message.kind === "text" && !message.from) {
+      // the bot asked something else: what follows answers that, unless it names this question's #ref
+      if (asks(text) || OWNER_ASK.test(text)) first = false;
+      continue;
+    }
+    if (message.role !== "user" || message.kind !== "text" || message.peerAsk || message.from) continue;
+    // the person asking something back never answers it, #ref or not (INSP-J2b r3)
+    if (asks(text)) { first = false; continue; }
+    const cited = text.match(/#\d+/g) ?? [];
+    // "the first message" holds only while the question is fresh: a plain order a day later is about something else
+    const fresh = message.at - askAt <= ANSWER_WINDOW_MS;
+    if (cited.some((ref) => refs.has(ref)) || (first && fresh && !cited.length)) return { at: message.at, text };
+    first = false;
+  }
+  return null;
+}
+
+export const ANSWER_WINDOW_MS = 2 * 3_600_000;
+
+export const ANSWERED_REPORT_PREFIX = "[Servidor: pendência fechada]";
+
+export function answeredInConversationReport(item: Pick<OwnerPending, "id" | "title">, ref: Pick<AskPromotion, "threadId" | "askAt" | "text">, answer: string): string {
+  return `${ANSWERED_REPORT_PREFIX} O dono respondeu na conversa à sua pergunta «${ref.text.slice(0, 200)}»: «${answer.slice(0, 300)}». O item ${item.id} («${item.title.slice(0, 120)}») foi fechado como ${ANSWERED_IN_CONVERSATION}. Se era a resposta, siga com ela. Se não era resposta a esta pergunta, reabra o item com owner_pending add replacesAsk "${ref.threadId}@${ref.askAt}" (o mesmo title, why, steps e options). Não escreva ao dono só por isto.`;
+}
+
+export function ownerPendingNumber(id: string): number {
+  const match = /^o(\d+)$/.exec(id);
+  return match ? Number(match[1]) : 0;
+}
+
+export const sameCommands = (existing: OwnerPending, input: { steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }) =>
+  (!input.steps?.length || JSON.stringify(input.steps) === JSON.stringify(existing.steps)) && (!input.options?.length || JSON.stringify(input.options) === JSON.stringify(existing.options));
+
+export interface DiskPushCheck {
+  botId: string;
+  /** The conversation the answer was sent to, and when, and how it begins: the turn that carried it ends there. */
+  threadId: string;
+  at: number;
+  marker: string;
+  folders: Array<{ name: string; branch?: string; head: string }>;
+}
+
+export const DELIVERY_VERB = /\b(?:lev(?:ar|e|o)|sub(?:ir|a|o)|publi(?:car|que|co)|entreg(?:ar|ue|o)|coloc(?:ar|que|o)|cheg(?:ar|ue)|liber(?:ar|e)|ship|deploy|release)\b/i;
+
+export const PRODUCTION_WORD = /produ[cç][aã]o|\bproduction\b|\bprod\b/i;
+
+export function productionGoal(goalText: string): boolean {
+  return DELIVERY_VERB.test(goalText) && PRODUCTION_WORD.test(goalText);
+}
+
+export function productionGoalProblem(input: { goalText: string; goalStartedAt: number; proof: string; announcedPrs: ReadonlySet<number>; certifiedReleases: ReadonlyMap<string, number> }): string | null {
+  if (!productionGoal(input.goalText)) return null;
+  const guide = "Se ainda não chegou, espere o anúncio, ou encerre como blocked ou needs_input dizendo o que falta.";
+  const goalPrs = goalCitedPrs(input.goalText).map((pr) => pr.number);
+  if (goalPrs.length) {
+    const missing = goalPrs.filter((number) => !input.announcedPrs.has(number));
+    if (!missing.length) return null;
+    return `a meta fala em produção: toda PR que ela cita precisa ter sido anunciada em produção pelo servidor (o chip "em produção desde"). ${missing.map((number) => `#${number}`).join(", ")} ainda não ${missing.length > 1 ? "foram anunciadas" : "foi anunciada"}. ${guide}`;
+  }
+  const proofPrs = goalCitedPrs(input.proof).map((pr) => pr.number);
+  if (proofPrs.length && proofPrs.every((number) => input.announcedPrs.has(number))) return null;
+  const shas = [...input.proof.matchAll(/\b[0-9a-f]{40}\b/g)].map((match) => match[0]);
+  if (shas.some((sha) => (input.certifiedReleases.get(sha) ?? -Infinity) > input.goalStartedAt)) return null;
+  return `a meta fala em produção: a prova precisa citar PRs que o servidor já anunciou em produção (o chip "em produção desde"), ou o commit completo (40 caracteres) de um release que o corredor certificou depois que a meta começou. ${guide}`;
+}

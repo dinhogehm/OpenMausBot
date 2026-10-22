@@ -1,8 +1,10 @@
 // Claude Code over stream-json both ways: prompt on stdin, one retained CLI process per thread,
 // each turn settled by the CLI's own `result` frame.
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer as createNetServer } from "node:net";
+import { permissionSocketPath, brokerSocketCandidates, createPermissionBroker, type Ask } from "./claude-permission-broker.ts";
+export { permissionSocketPath, brokerSocketCandidates, createPermissionBroker } from "./claude-permission-broker.ts";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute, normalize } from "node:path";
 
@@ -10,7 +12,7 @@ import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
 import { openStartupModelCatalog, writeStartupModelCache } from "../startup-model-catalog.ts";
 import { writeFileAtomicIfChanged } from "../atomic.ts";
 import { augmentedPath } from "../env-path.ts";
-import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
+import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { claudeAuthStatus } from "./claude-auth-status.ts";
 import { claudeAuthFailure, claudeAuthRecovery } from "./claude-auth-recovery.ts";
 import { claudeModelExtras } from "./claude-model-extras.ts";
@@ -38,6 +40,7 @@ import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS, 
 import { claudeApiErrorMessage, claudeLimitRefusal, claudeUsageLimit, claudeLimitMessage, type ClaudeLimit } from "./claude-limits.ts";
 import { TEAM_TOOLS_FAILED, teamToolsFailed } from "./team-tools.ts";
 import { engineIdleMs, sessionIdlePolicy } from "./session-idle.ts";
+import { deletePromptSplitReceipt, promptHalves, promptSplitFingerprints, readPromptSplitReceipt, writePromptSplitReceipt } from "./prompt-split.ts";
 import { parseVersionTriple, versionAtLeast } from "./acp/core.ts";
 import {
   applyClaudeInject,
@@ -145,6 +148,23 @@ function inheritsUserConfig(env: NodeJS.ProcessEnv): boolean {
   return env.OMB_CLAUDE_INHERIT_USER_CONFIG === "1";
 }
 
+/** Fork default: an isolated bot still reads the person's personal
+ * ~/.claude/CLAUDE.md, as every bot did before upstream started excluding
+ * it — the person's standing rules apply to their bots. MCP servers, skills,
+ * plugins and the rest of their setup stay out (--strict-mcp-config,
+ * --setting-sources project), so the Engines warning and the tool-selection
+ * guard of the full escape hatch do not apply. OMB_CLAUDE_INHERIT_USER_CONFIG=0
+ * opts into upstream's exclusion; =1 is the full escape hatch above. A
+ * guest's confined turn never reads it (see the launch). */
+export function excludesPersonalClaudeMd(env: NodeJS.ProcessEnv): boolean {
+  return env.OMB_CLAUDE_INHERIT_USER_CONFIG === "0";
+}
+
+/** The Engines-page warning while the escape hatch is set. The flag is a
+ * footgun: it is invisible once exported, and what it costs — every Claude
+ * bot re-reading this machine's own servers, skills, hooks and CLAUDE.md on
+ * every model call — shows up only on the bill. Naming it where the person
+ * looks when something is off is the whole point. */
 export function claudeInheritWarning(env: NodeJS.ProcessEnv): ProviderSnapshot["warning"] | undefined {
   if (!inheritsUserConfig(env)) return undefined;
   return {
@@ -386,27 +406,6 @@ function removePrivateTempDir(filePath: string | null | undefined): boolean {
   }
 }
 
-interface Ask {
-  id: string;
-  kind: "permission" | "question";
-  tool: string;
-  input: Record<string, unknown>;
-  at: number;
-}
-type AskBehavior = "allow" | "deny" | "answer";
-type AskResolutionSource = "user" | "timeout" | "system";
-
-const DENY_TIMEOUT_NOTE =
-  "OpenMausBot: nobody answered this permission request in time. Skip this action and finish what you can without it.";
-const QUESTION_TIMEOUT_NOTE = "OpenMausBot: nobody answered in time. Use your best judgment and continue.";
-const DUPLICATE_ASK_ID_NOTE = "OpenMausBot: duplicate ask id — skipping this request.";
-
-function systemEndedReply(kind: Ask["kind"]): { behavior: AskBehavior; message: string } {
-  return kind === "question"
-    ? { behavior: "answer", message: "OpenMausBot: the turn is ending — wrap up." }
-    : { behavior: "deny", message: "OpenMausBot: the turn ended" };
-}
-
 function askQuestions(ask: Ask): AskQuestion[] | null {
   return ask.tool === ASK_USER_QUESTION_TOOL || ask.tool === ASK_USER_TOOL ? parseAskQuestions(ask.input) : null;
 }
@@ -475,193 +474,6 @@ export function claudeHookSettings(helperPath: string): Record<string, unknown> 
     : [process.execPath, helperPath].map(path => `'${path.replace(/'/g, "'\\''")}'`).join(" ");
   const entry = [{ matcher: "", hooks: [{ type: "command", command, timeout: 5 }] }];
   return { PostToolUse: entry, PostToolUseFailure: entry, PreCompact: entry, SessionStart: entry, Stop: entry };
-}
-
-export function permissionSocketPath(threadId: string, botId?: string) {
-  // Half the tag digests the full bot+thread key: Windows named pipes share one global namespace
-  // and are never unlinked, and 8 chars keeps POSIX paths under the 104-byte sun_path limit.
-  const key = botId ? `${botId}\0${threadId}` : threadId;
-  const prefix = threadId.replace(/[^\w-]/g, "").slice(0, 4);
-  const digest = createHash("sha256").update(key).digest("hex").slice(0, 4);
-  return brokerSocketPath(DATA_DIR, `${prefix}${digest}`);
-}
-
-/** Broker bind paths, in order. Windows pipe names are never unlinkable (a hung child can hold one
- * for minutes), and macOS rejects socket paths past `sun_path`, hence the short temp fallback. */
-export function brokerSocketCandidates(threadId: string, botId?: string): string[] {
-  const base = permissionSocketPath(threadId, botId);
-  if (process.platform !== "win32") {
-    const scope = createHash("sha256")
-      .update(`${DATA_DIR}\0${process.pid}\0${botId ?? ""}\0${threadId}`)
-      .digest("hex")
-      .slice(0, 16);
-    return [base, join(tmpdir(), `omb-perm-${scope}.sock`)];
-  }
-  return [
-    base,
-    `${base}-${randomBytes(3).toString("hex")}`,
-    `${base}-${randomBytes(3).toString("hex")}`,
-  ];
-}
-
-export async function createPermissionBroker(opts: {
-  socketPaths: string[];
-  onAsk: (ask: Ask) => void;
-  onResolve: (resolved: Ask & { behavior: AskBehavior; source: AskResolutionSource }) => void;
-  isActive?: () => boolean;
-  timeoutMs?: number;
-}) {
-  const timeoutMs = opts.timeoutMs ?? 15 * 60_000;
-  const pending = new Map<
-    string,
-    { ask: Ask; finish: (behavior: AskBehavior, message: string | undefined, source: AskResolutionSource, always?: boolean) => void }
-  >();
-  // server.close() leaves open connections wired: asks after close must never become cards.
-  let closed = false;
-  let boundPath = opts.socketPaths[0] ?? "";
-  const connectionHandler = (conn: import("node:net").Socket) => {
-    conn.on("error", () => {});
-    conn.setEncoding("utf8");
-    let buf = "";
-    conn.on("data", (chunk) => {
-      buf += chunk;
-      let nl;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        let msg: any;
-        try {
-          msg = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (msg.t !== "ask") continue;
-        const askId = String(msg.id ?? newId());
-        const kind = msg.kind === "question" ? ("question" as const) : ("permission" as const);
-        if (closed) {
-          // Always answer: permission-proxy.ts resolves only on an answer, so a drop hangs the tool.
-          try {
-            conn.write(JSON.stringify({ t: "answer", id: askId, ...systemEndedReply(kind) }) + "\n");
-          } catch {}
-          continue;
-        }
-        // A retained process keeps its proxy connection between turns; late asks fail closed.
-        if (opts.isActive && !opts.isActive()) {
-          try {
-            conn.write(JSON.stringify({ t: "answer", id: askId, ...systemEndedReply(kind) }) + "\n");
-          } catch {}
-          continue;
-        }
-        // `pending` is server-scoped: a duplicate id would orphan the first ask.
-        if (pending.has(askId)) {
-          // askId is client-controlled; JSON.stringify keeps it from corrupting the log line.
-          console.error(`permission broker on ${boundPath}: duplicate ask id ${JSON.stringify(askId)} — denying`);
-          try {
-            conn.write(JSON.stringify({ t: "answer", id: askId, behavior: "deny", message: DUPLICATE_ASK_ID_NOTE }) + "\n");
-          } catch {}
-          continue;
-        }
-        const ask: Ask = { id: askId, kind, tool: msg.tool ?? "tool", input: msg.input ?? {}, at: Date.now() };
-        const finish = (behavior: AskBehavior, message: string | undefined, source: AskResolutionSource, always?: boolean) => {
-          if (!pending.delete(askId)) return;
-          clearTimeout(timer);
-          try {
-            // On `always` the proxy returns the CLI's own suggested rules, so Claude, not the
-            // harness, remembers the allow. `source` keeps a timeout note from passing as human words.
-            conn.write(
-              JSON.stringify({ t: "answer", id: askId, behavior, message, source, ...(always ? { always: true } : {}) }) + "\n",
-            );
-          } catch {}
-          opts.onResolve({ ...ask, behavior, source });
-        };
-        const timer = setTimeout(
-          () =>
-            kind === "question"
-              ? finish("answer", QUESTION_TIMEOUT_NOTE, "timeout")
-              : finish("deny", DENY_TIMEOUT_NOTE, "timeout"),
-          timeoutMs,
-        );
-        timer.unref?.();
-        pending.set(askId, { ask, finish });
-        opts.onAsk(ask);
-      }
-    });
-  };
-  let server: ReturnType<typeof createNetServer> | null = null;
-  for (const [index, candidate] of opts.socketPaths.entries()) {
-    const attempt = createNetServer(connectionHandler);
-    try {
-      unlinkSync(candidate);
-    } catch {}
-    let outcome = await new Promise<"listening" | (Error & { code?: string })>((resolve) => {
-      attempt.once("listening", () => resolve("listening"));
-      attempt.once("error", (error) => resolve(error as Error & { code?: string }));
-      attempt.listen(candidate);
-    });
-    // A fallback under the shared OS temp root must not be connectable by another local account.
-    if (outcome === "listening" && process.platform !== "win32") {
-      try {
-        chmodSync(candidate, 0o600);
-      } catch (error) {
-        try {
-          attempt.close();
-        } catch {}
-        try {
-          unlinkSync(candidate);
-        } catch {}
-        outcome = error as Error & { code?: string };
-      }
-    }
-    if (outcome === "listening") {
-      if (index > 0) {
-        console.error(`permission broker: ${opts.socketPaths[0]} is still held — bound fallback ${candidate}`);
-      }
-      boundPath = candidate;
-      server = attempt;
-      attempt.on("error", (error) => {
-        console.error(`permission broker error on ${candidate}: ${error.message}`);
-      });
-      break;
-    }
-    try {
-      attempt.close();
-    } catch {}
-    if (index === opts.socketPaths.length - 1) {
-      console.error(`permission broker unavailable on ${candidate}: ${outcome.message}`);
-      break;
-    }
-  }
-  // Fail closed: an unbound candidate could connect the proxy to a stale or unrelated listener.
-  if (!server) throw new Error("claude: permission broker could not bind a local socket");
-  const drain = () => {
-    for (const p of Array.from(pending.values())) {
-      const { behavior, message } = systemEndedReply(p.ask.kind);
-      p.finish(behavior, message, "system");
-    }
-  };
-  return {
-    answer(askId: string, behavior: AskBehavior, message?: string, always?: boolean): boolean {
-      const p = pending.get(askId);
-      if (!p) return false;
-      if (p.ask.kind === "question" ? behavior !== "answer" : behavior === "answer") return false;
-      p.finish(behavior, message, "user", always && behavior === "allow");
-      return true;
-    },
-    pause() {
-      drain();
-    },
-    close() {
-      closed = true;
-      drain();
-      try {
-        server?.close();
-      } catch {}
-      try {
-        unlinkSync(boundPath);
-      } catch {}
-    },
-    socketPath: boundPath,
-  };
 }
 
 function decodeToolList(value: unknown, field: "tools" | "disallowedTools"): string[] | undefined {
@@ -733,10 +545,88 @@ type ClaudeUserMessage = {
  * convention, instead of relaunching and re-uploading the prompt cache. */
 function withVolatileNote(text: string, volatile: string): string {
   const body = volatile.trim()
-    ? `This part of your instructions changed since this session started. It replaces the earlier copy:\n\n${volatile.trim()}`
+    ? `This part of your instructions changed since this session started. It replaces the earlier copy:\n\n${neutralizeReminderTags(volatile.trim())}`
     : "The notes that were in your instructions when this session started have been cleared.";
   const note = `<system-reminder>\n${body}\n</system-reminder>`;
   return text ? `${note}\n\n${text}` : note;
+}
+
+/** How a new process receives the volatile half: in its first message, in
+ * the same reminder shape a mid-session change uses, so a relaunch keeps a
+ * system prompt the provider has already cached (see the launch below). A
+ * resumed session may hold an earlier copy in its history; this one wins. */
+export function withLaunchVolatile(text: string, volatile: string): string {
+  const note = `<system-reminder>\nThis part of your instructions changes from turn to turn, so it arrives here instead of in the system prompt. It replaces any earlier copy:\n\n${neutralizeReminderTags(volatile.trim())}\n</system-reminder>`;
+  return text ? `${note}\n\n${text}` : note;
+}
+
+/** Receipts of the volatile half each Claude session last received
+ * (prompt-split.ts), keyed by the CLI's session id. */
+const RECEIPT_SCOPE = "claude";
+const EMPTY_VOLATILE = promptSplitFingerprints("", "").volatile;
+/** session.volatile after the CLI compacted the session: the reminder that
+ * carried the volatile half may now be summarized away, so this value
+ * equals no real volatile half and the next turn delivers it again. */
+const COMPACTED_VOLATILE = "\u0000compacted";
+
+/** The harness's reminder tag, escaped wherever it appears in text the
+ * harness did not write: a person's or teammate's message, a webhook
+ * payload, a recalled passage, memory. Only the harness's own notes open
+ * with a real `<system-reminder>`, so a payload cannot close the current
+ * note and open a forged one that "replaces" the instructions it carries.
+ * `<` becomes `<\`, the same escape the harness uses for its own tags. */
+export function neutralizeReminderTags(text: string): string {
+  return text.replace(/<(\/?\s*system-reminder)/gi, "<\\$1");
+}
+
+/** Which parts of a spawn contract differ, for the relaunch log: top-level
+ * fields, MCP servers by name with the env keys or fields that changed, and
+ * CLI flags by name. Names only — never a value, since the contract carries
+ * the system prompt and credentials. */
+export function argsKeyChanges(previous: string, next: string): string[] {
+  let before: Record<string, unknown>;
+  let after: Record<string, unknown>;
+  try {
+    before = JSON.parse(previous) as Record<string, unknown>;
+    after = JSON.parse(next) as Record<string, unknown>;
+  } catch {
+    return ["unreadable"];
+  }
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const record = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {});
+  const differing = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((key) => !same(a[key], b[key]));
+  const flags = (value: unknown) => {
+    const list = Array.isArray(value) ? value.map(String) : [];
+    const out: Record<string, string[]> = {};
+    list.forEach((token, index) => {
+      if (!token.startsWith("--")) return;
+      const following = list[index + 1];
+      (out[token] ??= []).push(following !== undefined && !following.startsWith("--") ? following : "");
+    });
+    return out;
+  };
+  const changes: string[] = [];
+  for (const key of differing(before, after)) {
+    if (key === "mcpServers") {
+      const a = record(before.mcpServers);
+      const b = record(after.mcpServers);
+      for (const name of differing(a, b)) {
+        if (!(name in a) || !(name in b)) {
+          changes.push(`mcpServers.${name}(${name in b ? "added" : "removed"})`);
+          continue;
+        }
+        const fields = differing(record(a[name]), record(b[name])).flatMap((field) =>
+          field === "env" ? differing(record(record(a[name]).env), record(record(b[name]).env)).map((env) => `env.${env}`) : [field]);
+        changes.push(`mcpServers.${name}(${fields.join(",")})`);
+      }
+    } else if (key === "args") {
+      changes.push(`args(${differing(flags(before.args), flags(after.args)).join(",")})`);
+    } else {
+      changes.push(key);
+    }
+  }
+  return changes;
 }
 
 function claudeUserMessage(
@@ -864,6 +754,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       systemPromptPath: string | null;
       argsKey: string;
       volatile: string;
+      /** launched with a split prompt: the fingerprint of its stable half,
+       * for the receipt of the volatile half this session holds; null for
+       * a single-block prompt, which keeps no receipt */
+      stableDigest: string | null;
+      /** the volatile fingerprint the receipt last recorded for this session */
+      receiptVolatile: string | null;
+      /** the CLI's session id from `init`, what --resume takes later */
       sessionId: string | null;
       /** `init` arrived; before it the CLI took nothing, so a resume retry is safe */
       sawInit: boolean;
@@ -1008,8 +905,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (controlsHost && permissionMode === "bypassPermissions" && turn.approvalMode !== "full") {
         throw new Error("local computer control requires the interactive approval broker");
       }
-      // Before any broker or process, so a bad attachment leaves nothing live.
-      const promptMsg = claudeUserMessage(turn.text, turn.images);
+      // Materialize before creating a broker or process. A missing/corrupt
+      // attachment must fail this call without leaving a live session behind.
+      const turnText = neutralizeReminderTags(turn.text);
+      const promptMsg = claudeUserMessage(turnText, turn.images);
+      // Internal relaunches are still the turn acknowledged to the harness.
+      // A new user message gets a fresh id, but retry/recovery must not orphan
+      // its capability, coordination result or queued continuation ownership.
       const turnId = logicalTurnId ?? newId();
       const retryAbort = new AbortController();
       const retry = retryState.get(threadId) ?? { attempt: 0, cancelled: false };
@@ -1180,8 +1082,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = "1";
       }
       const harnessSettings: Record<string, unknown> = { ...authSettings };
-      // Project-only settings still find the personal memory via ancestors when the bot lives under HOME.
-      if (isolated) harnessSettings.claudeMdExcludes = [join(homedir(), ".claude", "CLAUDE.md")];
+      // Project-only settings still discover the personal memory through
+      // ancestor directories when the bot workspace lives below HOME. This
+      // fork keeps it for the person's own bots (excludesPersonalClaudeMd);
+      // project memory always stays.
+      if (isolated && (turn.guestConfined || excludesPersonalClaudeMd(turnEnvironment))) {
+        harnessSettings.claudeMdExcludes = [join(homedir(), ".claude", "CLAUDE.md")];
+      }
       if (hooks) harnessSettings.hooks = claudeHookSettings(HOOK_HELPER_PATH);
       if (turn.guestConfined) harnessSettings.permissions = GUEST_CLAUDE_PERMISSIONS;
       // The person's review hook runs for bots too: with --setting-sources
@@ -1231,7 +1138,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         const volatile = turn.systemVolatile ?? "";
         const message = volatile === live.volatile && !turn.mentionTurn
           ? promptMsg
-          : claudeUserMessage(withVolatileNote(turn.text, volatile), turn.images);
+          : claudeUserMessage(withVolatileNote(turnText, volatile), turn.images);
         live.volatile = volatile;
         const running = live.turn;
         // A warm process can exit just as the next turn is written; its close resumes this turn.
@@ -1243,7 +1150,25 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         return { turnId };
       }
+      if (live && !turn.sessionReset && live.argsKey !== argsKey) {
+        console.warn(`[claude] ${threadId.slice(0, 8)} relaunch, spawn contract changed in: ${argsKeyChanges(live.argsKey, argsKey).join(", ")}`);
+      }
       if (live) closeSession(threadId, turn.sessionReset ? "context reset" : "spawn contract changed");
+      const launchHalves = promptHalves(turn);
+      // A resumed session may already hold this exact volatile half: the
+      // receipt says what it last received, across relaunches and server
+      // restarts, so an idle relaunch does not append another copy to the
+      // history it re-reads on every later call.
+      const launchReceipt = launchHalves.stable !== null && sessionId ? readPromptSplitReceipt(RECEIPT_SCOPE, sessionId) : null;
+      const launchCarried = launchReceipt !== null && !turn.mentionTurn &&
+        launchReceipt.volatile === promptSplitFingerprints("", launchHalves.volatile).volatile;
+      const launchMsg = launchHalves.stable === null || launchCarried
+        ? promptMsg
+        : launchHalves.volatile.trim()
+          ? claudeUserMessage(withLaunchVolatile(turnText, launchHalves.volatile), turn.images)
+          : launchReceipt && launchReceipt.volatile !== EMPTY_VOLATILE
+            ? claudeUserMessage(withVolatileNote(turnText, ""), turn.images)
+            : promptMsg;
 
       // Until sessions.set() below, this turn owns every launch resource and must release it on failure.
       const cleanupUnownedLaunch = () => {
@@ -1263,9 +1188,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       };
 
       try {
-        if (turn.system) {
+        // Create the prompt file only for a new process. A compatible live
+        // session has already consumed the same system prompt at launch.
+        // A split prompt launches with its stable half alone; the volatile
+        // half rides this launch's first message (launchMsg). Baking it into
+        // the system prompt made every relaunch — idle close, a changed
+        // spawn contract, a server restart — open with a system prompt the
+        // provider had never cached, so --resume re-priced the whole history
+        // at the cache-write rate even when nothing stable had changed.
+        const launchSystem = launchHalves.stable ?? turn.system;
+        if (launchSystem) {
           systemPromptPath = join(mkdtempSync(join(tmpdir(), "omb-system-")), "prompt.txt");
-          writeFileSync(systemPromptPath, turn.system, { mode: 0o600 });
+          writeFileSync(systemPromptPath, launchSystem, { mode: 0o600 });
           args.push("--append-system-prompt-file", systemPromptPath);
         }
         if (socketPath) {
@@ -1356,7 +1290,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (turn.guestConfined) warmContracts.delete(threadId);
       else {
         warmContracts.set(threadId, {
-          args: [...args], env: { ...env }, cwd, system: turn.system ?? null,
+          // the system prompt this process was launched with: the stable
+          // half alone for a split prompt (launchSystem), or the ping would
+          // warm a prefix no real turn of this session sends
+          args: [...args], env: { ...env }, cwd, system: launchHalves.stable ?? turn.system ?? null,
           mcpServers: mcpConfigPath ? JSON.parse(JSON.stringify(mcpServers)) : null,
           settings: authSettingsPath ? JSON.parse(JSON.stringify(settings)) : null,
         });
@@ -1370,6 +1307,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         systemPromptPath,
         argsKey,
         volatile: turn.systemVolatile ?? "",
+        stableDigest: launchHalves.stable === null ? null : promptSplitFingerprints(launchHalves.stable, "").stable,
+        receiptVolatile: launchCarried ? launchReceipt.volatile : null,
         sessionId: sessionId ?? newSessionId,
         sawInit: false,
         nativePermissionMode: null,
@@ -1476,6 +1415,24 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
               if (session.turn) session.turn.awaitingInit = false;
               session.nativePermissionMode = typeof o.permissionMode === "string" ? o.permissionMode : null;
               if (typeof o.session_id === "string") session.sessionId = o.session_id;
+              // The CLI took this turn's message, and with it any volatile
+              // note: record what the session now holds, so a relaunch that
+              // resumes it does not deliver the same copy again.
+              if (session.stableDigest !== null && session.sessionId && session.volatile !== COMPACTED_VOLATILE) {
+                const held = promptSplitFingerprints("", session.volatile).volatile;
+                if (held !== session.receiptVolatile) {
+                  try {
+                    writePromptSplitReceipt(RECEIPT_SCOPE, session.sessionId, { stable: session.stableDigest, volatile: held });
+                    session.receiptVolatile = held;
+                  } catch (error) {
+                    console.warn(`[claude] could not record the prompt receipt: ${(error as Error).message}`);
+                  }
+                }
+              }
+              // The turn the CLI starts for a steered message it could not
+              // fold (see `result`): the held result now waits for this one's
+              // — bounded, so a continuation that announces itself and then
+              // never speaks cannot keep the turn's pass open indefinitely.
               const held = session.turn;
               if (held?.continuationGrace) {
                 clearTimeout(held.continuationGrace);
@@ -1497,6 +1454,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
               emit({ ...base(threadId, currentTurnId()), type: "session.started", sessionId: o.session_id, model: o.model, ...(retry.rebuilt ? { rebuilt: true } : {}) });
               if (retry.rebuilt) emit({ ...base(threadId, currentTurnId()), type: "runtime.notice", message: rebuiltSessionNotice("Claude Code") });
               retry.rebuilt = false;
+            } else if (o.subtype === "compact_boundary") {
+              // The CLI summarized the session's history, and the reminder
+              // that carried the volatile half (memory, shared state, this
+              // turn's surface) may be gone with it. Forget what it held, in
+              // memory and on disk, so the next turn — on this process or a
+              // relaunch — delivers the whole volatile half again.
+              session.volatile = COMPACTED_VOLATILE;
+              session.receiptVolatile = null;
+              if (session.sessionId) deletePromptSplitReceipt(RECEIPT_SCOPE, session.sessionId);
             } else if (o.subtype === "thinking_tokens") {
               emit({ ...base(threadId, currentTurnId()), type: "item.updated", itemType: "reasoning", tokens: o.estimated_tokens });
             }
@@ -1883,8 +1849,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       active.set(threadId, { stop, turnId, broker });
       emit({ ...base(threadId, turnId), type: "turn.started" });
 
-      // Prompt over stdin, never argv (ARG_MAX); stdin stays open for steers and the next turn.
-      if (!(await writeUser(session, threadId, promptMsg))) {
+      // prompt over stdin as a stream-json message — never argv (ARG_MAX).
+      // stdin stays OPEN: that is what keeps the session alive for a
+      // mid-turn steer or the next turn; closeSession() ends it.
+      if (!(await writeUser(session, threadId, launchMsg))) {
         if (!session.turn?.stopRequested) settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }
@@ -1896,9 +1864,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const s = sessions.get(threadId);
       if (!s || !s.turn || s.turn.settled || s.closing || s.child.exitCode !== null) return "refused";
       const turn = s.turn;
+      // Materialize before counting or writing anything: an attachment that
+      // vanished since it was admitted refuses the steer, and nothing was
+      // sent, so the caller may queue the words for a real turn.
+      // A steered message is third-party text too: its reminder tags are
+      // escaped like a new turn's (neutralizeReminderTags).
       let message: ClaudeUserMessage;
       try {
-        message = claudeUserMessage(text, images);
+        message = claudeUserMessage(neutralizeReminderTags(text), images);
       } catch {
         return "refused";
       }

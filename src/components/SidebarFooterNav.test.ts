@@ -36,7 +36,7 @@ function render(density: SidebarDensity, { toolsLayout = "rows", ...extra }: { c
 beforeEach(() => {
   fixture.advanced = false;
   fixture.dispatch.mockReset();
-  fixture.state = { activeView: "chat", routineRuns: [], pluginsOpen: false };
+  fixture.state = { activeView: "chat", routineRuns: [], triggersOpen: false, pluginsOpen: false, bots: [] };
   fixture.toolsLayout = "rows";
   vi.stubGlobal("window", {});
 });
@@ -55,9 +55,9 @@ describe("sidebar footer places", () => {
     expect(html).not.toContain('data-sidebar-nav="apps"');
   });
 
-  it.each(["comfortable", "compact"] as const)("keeps Automations in Simple mode, as the only place and with no Tools header (%s)", (density) => {
+  it.each(["comfortable", "compact"] as const)("keeps Automations, Report and Pipeline in Simple mode with no Tools header (%s)", (density) => {
     const { html } = render(density);
-    expect(html.match(/data-sidebar-nav="/g)).toHaveLength(1);
+    expect(html.match(/data-sidebar-nav="/g)).toHaveLength(3);
     expect(html).toMatch(/data-tour="nav-automations" data-sidebar-nav="automations"/);
     expect(html).toContain(">Automations</span>");
     expect(html).not.toContain(">Tools<");
@@ -104,6 +104,25 @@ describe("sidebar footer places", () => {
     const row = tree.find((node) => node.props.id === "team-map")!;
     (row.props.onClick as () => void)();
     expect(fixture.dispatch).toHaveBeenCalledWith({ type: "showTeamMap" });
+  });
+
+  // this fork: Report and Esteira were rows on the rail and items of the
+  // folded menu; a Claude Code session that needs a look was its item too
+  it("keeps Report, Esteira and each Claude Code alert as rows wherever there are rows", () => {
+    fixture.advanced = true;
+    fixture.state.bots = [{ id: "c", tasks: [{ threadId: "t1", ccAlerts: [{ sessionId: "s1", title: "#9308", state: "failed" }] }] }];
+    const { nodes: tree, html } = render("comfortable");
+    for (const id of ["report", "pipeline", "cc-s1"]) expect(html.match(new RegExp(`data-sidebar-nav="${id}"`, "g"))).toHaveLength(1);
+    const row = (id: string) => tree.find((node) => node.props.id === id && typeof node.props.onClick === "function")!;
+    (row("report").props.onClick as () => void)();
+    expect(fixture.dispatch).toHaveBeenLastCalledWith({ type: "showReport" });
+    (row("pipeline").props.onClick as () => void)();
+    expect(fixture.dispatch).toHaveBeenLastCalledWith({ type: "showPipeline" });
+    (row("cc-s1").props.onClick as () => void)();
+    expect(fixture.dispatch).toHaveBeenLastCalledWith({ type: "switchTask", botId: "c", threadId: "t1" });
+    fixture.advanced = false;
+    expect(render("icons").html).toContain('data-sidebar-nav="pipeline"');
+    for (const id of ["report", "pipeline", "cc-s1"]) expect(render("comfortable").html).toContain(`data-sidebar-nav="${id}"`);
   });
 
   it("draws icons with tooltips in the avatars-only density", () => {
@@ -224,10 +243,10 @@ describe("toolbar tools layout", () => {
 
   it("toolbar shows Team map only in Advanced mode, and Simple mode keeps its Automations row", () => {
     fixture.advanced = true;
-    expect(render("comfortable", { toolsLayout: "toolbar" }).html.match(/data-sidebar-nav="/g)).toHaveLength(2);
+    expect(render("comfortable", { toolsLayout: "toolbar" }).html.match(/data-sidebar-nav="/g)).toHaveLength(4);
     fixture.advanced = false;
     const simple = render("comfortable", { toolsLayout: "toolbar" }).html;
-    expect(simple.match(/data-sidebar-nav="/g)).toHaveLength(1);
+    expect(simple.match(/data-sidebar-nav="/g)).toHaveLength(3);
     expect(simple).toContain(">Automations</span>");
   });
 

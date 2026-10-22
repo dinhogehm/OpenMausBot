@@ -307,6 +307,27 @@ describe("routine editor", () => {
     expect(editor(routine)).toContain("Each run starts with the previous run&#x27;s report");
   });
 
+  it("offers Run in its own lane, off by default, and saves it on and off", () => {
+    expect(editor(routine)).not.toContain("Run in its own lane");
+    const own = editor({ ...routine, lane: "own" });
+    expect(own).toContain('aria-expanded="true"');
+    expect(own).toMatch(/<input type="checkbox" aria-label="Run in its own lane"[^>]*checked[^>]*>/);
+    const save = (r: Routine, checked: boolean) => {
+      const props = { seed: { kind: "routine" as const, at: Date.now() + 3_600_000, durationMinutes: 30, botIds: [bot.id], routine: r }, bots: [bot], onClose: vi.fn(), onSavedCall: vi.fn() };
+      fixture.values = [];
+      let tree = capture(() => EventEditor(props));
+      if (r.lane !== "own") { click(buttons(tree).get("More options")); tree = capture(() => EventEditor(props)); }
+      const box = () => tree.find((node) => node.type === "input" && node.props["aria-label"] === "Run in its own lane")!;
+      (box().props.onChange as (event: unknown) => void)({ target: { checked } });
+      tree = capture(() => EventEditor(props));
+      click(buttons(tree).get("Save"));
+      return JSON.parse((fixture.api.mock.calls.at(-1) as unknown as [string, { body: string }])[1].body);
+    };
+    expect(save(routine, true)).toMatchObject({ lane: "own" });
+    expect(save({ ...routine, lane: "own" }, false)).toMatchObject({ lane: null });
+    expect(save(routine, false)).not.toHaveProperty("lane");
+  });
+
   it("hides Remember the last run for a one-time routine", () => {
     expect(editor()).not.toContain("Remember the last run");
   });

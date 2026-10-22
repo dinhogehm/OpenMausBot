@@ -169,7 +169,15 @@ describe("periods", () => {
 
   it("resolves a request: presets, explicit ranges, and limits", () => {
     expect(resolveReportPeriod({ granularity: "day", now, count: 90 })).toEqual({ period: presetPeriod("day", 90, now) });
-    expect(resolveReportPeriod({ granularity: "day", now, count: 7 })).toEqual({ period: presetPeriod("day", 30, now) });
+    // day, week and fortnight: the last 24 hours, 7 and 15 days, each compared with the same span before
+    expect(resolveReportPeriod({ granularity: "hour", now, count: 24 })).toEqual({ period: presetPeriod("hour", 24, now) });
+    expect(resolveReportPeriod({ granularity: "day", now, count: 7 })).toEqual({ period: presetPeriod("day", 7, now) });
+    const fortnight = resolveReportPeriod({ granularity: "day", now, count: 15 });
+    expect("period" in fortnight && bucketStarts(fortnight.period.from, fortnight.period.to, "day")).toHaveLength(15);
+    expect("period" in fortnight && bucketStarts(previousPeriod(fortnight.period, "day").from, previousPeriod(fortnight.period, "day").to, "day")).toHaveLength(15);
+    // a span the screen does not offer still falls back to the grouping's default
+    expect(resolveReportPeriod({ granularity: "day", now, count: 8 })).toEqual({ period: presetPeriod("day", 30, now) });
+    expect(resolveReportPeriod({ granularity: "hour", now })).toEqual({ period: presetPeriod("hour", 48, now) });
     const september = resolveReportPeriod({ granularity: "day", now, from: "2026-09-01", to: "2026-09-30" });
     expect("period" in september && bucketStarts(september.period.from, september.period.to, "day")).toHaveLength(30);
     expect(resolveReportPeriod({ granularity: "day", now, from: "2026-09-01" })).toEqual({ error: "from and to go together" });

@@ -4,6 +4,16 @@ Before claiming a server or conversation change works, follow
 [`docs/verification/README.md`](docs/verification/README.md). Always launch an
 isolated fixture; never verify mutations against the user's live app or data.
 
+## Canonical repository and delivery
+
+Every OpenMausBot change must be versioned and sent to
+https://github.com/dinhogehm/OpenMausBot, including fixes, performance changes,
+terminal integration, versionable configuration and project documentation.
+Verify the destination remote and report the published branch or pull request.
+Local changes or work delivered in another project do not count as OMB delivery.
+Report code publication, merge and installation of the running app separately.
+Never commit credentials, private logs or user data.
+
 ## Comments
 
 Write a comment only for what the code cannot say:

@@ -2,14 +2,18 @@ import { Select } from "./Select";
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArrowLeft, BellRing, Check, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
+  ArrowLeft, BellRing, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
   ListChecks, ListTodo, Loader2, MessageSquare, Send, ShieldQuestion, Sparkles, X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { t } from "@/lib/i18n";
-import { answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, sortNeedsYou, waitingAge, type NeedsYouItem, type NeedsYouSort } from "@/lib/needs-you";
+import { activeLocale, t } from "@/lib/i18n";
+import { answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, delegated, dueAt, maybeResolved, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, sortNeedsYou, waitingAge, type NeedsYouItem, type NeedsYouSort } from "@/lib/needs-you";
 import { History, Decisions } from "./NeedsYouDecisions";
 import { quietButton, sectionHeading, strongButton } from "./needsYouStyles";
+import type { Message } from "@/state/store";
+import type { RequestChoice } from "@/lib/needs-you-actions";
+import { approvalChoices, pendingApprovals, PendingApprovalPanel, type ApprovalChoice } from "@/components/PendingApproval";
+import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
 export { decisionLook, type DecisionLook } from "./NeedsYouDecisions";
 
 /** What a key press does on the resolution screen. Text fields keep their
@@ -40,7 +44,7 @@ export function linkLabel(url: string): string {
   }
 }
 
-export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | `option:${number}`;
+export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | "delegate" | "unsupersede" | `option:${number}` | `request:${string}`;
 
 export interface NeedsYouResolverViewProps {
   items: NeedsYouItem[];
@@ -86,17 +90,35 @@ export interface NeedsYouResolverViewProps {
   changingAnswer?: string | null;
   onChangeAnswer: (item: NeedsYouItem) => void;
   onResolve: (item: NeedsYouItem) => void;
+  /** "Delegar a um agente" (lote del): a Claude Code session opened by the server for the item. */
+  onDelegate?: (item: NeedsYouItem) => void;
+  /** "Os comandos ainda valem": the owner lifts a superseded mark (INSP-R13fol #13). */
+  onUnsupersede?: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
   onDismissNotice?: () => void;
+  /** "Talvez já resolvido" opened: a routine's items said once and let go (INSP-N22 r2 F2). Folded by default. */
+  showMaybeResolved?: boolean;
+  onToggleMaybeResolved?: () => void;
+  /** A decision on the card the conversation stopped on (an approval, a
+   * question): the same answer the chat's card sends. `label` names it in the notice. */
+  onRequest?: (item: NeedsYouItem, request: Message, choice: RequestChoice, label: string) => void;
+  /** May remember an exact command ("Sempre permitir este comando"); null while unknown. */
+  ownerOrAdmin?: boolean | null;
 }
 
 /** The visible list (filtered by bot, sorted) and the item on screen. */
-export function resolverSelection(props: Pick<NeedsYouResolverViewProps, "items" | "botFilter" | "sort" | "now" | "selectedKey" | "fallbackIndex">) {
+export function resolverSelection(props: Pick<NeedsYouResolverViewProps, "items" | "botFilter" | "sort" | "now" | "selectedKey" | "fallbackIndex" | "showMaybeResolved">) {
   const filtered = props.botFilter ? props.items.filter((item) => item.botId === props.botFilter) : props.items;
   const sorted = sortNeedsYou(filtered, props.sort, props.now);
-  // what waits on the person first; what waits on a bot after, in the same order (INSP-J2 #2)
-  const visible = [...sorted.filter((each) => !awaitingBot(each, props.now)), ...sorted.filter((each) => awaitingBot(each, props.now))];
+  const maybe = sorted.filter((each) => maybeResolved(each) && !awaitingBot(each, props.now));
+  // what waits on the person first; what waits on a bot after, in the same order (INSP-J2 #2); last, folded unless
+  // opened (or the one on screen), what may be resolved already (INSP-N22 r2 F2)
+  const visible = [
+    ...sorted.filter((each) => !awaitingBot(each, props.now) && !maybeResolved(each)),
+    ...sorted.filter((each) => awaitingBot(each, props.now)),
+    ...maybe.filter((each) => props.showMaybeResolved || needsYouKey(each) === props.selectedKey),
+  ];
   const found = visible.findIndex((item) => needsYouKey(item) === props.selectedKey);
   const index = found >= 0 ? found : Math.min(Math.max(props.fallbackIndex, 0), visible.length - 1);
   return { visible, index, item: visible[index] ?? null };
@@ -136,6 +158,19 @@ function jumpToDecisions() {
 export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
   const { items, now, pane } = props;
   const { visible, index, item } = resolverSelection(props);
+  const maybeCount = (props.botFilter ? items.filter((each) => each.botId === props.botFilter) : items).filter((each) => maybeResolved(each) && !awaitingBot(each, now)).length;
+  const maybeHeading = (
+    <button
+      type="button"
+      data-resolver-maybe-section=""
+      aria-expanded={Boolean(props.showMaybeResolved)}
+      onClick={() => props.onToggleMaybeResolved?.()}
+      className="flex w-full items-center gap-1 px-2 pb-1 pt-3 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-secondary outline-none hover:text-ink focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-focus"
+    >
+      {props.showMaybeResolved ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
+      <span>{t("needsYou.screen.maybeResolvedSection", { count: maybeCount })}</span>
+    </button>
+  );
   const bots = needsYouBots(items);
   const yours = waitingOnYou(items, now).length;
   const filterName = bots.find((bot) => bot.botId === props.botFilter)?.botName;
@@ -202,7 +237,7 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                 ))}
               </div>
             </div>
-            {visible.length ? (
+            {visible.length || maybeCount ? (
               <ul className="min-h-0 flex-1 overflow-y-auto py-1.5">
                 {visible.map((each, position) => {
                   const key = needsYouKey(each);
@@ -211,8 +246,11 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                   const Icon = each.approval ? ShieldQuestion : each.options?.length ? ListChecks : each.pendingId ? ListTodo : CircleAlert;
                   // the answered ones come last, under their own heading and count (INSP-J2 #2)
                   const firstAwaiting = awaitingBot(each, now) && (position === 0 || !awaitingBot(visible[position - 1]!, now));
+                  // what may be resolved already, under its own folding heading (INSP-N22 r2 F2)
+                  const firstMaybe = maybeResolved(each) && !awaitingBot(each, now) && (position === 0 || !maybeResolved(visible[position - 1]!) || awaitingBot(visible[position - 1]!, now));
                   return (
                     <li key={key} className="px-1.5">
+                      {firstMaybe && maybeHeading}
                       {firstAwaiting && (
                         <p data-resolver-awaiting-section="" className="px-2 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-secondary">
                           {t("needsYou.screen.awaitingSection", { count: visible.filter((other) => awaitingBot(other, now)).length })}
@@ -240,8 +278,22 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                             <span aria-hidden="true">·</span>
                             <span className="shrink-0 tabular-nums">{waitingAge(each.since, now)}</span>
                           </span>
+                          {/* delegated: it waits on the agent's session (lote del) */}
+                          {delegated(each) && (
+                            <span data-resolver-delegated-row="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-hairline/70 px-1.5 py-px text-[11px] font-medium text-ink-secondary">
+                              <Bot size={11} aria-hidden="true" />
+                              <span className="truncate">{t("needsYou.screen.delegatedShort", { time: answerTime(each.delegation!.at, now) })}</span>
+                            </span>
+                          )}
+                          {/* back from the agent: on top, said so (lote del) */}
+                          {each.delegationBack && !delegated(each) && (
+                            <span data-resolver-back-row="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-warning/60 px-1.5 py-px text-[11px] font-medium text-ink">
+                              <CircleAlert size={11} aria-hidden="true" className="text-warning" />
+                              <span className="truncate">{t("needsYou.screen.delegationBackShort")}</span>
+                            </span>
+                          )}
                           {/* answered: now it waits on the bot, not on the person (J18) */}
-                          {awaitingBot(each, now) && (
+                          {awaitingBot(each, now) && !delegated(each) && (
                             <span data-resolver-awaiting="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-hairline/70 px-1.5 py-px text-[11px] font-medium text-ink-secondary">
                               <Clock size={11} aria-hidden="true" />
                               <span className="truncate">{t("needsYou.screen.awaiting", { name: each.botName })}</span>
@@ -271,6 +323,8 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                     </li>
                   );
                 })}
+                {/* folded: only its heading, which opens it */}
+                {maybeCount > 0 && !visible.some((each) => maybeResolved(each) && !awaitingBot(each, now)) && <li className="px-1.5">{maybeHeading}</li>}
               </ul>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
@@ -362,12 +416,18 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   const working = busy !== null;
   const layout = placement(item.options?.length ?? 0);
   const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
-  const awaiting = awaitingBot(item, now);
+  // delegated to an agent (lote del): its own banner, no decisions to pick meanwhile
+  const isDelegated = delegated(item);
+  const awaiting = awaitingBot(item, now) && !isDelegated;
   const silent = botSilent(item, now);
   const stuck = answerStuck(item, now);
   const notDelivered = notDeliveredLine(item, now);
   // answered and waiting on the bot: the decisions fold behind "Mudar resposta" (INSP-J2 #2)
-  const decisionsOpen = Boolean(item.options?.length) && (!awaiting || props.changingAnswer === needsYouKey(item));
+  // superseded by another item (R13-intake #1): no decision to pick, no command to copy
+  const superseded = Boolean(item.superseded);
+  const decisionsOpen = Boolean(item.options?.length) && !isDelegated && !superseded && (!awaiting || props.changingAnswer === needsYouKey(item));
+  // the card the conversation stopped on (an approval, a question): shown, and answered from here
+  const request = item.requests?.[0];
   return (
     <>
       <div className="flex items-center gap-1 border-b border-hairline/40 px-2 py-1.5 sm:px-3">
@@ -388,9 +448,11 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
       <div id="needs-you-item-scroll" className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-7 sm:pt-5">
         <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12.5px] text-ink-secondary">
           <span><span className="font-medium text-ink">{item.botName}</span> {t("needsYou.screen.askedAgo", { age: waitingAge(item.since, now) })}</span>
-          {item.threadTitle && item.threadTitle !== item.title && (
-            // the separator travels with what it introduces: never alone at a line's end (INSP-I r1 #19)
-            <span className="min-w-0 max-w-full truncate"><span aria-hidden="true">· </span>{t("needsYou.screen.inThread", { title: item.threadTitle })}</span>
+          {item.threadTitle && (item.threadTitle !== item.title || item.threadKind) && (
+            // the separator travels with what it introduces: never alone at a line's end (INSP-I r1 #19);
+            // a routine's run or an archived conversation is said ("Abrir conversa" opens it all the same),
+            // wrapping instead of cut: on a phone the kind is the news (INSP-J2b #4)
+            <span data-resolver-thread-kind={item.threadKind} className={cn("min-w-0 max-w-full", item.threadKind ? "break-words" : "truncate")}><span aria-hidden="true">· </span>{t(item.threadKind === "routine" ? "needsYou.screen.inRoutineThread" : item.threadKind === "archived" ? "needsYou.screen.inArchivedThread" : "needsYou.screen.inThread", { title: item.threadTitle })}</span>
           )}
         </p>
         <h2 id="needs-you-item-title" className="mt-1.5 break-words text-[18px] font-semibold leading-snug text-ink sm:mt-2 sm:text-[21px]">{item.title}</h2>
@@ -415,6 +477,62 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         )}
 
+        {isDelegated && (
+          // delegated: a session of the server works on it; the item waits on it (lote del)
+          <div data-resolver-delegated="" className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-accent/40 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="status" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <Bot size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-text" />
+              <span>{delegatedLine(item, now)}</span>
+            </p>
+            {item.delegation!.link && (
+              <button type="button" data-resolver-delegated-link={item.delegation!.link} onClick={() => props.onOpenLink(item.delegation!.link!)} className={cn(quietButton, "py-1.5 text-[12.5px]")}>
+                <ExternalLink size={14} aria-hidden="true" />
+                {t("needsYou.screen.openSession")}
+              </button>
+            )}
+          </div>
+        )}
+        {item.delegationBack && !isDelegated && (
+          // back from the agent: what it did, what is left, the exact command (lote del)
+          <div data-resolver-delegation-back="" className="mt-3 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="status" className="flex items-start gap-2">
+              <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
+              <span>{t(item.delegationBack.outcome === "falhou" ? "needsYou.screen.delegationFailed" : item.delegationBack.outcome === "barrado" ? "needsYou.screen.delegationStopped" : "needsYou.screen.delegationPartial", { time: answerTime(item.delegationBack.at, now), text: item.delegationBack.text })}</span>
+            </p>
+            {item.delegationBack.command && (
+              <div className="mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5">
+                <code className="min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{item.delegationBack.command}</code>
+                <button type="button" data-resolver-copy={item.delegationBack.command} aria-label={t("needsYou.screen.copyCommand")} onClick={() => props.onCopy(item.delegationBack!.command!)} className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus">
+                  {props.copied === item.delegationBack.command ? <Check size={13} aria-hidden="true" className="text-success" /> : <Copy size={13} aria-hidden="true" />}
+                  <span aria-hidden="true">{props.copied === item.delegationBack.command ? t("needsYou.screen.copied") : t("needsYou.screen.copy")}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {item.superseded && (
+          // another item said these commands must not run: they are off here (R13-intake #1)
+          <div data-resolver-superseded={item.superseded.by} className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="alert" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
+              <span>{t("needsYou.screen.superseded", { by: item.superseded.by, text: item.superseded.text })}</span>
+            </p>
+            {/* the bot that marked it may be wrong: the owner turns the item back on */}
+            {pending && props.onUnsupersede && (
+              <button type="button" data-resolver-unsupersede="" disabled={working} onClick={() => props.onUnsupersede!(item)} className={cn(quietButton, "py-1.5 text-[12.5px]")}>
+                {busy === "unsupersede" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Check size={14} aria-hidden="true" />}
+                {t("needsYou.screen.unsupersede")}
+              </button>
+            )}
+          </div>
+        )}
+        {item.rowWarning && !item.superseded && (
+          // a fixed sheet row written by commands older than 6 h: it may be someone else's by now (R13-intake #1)
+          <p role="status" data-resolver-row-warning="" className="mt-3 flex items-start gap-2 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
+            <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
+            <span>{item.rowWarning}</span>
+          </p>
+        )}
         {awaiting && (
           // the person answered: the ball is with the bot — said with what was answered (INSP-J2 #9)
           <p role="status" data-resolver-awaiting-detail="" className="mt-3 flex items-start gap-2 rounded-lg border border-accent/40 bg-panel px-3 py-2 text-[13px] text-ink">
@@ -468,9 +586,13 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </section>
         )}
 
+        {request && <RequestDetail item={item} request={request} more={(item.requests?.length ?? 1) - 1} />}
+
         <section className="mt-5 sm:mt-6" aria-labelledby="needs-you-steps">
           <h3 id="needs-you-steps" className={sectionHeading}>{t("needsYou.screen.steps")}</h3>
-          {steps.length ? (
+          {request && !steps.length ? (
+            <RequestSteps item={item} request={request} />
+          ) : steps.length ? (
             <ol className="mt-2.5 flex flex-col gap-3">
               {steps.map((step, n) => (
                 <li key={n} className="flex gap-3">
@@ -478,14 +600,15 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
                   <div className="min-w-0 flex-1">
                     <p className="text-[14px] leading-relaxed text-ink"><span className="sr-only">{t("needsYou.screen.stepNumber", { number: n + 1 })} </span>{step.text}</p>
                     {step.command && (
-                      <div className="mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5">
-                        <code className="min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{step.command}</code>
+                      <div className={cn("mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5", superseded && "opacity-60")}>
+                        <code className={cn("min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]", superseded && "line-through")}>{step.command}</code>
                         <button
                           type="button"
+                          disabled={superseded}
                           data-resolver-copy={step.command}
                           aria-label={t("needsYou.screen.copyStep", { number: n + 1 })}
                           onClick={() => props.onCopy(step.command!)}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus"
+                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-50"
                         >
                           {props.copied === step.command ? <Check size={13} aria-hidden="true" className="text-success" /> : <Copy size={13} aria-hidden="true" />}
                           <span aria-hidden="true">{props.copied === step.command ? t("needsYou.screen.copied") : t("needsYou.screen.copy")}</span>
@@ -556,6 +679,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             <button type="button" onClick={props.onDismissError} className="shrink-0 rounded px-1 text-[12px] underline-offset-2 hover:underline">{t("needsYou.screen.dismiss")}</button>
           </div>
         )}
+        {request && props.onRequest ? <RequestDecisions {...props} item={item} request={request} /> : null}
         {decisionsOpen ? (
           // compact: at most ~40% of the window, scrolling inside (INSP-J2 #8); the
           // padding keeps the rings (chosen, focus: 2 px + 2 px offset) inside the clip (r2 N1)
@@ -564,7 +688,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-1.5">
-          {awaiting && item.options?.length && !decisionsOpen ? (
+          {awaiting && item.options?.length && !decisionsOpen && !superseded ? (
             // answered: the decisions fold away; changing the answer is one click (INSP-J2 #2)
             <button type="button" data-resolver-change-answer="" onClick={() => props.onChangeAnswer(item)} className={cn(quietButton, "mr-auto")}>
               <ListChecks size={14} aria-hidden="true" />
@@ -596,6 +720,19 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             <MessageSquare size={14} aria-hidden="true" />
             {t("needsYou.screen.openConversation")}
           </button>}
+          {/* "Delegar a um agente" (lote del): the server's word on whether an agent may; else why only the person */}
+          {pending && !isDelegated && item.delegable && props.onDelegate && (
+            <button type="button" data-resolver-delegate="" disabled={working} onClick={() => props.onDelegate!(item)} title={t("needsYou.screen.delegateHint")} className={quietButton}>
+              {busy === "delegate" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Bot size={14} aria-hidden="true" />}
+              {t("needsYou.screen.delegate")}
+            </button>
+          )}
+          {pending && !isDelegated && !item.delegable && item.onlyYou && (
+            <span data-resolver-only-you="" className="inline-flex max-w-full items-center gap-1.5 px-2 py-1 text-[12px] text-ink-secondary">
+              <ShieldQuestion size={13} aria-hidden="true" className="shrink-0" />
+              <span className="truncate">{t("needsYou.screen.onlyYou", { reason: item.onlyYou })}</span>
+            </span>
+          )}
           {pending && (
             <button type="button" data-resolver-resolve="" disabled={working} onClick={() => props.onResolve(item)} className={cn(item.options?.length || !steps.length ? quietButton : strongButton)}>
               {busy === "resolve" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Check size={14} aria-hidden="true" />}
@@ -611,9 +748,29 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
 /** What the screen says after a decision (INSP-J2 r2 N4): a server item the
  * choice closed is resolved — never "aguardando" a bot that waits on nothing. */
 export function decisionNotice(item: Pick<NeedsYouItem, "options" | "botName" | "title">, option: number, result: unknown): string {
+  // "Essa mesma resposta já foi enviada…": the server's own words, in the neutral notice (INSP-R12F r6 D2)
+  const info = (result as { info?: unknown } | undefined)?.info;
+  if (typeof info === "string" && info) return info;
   const values = { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title };
   const resolved = Number((result as { resolved?: unknown } | undefined)?.resolved ?? 0) > 0;
   return t(resolved ? "needsYou.screen.decided" : "needsYou.screen.decidedWaiting", values);
+}
+
+/** What the screen says after a decision on the card the conversation stopped on. */
+export function requestNotice(item: Pick<NeedsYouItem, "botName">, request: Pick<Message, "from">, choice: RequestChoice, label: string): string {
+  const name = request.from?.name ?? item.botName;
+  if ("approval" in choice && choice.approval === "cancelTurn") return t("needsYou.approval.cancelled", { name });
+  return t("needsYou.approval.sent", { label, name });
+}
+
+/** What the screen says after the person's own words were sent — or, when the
+ * same words had already gone, the server's notice (INSP-R12F r6 D2). */
+export function replyNotice(item: Pick<NeedsYouItem, "botName" | "title">, resolve: boolean, result: unknown): string {
+  const { info, notice } = (result ?? {}) as { info?: unknown; notice?: unknown };
+  if (typeof info === "string" && info) return info;
+  const sent = t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title });
+  // what the server says of the answer, after it was sent (INSP-R13fol R2-1)
+  return typeof notice === "string" && notice ? `${sent} ${notice}` : sent;
 }
 
 /** What the screen says after "Lembrar": sent, already on its way, or — in
@@ -648,6 +805,22 @@ export function awaitingLine(item: Pick<NeedsYouItem, "history" | "awaitingSince
   return `${line} ${t(last.kind === "option" ? "needsYou.screen.awaitingQueuedChoice" : last.kind === "ask" ? "needsYou.screen.awaitingQueuedRequest" : "needsYou.screen.awaitingQueuedMessage", { name })}`;
 }
 
+/** "Delegado ao agente às 14:05" — with the decision it carries and the session, when known (lote del). */
+export function delegatedLine(item: Pick<NeedsYouItem, "delegation">, now: number): string {
+  const delegation = item.delegation!;
+  const parts = [t("needsYou.screen.delegated", { time: answerTime(delegation.at, now) })];
+  if (delegation.option) parts.push(t("needsYou.screen.delegatedOption", { label: delegation.option }));
+  parts.push(delegation.sessionTitle ? t("needsYou.screen.delegatedSession", { title: delegation.sessionTitle }) : t("needsYou.screen.delegatedQueued"));
+  return parts.join(" ");
+}
+
+/** What the screen says after "Delegar a um agente": opened, queued, or the server's word on a second click. */
+export function delegateNotice(item: Pick<NeedsYouItem, "title">, result: unknown): string {
+  const { info, queued } = (result ?? {}) as { info?: string; queued?: boolean };
+  if (info) return info;
+  return t(queued ? "needsYou.screen.delegatedQueuedNotice" : "needsYou.screen.delegatedNotice", { title: item.title });
+}
+
 /** The answer has waited its turn for 2 h: what is queued, for how long, and that the bot is busy elsewhere (INSP-J2 r4 A1). */
 export function stuckLine(item: Pick<NeedsYouItem, "history" | "awaitingSince" | "botName">, now: number): string {
   const last = item.history?.findLast((each) => each.delivered || each.queued);
@@ -663,8 +836,126 @@ export function notDeliveredLine(item: Pick<NeedsYouItem, "history" | "awaitingS
   return t(failed.kind === "option" ? "needsYou.screen.notDeliveredChoice" : failed.kind === "ask" ? "needsYou.screen.notDeliveredRequest" : "needsYou.screen.notDeliveredMessage", values);
 }
 
+/** What the card the conversation stopped on asks, drawn as the chat's
+ * composer draws it: the action, the tool and the exact detail (never cut,
+ * it scrolls), and why it is held. */
+function RequestDetail({ item, request, more }: { item: NeedsYouItem; request: Message; more: number }) {
+  const approval = pendingApprovals([request])[0];
+  const name = request.from?.name ?? item.botName;
+  return (
+    <section className="mt-5 sm:mt-6" aria-labelledby="needs-you-request" data-resolver-request={request.card?.requestId}>
+      <h3 id="needs-you-request" className={sectionHeading}>{t(approval ? "needsYou.approval.heading" : "needsYou.question.heading", { name })}</h3>
+      <div className="mt-2 overflow-hidden rounded-xl border border-accent/40 bg-card">
+        {approval ? (
+          <>
+            <PendingApprovalPanel pending={approval} count={1} index={0} locale={activeLocale()} defaultOpen />
+            {request.card?.tool && (
+              <p data-resolver-request-tool="" className="px-3.5 pb-2.5 text-[12px] text-ink-secondary">
+                <code className="font-mono text-[11.5px] text-ink">{request.card.tool}</code>
+              </p>
+            )}
+          </>
+        ) : (
+          <div className="px-4 py-3">
+            <p className="text-[13.5px] font-medium text-ink">{request.card?.title}</p>
+            {request.card?.subtitle ? (
+              <pre tabIndex={0} className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-ink">{request.card.subtitle}</pre>
+            ) : null}
+          </div>
+        )}
+      </div>
+      {more > 0 && <p data-resolver-request-more="" className="mt-1.5 text-[12px] text-ink-secondary">{t("needsYou.approval.more", { count: more })}</p>}
+    </section>
+  );
+}
+
+/** The steps for a card the conversation stopped on: what to read, what to
+ * choose, and how to close it — never "abra a conversa" when it can be
+ * answered right here. */
+function RequestSteps({ item, request }: { item: NeedsYouItem; request: Message }) {
+  const name = request.from?.name ?? item.botName;
+  const approval = Boolean(request.card?.tool);
+  const answerable = approval || (!request.card?.questionRequest && Boolean(request.card?.options.length));
+  const lines = approval
+    ? [t("needsYou.approval.step1", { name }), t("needsYou.approval.step2"), t("needsYou.approval.step3", { name })]
+    : answerable ? [t("needsYou.question.step1", { name }), t("needsYou.question.step2")] : [t("needsYou.question.openToAnswer")];
+  return (
+    <ol className="mt-2.5 flex flex-col gap-3" data-resolver-request-steps="">
+      {lines.map((line, n) => (
+        <li key={n} className="flex gap-3">
+          <span aria-hidden="true" className="mt-px flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[12px] font-semibold tabular-nums text-accent-text">{n + 1}</span>
+          <p className="min-w-0 flex-1 text-[14px] leading-relaxed text-ink"><span className="sr-only">{t("needsYou.screen.stepNumber", { number: n + 1 })} </span>{line}</p>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+const REQUEST_LOOK: Record<ApprovalChoice["look"], string> = {
+  quiet: quietButton,
+  danger: "inline-flex items-center justify-center gap-1.5 rounded-lg border border-danger/50 px-3.5 py-2 text-[13px] text-danger outline-none hover:bg-danger/10 focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-40",
+  outline: "inline-flex items-center justify-center gap-1.5 rounded-lg border border-hairline px-3.5 py-2 text-[13px] text-ink outline-none hover:bg-raised focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-40",
+  primary: strongButton,
+};
+
+/** The card's own decisions, the ones the chat offers for it (the same list
+ * builds both — approvalChoices): picking one answers the card and the item
+ * leaves; "Negar" is how a request is closed without running it. A
+ * question offers its answers. No shortcut: a stray key never answers. */
+function RequestDecisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; request: Message }) {
+  const { item, request, busy } = props;
+  const approval = pendingApprovals([request])[0];
+  const card = request.card!;
+  const asker = { id: request.from?.botId ?? item.botId, name: request.from?.name ?? item.botName };
+  const choices: Array<{ key: string; label: string; title?: string; look: ApprovalChoice["look"]; disabled?: boolean; choice: RequestChoice }> = approval
+    ? approvalChoices(approval, { bot: asker, ownerOrAdmin: props.ownerOrAdmin ?? null }).map((each) => ({ key: each.id, label: each.label, title: each.title, look: each.look, disabled: each.disabled, choice: { approval: each.id } }))
+    : card.questionRequest ? [] : card.options.map((option, n) => ({ key: `answer-${n}`, label: option, look: n === 0 ? "primary" as const : "outline" as const, choice: { answer: option } }));
+  if (!choices.length) return null;
+  return (
+    <div role="group" aria-labelledby="needs-you-request-decide" data-resolver-request-decisions="" className="mb-2.5">
+      <p id="needs-you-request-decide" className={cn(sectionHeading, "mb-1.5")}>{t("needsYou.screen.decide")}</p>
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {choices.map((each) => (
+          <button
+            key={each.key}
+            type="button"
+            data-resolver-request-choice={each.key}
+            title={each.title}
+            disabled={busy !== null || each.disabled}
+            onClick={() => props.onRequest?.(item, request, each.choice, each.label)}
+            className={cn(REQUEST_LOOK[each.look], each.look === "quiet" && "mr-auto")}
+          >
+            {busy === `request:${each.key}` ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : null}
+            {each.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
   const { item, busy, now } = props;
+  // a bot's bare question the server asked it to register as an item (lot J2): it is coming, and the question stays answerable
+  if (!item.pendingId && !item.approval && item.stepsRequestedAt) {
+    const asking = now - item.stepsRequestedAt < STEPS_ASK_AGAIN_AFTER_MS;
+    return (
+      <div className="mt-2.5 rounded-xl border border-dashed border-hairline/80 px-4 py-3.5" {...(asking ? { "data-resolver-steps-asking": "" } : {})}>
+        <p role="status" className="flex items-start gap-2 text-[13.5px] leading-relaxed text-ink">
+          {asking
+            ? <Loader2 size={15} aria-hidden="true" className="mt-0.5 shrink-0 animate-spin text-accent-text motion-reduce:animate-none" />
+            : <Sparkles size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-text" />}
+          <span>{asking ? t("needsYou.steps.askingQuestion", { name: item.botName }) : t("needsYou.steps.noAnswerQuestion", { name: item.botName, age: waitingAge(item.stepsRequestedAt, now) })}</span>
+        </p>
+        {!asking && (
+          <button type="button" data-resolver-ask-steps="" disabled={busy !== null} onClick={() => props.onAskSteps(item)} className={cn(quietButton, "mt-3")}>
+            {busy === "steps" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <ListChecks size={14} aria-hidden="true" />}
+            {t("needsYou.steps.askAgain")}
+          </button>
+        )}
+      </div>
+    );
+  }
   if (!item.pendingId) {
     return (
       <p className="mt-2 max-w-[68ch] text-[14px] leading-relaxed text-ink">
@@ -705,7 +996,7 @@ export const STEPS_ASK_AGAIN_AFTER_MS = 15 * 60_000;
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own
  * loading and error state. */
-export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve }: {
+export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve, onDelegate, onUnsupersede, onRequest }: {
   open: boolean;
   items: NeedsYouItem[];
   initialKey?: string | null;
@@ -722,7 +1013,13 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   /** Reminds the bot of an answered item it let go silent; `deduped` when one is already on its way. */
   onRemind?: (item: NeedsYouItem) => Promise<{ deduped: boolean; info?: string }>;
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
+  /** "Delegar a um agente" (lote del): the server opens a session for the item. */
+  onDelegate?: (item: NeedsYouItem) => Promise<unknown>;
+  onUnsupersede?: (item: NeedsYouItem) => Promise<unknown>;
+  /** Answers the card the conversation stopped on, the way the chat does. */
+  onRequest?: (item: NeedsYouItem, request: Message, choice: RequestChoice) => Promise<unknown>;
 }) {
+  const ownerOrAdmin = useOwnerOrAdmin();
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
   const [fallbackIndex, setFallbackIndex] = useState(0);
   const [botFilter, setBotFilter] = useState<string | null>(null);
@@ -738,6 +1035,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   const [noticeTone, setNoticeTone] = useState<"success" | "info">("success");
   const [copied, setCopied] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
+  // folded, unless the screen opens on one of them (the sidebar's "Talvez já resolvido" line)
+  const [showMaybeResolved, setShowMaybeResolved] = useState(() => items.some((each) => needsYouKey(each) === initialKey && maybeResolved(each)));
   const dialogRef = useRef<HTMLDivElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -770,7 +1069,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     return () => clearTimeout(timer);
   }, [notice]);
 
-  const selection = resolverSelection({ items, botFilter, sort, now, selectedKey, fallbackIndex });
+  const selection = resolverSelection({ items, botFilter, sort, now, selectedKey, fallbackIndex, showMaybeResolved });
   const current = selection.item;
   const currentKey = current ? needsYouKey(current) : null;
   const draft = currentKey ? drafts[currentKey] ?? "" : "";
@@ -821,10 +1120,11 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     if (!text) return;
     const resolve = Boolean(item.pendingId) && resolveOnSend;
     void run("reply", async () => {
-      await onReply(item, text, resolve);
+      const result = await onReply(item, text, resolve);
       // the draft goes only once the bot has it: a failed send keeps it
       setDrafts((all) => ({ ...all, [key]: "" }));
-    }, t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title }));
+      return result;
+    }, (result) => replyNotice(item, resolve, result));
   };
 
   // focus: into the screen on open, kept inside while open, back to the opener on close
@@ -926,10 +1226,20 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
+          onDelegate={onDelegate ? (item) => void run("delegate", () => onDelegate(item), (result) => delegateNotice(item, result)) : undefined}
+          onUnsupersede={onUnsupersede ? (item) => void run("unsupersede", () => onUnsupersede(item), t("needsYou.screen.unsuperseded", { title: item.title })) : undefined}
           onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => remindNotice(item, result))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}
           onDismissNotice={() => setNotice(null)}
+          showMaybeResolved={showMaybeResolved}
+          onToggleMaybeResolved={() => setShowMaybeResolved((open) => !open)}
+          ownerOrAdmin={ownerOrAdmin}
+          onRequest={onRequest ? (item, request, choice, label) => void run(
+            `request:${"approval" in choice ? choice.approval : `answer-${request.card?.options.indexOf(choice.answer) ?? 0}`}`,
+            () => onRequest(item, request, choice),
+            requestNotice(item, request, choice, label),
+          ) : undefined}
         />
       </div>
     </div>,
