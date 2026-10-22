@@ -291,8 +291,9 @@ export function createTaskRoutes(deps: TaskRouteDeps): RouteHandler {
         const widensMode = approvalModeWidens(approvalModeFor(current), nextMode);
         const nextAllow = profile.alwaysAllow ?? [];
         const widensAllow = nextAllow.some((key) => !(current.alwaysAllow ?? []).includes(key));
-        // Full has no OMB-side guard here; the narrower levels keep this one.
-        if (nextMode !== "full" && (widensMode || widensAllow) && auth.kind === "loopback" && !DESKTOP_MANAGED && !req.headers.origin && store.bots.some((bot) => bot.busy)) {
+        // This fork: no level is exempt from this guard, Full included
+        // (upstream drops it for Full, Oct 12).
+        if ((widensMode || widensAllow) && auth.kind === "loopback" && !DESKTOP_MANAGED && !req.headers.origin && store.bots.some((bot) => bot.busy)) {
           return json(res, 409, { error: "Change approval mode from the app or a paired device while bots are working." });
         }
         const task = store.refreshTaskPermissions(profile.id, m[2]);
@@ -313,7 +314,6 @@ export function createTaskRoutes(deps: TaskRouteDeps): RouteHandler {
         if (body.archivedAt === null) patch.archivedAt = undefined;
         else if (typeof body.archivedAt === "number" && Number.isFinite(body.archivedAt) && body.archivedAt >= 0) {
           patch.archivedAt = body.archivedAt;
-          deps.retireThreadWork?.(m[1], m[2], "arquivada");
         }
         else return json(res, 400, { error: "archivedAt must be a timestamp, or null to unarchive" });
       }
@@ -382,6 +382,11 @@ export function createTaskRoutes(deps: TaskRouteDeps): RouteHandler {
         }, patch.modelSelection, body.updateBotDefault === true, body.resetApprovalToAsk === true, body.requireAvailableModel === true);
         if (!checked.ok) return json(res, checked.status, { error: checked.error });
       }
+      // This fork: archiving ends the conversation's work before it leaves
+      // the list (its goal and watches stop, its Claude Code sessions report
+      // to the main conversation, the owner is spoken to elsewhere). Only an
+      // accepted change does: every refusal above has already answered.
+      if (typeof body.archivedAt === "number") deps.retireThreadWork?.(m[1], m[2], "arquivada");
       const task = patch.modelSelection
         ? store.switchTaskModel(m[1], m[2], patch.modelSelection, body.updateBotDefault === true, body.resetApprovalToAsk === true,
           { ...patch, ...hostedModels?.resetTask(current.modelSelection, patch.modelSelection) })!

@@ -123,6 +123,46 @@ describe("peer approval card lifecycle", () => {
     expect(store.bot(from.id)?.activity).toBe("working");
   });
 
+  it("keeps a thread waiting until all simultaneous peer approvals are settled", async () => {
+    store.setTaskActivity(from.id, from.threadId, "working");
+    const otherTarget = store.patchBot(store.createBot().id, { name: "Second helper" })!;
+    const first = requestPeerApproval(bus, from, target, "Review the first part", "delegate_bot");
+    const second = requestPeerApproval(bus, from, otherTarget, "Review the second part", "delegate_bot");
+    const cards = store.messagesFor(from.threadId).filter(message => message.card?.requestId);
+    expect(cards).toHaveLength(2);
+    expect(store.taskByThread(from.id, from.threadId)?.activity).toBe("waiting-on-you");
+
+    resolvePeerComms(bus, cards[0]!.card!.requestId!, "allow");
+    await expect(first).resolves.toBe("allow");
+    expect(store.messagesFor(from.threadId).find(message => message.id === cards[1]!.id)?.card?.answered).toBeUndefined();
+    expect(store.taskByThread(from.id, from.threadId)?.activity).toBe("waiting-on-you");
+    expect(store.bot(from.id)?.activity).toBe("waiting-on-you");
+
+    resolvePeerComms(bus, cards[1]!.card!.requestId!, "deny");
+    await expect(second).resolves.toBe("deny");
+    expect(store.taskByThread(from.id, from.threadId)?.activity).toBe("working");
+    expect(pendingCard(store, from)).toBeUndefined();
+  });
+
+  it("keeps a room waiting when one peer request is cancelled but another still needs a decision", async () => {
+    const otherTarget = store.patchBot(store.createBot().id, { name: "Second helper" })!;
+    const room = store.createGroup("Review", [from.id, target.id, otherTarget.id], false);
+    store.setActivity(from.id, "working");
+    const first = requestPeerApproval(bus, from, target, "First part", "delegate_bot", room.threadId);
+    const second = requestPeerApproval(bus, from, otherTarget, "Second part", "delegate_bot", room.threadId);
+    const cards = store.messagesFor(room.threadId).filter(message => message.card?.requestId);
+    expect(cards).toHaveLength(2);
+
+    cancelPeerApprovalsFor(target.id);
+    await expect(first).resolves.toBe("cancelled");
+    expect(store.bot(from.id)?.activity).toBe("waiting-on-you");
+    expect(store.messagesFor(room.threadId).find(message => message.id === cards[1]!.id)?.card?.answered).toBeUndefined();
+
+    resolvePeerComms(bus, cards[1]!.card!.requestId!, "allow");
+    await expect(second).resolves.toBe("allow");
+    expect(store.bot(from.id)?.activity).toBe("working");
+  });
+
   it("answers task A's approval after switching to B without unblocking B", async () => {
     const threadA = from.threadId;
     const taskB = store.createTask(from.id, "Independent B", true)!;

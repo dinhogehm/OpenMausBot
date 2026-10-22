@@ -27,6 +27,7 @@ import {
   containerComputerStatus,
   containerRuntimeStatus,
   containerRunArgs,
+  hostTimeZone,
   dockerSecurityIsHardened,
   localVmRecreatableAfterStop,
   localVmRecreatableOnDemand,
@@ -651,6 +652,70 @@ describe("containerComputerStatus", () => {
     expect(status.viewer_url).toContain("#autoconnect=true&resize=scale&password=secret123");
   });
 
+  function flakyRunner(responses: Record<string, string | Error>, flaky: Record<string, Array<string | Error>>) {
+    const base = runner(responses);
+    const run: CommandRunner = async (command, args, timeout) => {
+      const key = [command, ...args].join(" ");
+      const queue = flaky[key];
+      if (queue && queue.length > 0) {
+        base.calls.push(key);
+        const next = queue.shift()!;
+        if (next instanceof Error) throw next;
+        return { stdout: next };
+      }
+      return base.run(command, args, timeout);
+    };
+    return { calls: base.calls, run };
+  }
+
+  const readyResponses = () => ({
+    "/usr/bin/which docker": "docker\n",
+    "/usr/bin/which podman": new Error("missing"),
+    "docker info --format {{.ServerVersion}}": "29\n",
+    [`docker image inspect ${IMAGE}`]: preparedImageInspect(),
+    [`docker inspect ${CONTAINER}`]: readyInspect(),
+    [versionProbe]: `cua-driver ${CUA_DRIVER_VERSION}\n`,
+    [statusProbe]: "running\n",
+    [healthProbe]: JSON.stringify({ schema_version: "1", overall: "ok", checks: [] }),
+    [readinessProbe]: "{}\n",
+    [readinessRead]: validPng.toString("base64"),
+    [`docker exec ${CONTAINER} tail -n 4 /var/log/supervisor/cua-driver.error.log`]: "",
+  });
+
+  it("retries an empty or timed-out driver version answer before reporting a problem", async () => {
+    const fake = flakyRunner(readyResponses(), {
+      [versionProbe]: [new Error("timed out"), "\n"],
+    });
+    const status = await containerComputerStatus(fake.run, "linux");
+    expect(status.ready).toBe(true);
+    expect(fake.calls.filter((call) => call === versionProbe)).toHaveLength(3);
+  });
+
+  it("reports 'expected cua-driver' only when the driver answers a different version", async () => {
+    const fake = runner({ ...readyResponses(), [versionProbe]: "cua-driver 0.19.0\n" });
+    const status = await containerComputerStatus(fake.run, "linux");
+    expect(status.desktop_error).toContain(`expected cua-driver ${CUA_DRIVER_VERSION}`);
+    expect(fake.calls.filter((call) => call === versionProbe)).toHaveLength(1);
+  });
+
+  it("does not claim a version mismatch when the driver never answers", async () => {
+    const fake = runner({ ...readyResponses(), [versionProbe]: new Error("timed out") });
+    const status = await containerComputerStatus(fake.run, "linux");
+    expect(status.desktop_error).not.toContain("expected cua-driver");
+    expect(status.desktop_error).toContain("did not answer");
+  });
+
+  it("does not fall back to the setup steps when an image inspect is briefly slow", async () => {
+    const fake = flakyRunner(readyResponses(), {
+      [`docker image inspect ${IMAGE}`]: [new Error("timed out")],
+      [`docker inspect ${CONTAINER}`]: [new Error("timed out")],
+    });
+    const status = await containerComputerStatus(fake.run, "linux");
+    expect(status.image).toBe(true);
+    expect(status.imageMatches).toBe(true);
+    expect(status.ready).toBe(true);
+  });
+
   it("can inspect the viewer without waiting for CUA health or screenshots", async () => {
     const fake = runner({
       "/usr/bin/which docker": "docker\n",
@@ -808,7 +873,7 @@ describe("Cua integration", () => {
     expect(dockerfile).toContain("6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2");
     expect(dockerfile).toContain("/usr/local/share/licenses/noto-cjk/OFL.txt");
     expect(dockerfile).toContain("fc-cache -f");
-    expect(IMAGE_LAYER_VERSION).toBe("5");
+    expect(IMAGE_LAYER_VERSION).toBe("6");
   });
 
   it("rejects a zero-byte OpenSSL base image before the wheel download needs curl", () => {
@@ -917,8 +982,13 @@ describe("containerComputerAction", () => {
       }),
       [`docker rm -f ${CONTAINER}`]: "",
     });
+    const cp = fake.run;
+    const run: CommandRunner = async (command, args, timeout) => {
+      if (command === "docker" && args[0] === "cp") throw new Error("Could not find the file /home/cua/.mozilla in container");
+      return cp(command, args, timeout);
+    };
 
-    await containerComputerAction("remove", fake.run, "linux");
+    await containerComputerAction("remove", run, "linux");
 
     expect(fake.calls).toContain(`docker rm -f ${CONTAINER}`);
   });
@@ -1001,6 +1071,30 @@ describe("setupCommands", () => {
     expect(args).not.toContain("--userns");
     expect(args).not.toContain("--user");
     expect(command).not.toContain("relabel=");
+  });
+
+  it("creates each desktop in the host's time zone", () => {
+    const target = perBotLocalVmTarget("bot-a");
+    for (const runtime of ["docker", "podman"] as const) {
+      const args = containerRunArgs(runtime, "secret", target, "America/Sao_Paulo");
+      const at = args.indexOf("TZ=America/Sao_Paulo");
+      expect(at).toBeGreaterThan(0);
+      expect(args[at - 1]).toBe("-e");
+      expect(at).toBeLessThan(args.indexOf(IMAGE));
+    }
+    expect(containerRunArgs("container", "secret", SHARED_LOCAL_VM_TARGET, "Europe/Lisbon")).toContain("TZ=Europe/Lisbon");
+    expect(containerRunArgs("docker", "secret", target, null).some((arg) => arg.startsWith("TZ="))).toBe(false);
+  });
+
+  it("passes on only a well-formed IANA zone name", () => {
+    expect(hostTimeZone("America/Sao_Paulo")).toBe("America/Sao_Paulo");
+    expect(hostTimeZone("America/Argentina/Buenos_Aires")).toBe("America/Argentina/Buenos_Aires");
+    expect(hostTimeZone("Etc/GMT+3")).toBe("Etc/GMT+3");
+    expect(hostTimeZone("UTC")).toBe("UTC");
+    for (const bad of ["", "../../etc/passwd", "America/../../x", "/etc/localtime", "Zone with space", "A;rm -rf", "x".repeat(65)]) {
+      expect(hostTimeZone(bad)).toBeNull();
+    }
+    expect(hostTimeZone()).toBe(hostTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone));
   });
 
   it("does not invent Docker commands when no runtime was detected", () => {

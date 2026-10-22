@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CcSessionLedger } from "./cc-sessions.ts";
-import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, START_RETRY_MS, startGate, startPriority, type DrainDeps, type QueuedStart, type StartResult } from "./cc-start-queue.ts";
+import * as atomic from "./atomic.ts";
+import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, START_RETRY_MAX_MS, START_RETRY_MS, startGate, startPriority, type DrainDeps, type QueuedStart, type StartResult } from "./cc-start-queue.ts";
 
 const item = (id: string, title: string, at: number, botId = "chief", extra: Partial<QueuedStart> = {}): QueuedStart =>
   ({ id, botId, threadId: "t", body: { title }, title, priority: startPriority(title), at, ...extra });
@@ -154,10 +155,227 @@ describe("the queue of session starts", () => {
       expect(errors).not.toHaveBeenCalled();
       expect(existsSync(join(dir, "missing.json"))).toBe(false);
     });
+
+    it("rejects a start before publishing its receipt or in-memory place when the durable write fails", () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const blockedParent = join(dir, "not-a-directory");
+      const path = join(blockedParent, "cc-start-queue.json");
+      const queue = new CcStartQueue(path);
+      writeFileSync(blockedParent, "fixture obstruction");
+
+      expect(() => queue.add(item("not-durable", "Pending task", 1))).toThrow();
+      expect(queue.ordered()).toEqual([]);
+      expect(new CcStartQueue(path).ordered()).toEqual([]);
+    });
+
+    it("does not restore a record missing its title or let it break later queue admission", () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const path = join(dir, "cc-start-queue.json");
+      const valid = item("valid", "Existing task", 1);
+      const { title: _title, ...missingTitle } = item("malformed", "Incomplete task", 2);
+      writeFileSync(path, JSON.stringify({ items: [missingTitle, valid] }));
+
+      const queue = new CcStartQueue(path);
+      expect(queue.ordered()).toEqual([valid]);
+      expect(errors).toHaveBeenCalled();
+      expect(queue.add(item("next", "New task", 3))).toEqual({ position: 2, id: "next", duplicate: false });
+      expect(new CcStartQueue(path).ordered().map((entry) => entry.id)).toEqual(["valid", "next"]);
+    });
+
+    it.each(["promotion", "take", "remove", "expire", "restore"] as const)(
+      "preserves memory and disk when %s cannot be persisted",
+      (operation) => {
+        const path = join(dir, "cc-start-queue.json");
+        const queue = new CcStartQueue(path);
+        const first = item("first", "Existing task", 1, "chief", { failingSince: 0 });
+        queue.add(first);
+        queue.add(item("second", "Next task", 2));
+        const memoryBefore = structuredClone(queue.ordered());
+        const diskBefore = readFileSync(path, "utf8");
+        const failure = new Error("fixture-disk-full");
+        const write = vi.spyOn(atomic, "writeFileAtomic").mockImplementation(() => { throw failure; });
+        const mutate = () => {
+          switch (operation) {
+            case "promotion": return queue.add(item("duplicate", "Existing task", 3, "chief", { priority: 0 }));
+            case "take": return queue.take();
+            case "remove": return queue.remove("chief", first.id);
+            case "expire": return queue.expire(START_RETRY_MAX_MS + 1);
+            case "restore": return queue.restore({ ...first, retryAt: 12345, lastReason: "retry later" });
+          }
+        };
+
+        expect(mutate).toThrow(failure);
+        expect(queue.ordered()).toEqual(memoryBefore);
+        expect(readFileSync(path, "utf8")).toBe(diskBefore);
+        write.mockRestore();
+        expect(new CcStartQueue(path).ordered()).toEqual(memoryBefore);
+      },
+    );
+
+    it("does not start external work when claiming its queued item cannot be persisted", () => {
+      const path = join(dir, "cc-start-queue.json");
+      const queue = new CcStartQueue(path);
+      queue.add(item("first", "Existing task", 1));
+      const diskBefore = readFileSync(path, "utf8");
+      vi.spyOn(atomic, "writeFileAtomic").mockImplementation(() => { throw new Error("fixture-disk-full"); });
+      const start = vi.fn<DrainDeps["start"]>();
+      const report = vi.fn<DrainDeps["report"]>();
+      const chip = vi.fn<DrainDeps["chip"]>();
+
+      expect(() => drainStartQueue(queue, { ...world().deps, start, report, chip })).toThrow("fixture-disk-full");
+      expect(start).not.toHaveBeenCalled();
+      expect(report).not.toHaveBeenCalled();
+      expect(chip).not.toHaveBeenCalled();
+      expect(readFileSync(path, "utf8")).toBe(diskBefore);
+      expect(queue.ordered().map((entry) => entry.id)).toEqual(["first"]);
+    });
   });
 });
 
 describe("opening queued starts", () => {
+  it.each(["busy", "retry"] as const)(
+    "keeps the durable claim without replay when restoring a %s start fails",
+    (outcome) => {
+      const dir = mkdtempSync(join(tmpdir(), "omb-startq-claim-"));
+      const path = join(dir, "cc-start-queue.json");
+      const w = world();
+      const queued = item("reserved", "P1 pending task", w.now, "chief", { failingSince: w.now });
+      const queue = new CcStartQueue(path);
+      queue.add(queued);
+      const realWrite = atomic.writeFileAtomic;
+      const start = vi.fn<DrainDeps["start"]>(() => ({ status: 409, body: { error: "not started" }, [outcome]: true }));
+      try {
+        const write = vi.spyOn(atomic, "writeFileAtomic").mockImplementation((target, data, options) => {
+          const persisted = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)) as { items: Array<QueuedStart & { dispatching?: boolean }> };
+          if (persisted.items.some((entry) => entry.id === queued.id && entry.dispatching !== true)) {
+            throw new Error("fixture-restore-failed");
+          }
+          realWrite(target, data, options);
+        });
+
+        expect(() => drainStartQueue(queue, { ...w.deps, start })).toThrow("fixture-restore-failed");
+        expect(start).toHaveBeenCalledTimes(1);
+        expect(queue.ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+        write.mockRestore();
+
+        const restored = new CcStartQueue(path);
+        expect(restored.ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+        expect(restored.urgentCount()).toBe(0);
+        const later = w.now + START_RETRY_MAX_MS + 1;
+        expect(restored.expire(later)).toEqual([]);
+        drainStartQueue(restored, { ...w.deps, now: () => later, start });
+        expect(start).toHaveBeenCalledTimes(1);
+        expect(new CcStartQueue(path).ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+      } finally {
+        vi.restoreAllMocks();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([200, 400])("keeps the claim durable during dispatch and removes it only after terminal status %s", (status) => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-startq-terminal-"));
+    const path = join(dir, "cc-start-queue.json");
+    const queue = new CcStartQueue(path);
+    const w = world();
+    const queued = item("terminal", "A task", w.now);
+    queue.add(queued);
+    const start = vi.fn<DrainDeps["start"]>(() => {
+      expect(queue.ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+      expect(new CcStartQueue(path).ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+      return { status, body: { message: status === 200 ? "opened" : "refused" } };
+    });
+    try {
+      drainStartQueue(queue, { ...w.deps, start });
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(queue.ordered()).toEqual([]);
+      const restored = new CcStartQueue(path);
+      expect(restored.ordered()).toEqual([]);
+      drainStartQueue(restored, { ...w.deps, start });
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replay an unconfirmed dispatch after reloading its durable claim", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-startq-uncertain-"));
+    const path = join(dir, "cc-start-queue.json");
+    const queue = new CcStartQueue(path);
+    const w = world();
+    const queued = item("uncertain", "External action", w.now);
+    queue.add(queued);
+    const start = vi.fn<DrainDeps["start"]>(() => { throw new Error("dispatch outcome unknown"); });
+    try {
+      expect(() => drainStartQueue(queue, { ...w.deps, start })).toThrow("dispatch outcome unknown");
+      expect(start).toHaveBeenCalledTimes(1);
+      const restored = new CcStartQueue(path);
+      expect(restored.ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+      drainStartQueue(restored, { ...w.deps, start });
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains an uncertain claim when completion cannot be persisted after a successful external start", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-startq-complete-"));
+    const path = join(dir, "cc-start-queue.json");
+    const queue = new CcStartQueue(path);
+    const w = world();
+    const queued = item("opened", "External session", w.now);
+    queue.add(queued);
+    const realWrite = atomic.writeFileAtomic;
+    const start = vi.fn<DrainDeps["start"]>(() => ({ status: 200, body: { message: "session opened" } }));
+    const report = vi.fn<DrainDeps["report"]>();
+    const chip = vi.fn<DrainDeps["chip"]>();
+    try {
+      const write = vi.spyOn(atomic, "writeFileAtomic").mockImplementation((target, data, options) => {
+        const persisted = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)) as { items: QueuedStart[] };
+        if (!persisted.items.some((entry) => entry.id === queued.id)) throw new Error("fixture-complete-failed");
+        realWrite(target, data, options);
+      });
+      expect(() => drainStartQueue(queue, { ...w.deps, start, report, chip })).toThrow("fixture-complete-failed");
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(report).not.toHaveBeenCalled();
+      expect(chip).not.toHaveBeenCalled();
+      expect(queue.ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+      write.mockRestore();
+      const restored = new CcStartQueue(path);
+      expect(restored.ordered()).toEqual([expect.objectContaining({ id: queued.id, dispatching: true })]);
+      drainStartQueue(restored, { ...w.deps, start, report, chip });
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an uncertain claim visible and refuses cancellation or priority promotion as if it were merely waiting", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-startq-visible-"));
+    const path = join(dir, "cc-start-queue.json");
+    const queue = new CcStartQueue(path);
+    const queued = item("uncertain", "External session", 1);
+    try {
+      queue.add(queued);
+      expect(queue.claim()?.id).toBe(queued.id);
+      const diskBefore = readFileSync(path, "utf8");
+      const listing = queueListing(queue, { id: "chief", chief: true }, (id) => id, MAX);
+      expect(listing).toContain("id uncertain");
+      expect(listing).toContain("resultado do início não confirmado");
+      expect(listing).toContain("não será repetido automaticamente");
+      expect(queue.remove("chief", queued.id)).toBeNull();
+      expect(queue.take()).toBeNull();
+      expect(queue.claim()).toBeNull();
+      expect(queue.add(item("duplicate", queued.title, 2, "chief", { priority: 0 })))
+        .toEqual({ position: 1, id: queued.id, duplicate: true });
+      expect(queue.ordered()).toEqual([expect.objectContaining({ id: queued.id, priority: 2, dispatching: true })]);
+      expect(readFileSync(path, "utf8")).toBe(diskBefore);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not let a new start take the slot a queued P1 waits for (INSP-F F3-a)", () => {
     const w = world();
     w.busy(MAX);

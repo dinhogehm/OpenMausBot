@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, readFileSync, mkdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { runLabeled } from "./loop-stall.ts";
 import { join } from "node:path";
 
 import { writeFileAtomic, writeFileAtomicIfChanged } from "./atomic.ts";
@@ -17,21 +18,18 @@ import { workspaceDir } from "./workspace.ts";
 import type { Destination } from "./surface.ts";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
-import { redactSecretsInText } from "./redact.ts";
-import { scrubbedSkillRequest } from "./skill-request-card.ts";
+import { redactBotAuthored } from "./store-redact.ts";
 import { AVATAR_FOCUS_CENTER, AVATAR_ZOOM_MIN, botAvatarProfile, clampAvatarFocus, clampAvatarZoom } from "../shared/bot-avatar.ts";
-import { approvalModeFor, isApprovalMode, modelSwitchNeedsAsk, type ApprovalMode } from "../shared/approval-mode.ts";
+import { approvalModeFor, isApprovalMode, modelSwitchNeedsAsk, supportsApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
 import { lastChangeRequestUrl } from "../shared/thread-link.ts";
 import { REMOVED_COMPUTER_DRIVER, type ComputerEngineMove } from "./computer-engine-removal.ts";
-import type { ProfileRequestChanges } from "../shared/profile-request.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
 import { isMentionBoundary, isMentionNameContinuation } from "../shared/mention-boundary.ts";
 import type { HandedState } from "./delta-context.ts";
 import type { AgentPart, PartPair, RoomPart } from "./package-parts.ts";
 import type {
-  BotActivity, GroupDefaultResponder, GroupTask as GroupTaskRecord, MausColor,
-  OptionCardData, TaskClosedBy, TaskOpenedBy, TaskUsage, WireBot, WireGroup,
+  BotActivity, GroupDefaultResponder, GroupTask as GroupTaskRecord, MausColor, TaskClosedBy, TaskOpenedBy, TaskUsage, WireBot, WireGroup,
   WireMessage, WireTask, BotProject as BotProjectRecord,
 } from "../shared/wire.ts";
 import { movesThreadToTop } from "../shared/wire.ts";
@@ -113,136 +111,6 @@ function persistedPin<T extends { pinned?: boolean }>(task: T): T {
   return rest as T;
 }
 
-/** Bot-authored text is scrubbed of secrets before it is stored (the transcript replays into every rebuild); what the user typed stays as typed. */
-function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number }>(message: T): T {
-  if (message.role !== "bot") return message;
-  const out = { ...message };
-  if (out.dataResult) out.dataResult = {
-    ...out.dataResult,
-    title: redactSecretsInText(out.dataResult.title),
-    ...(out.dataResult.sql === undefined ? {} : { sql: redactSecretsInText(out.dataResult.sql) }),
-  };
-  if (typeof out.text === "string") out.text = redactSecretsInText(out.text);
-  if (out.compaction) out.compaction = { ...out.compaction, summary: redactSecretsInText(out.compaction.summary) };
-  if (out.tool?.name) {
-    out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
-    if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
-  }
-  if (out.routineRun) {
-    const routineRun = { ...out.routineRun };
-    routineRun.routineName = redactSecretsInText(routineRun.routineName);
-    if (routineRun.summary) routineRun.summary = redactSecretsInText(routineRun.summary);
-    if (routineRun.error) routineRun.error = redactSecretsInText(routineRun.error);
-    out.routineRun = routineRun;
-  }
-  if (out.goalRun) {
-    out.goalRun = {
-      ...out.goalRun,
-      goal: redactSecretsInText(out.goalRun.goal),
-      coordinatorName: redactSecretsInText(out.goalRun.coordinatorName),
-      detail: out.goalRun.detail ? redactSecretsInText(out.goalRun.detail) : undefined,
-    };
-  }
-  if (out.call?.title) out.call = { ...out.call, title: redactSecretsInText(out.call.title) };
-  if (out.card) {
-    const card = { ...out.card } as OptionCardData & { summary?: string };
-    card.title = redactSecretsInText(card.title);
-    if (typeof card.subtitle === "string") card.subtitle = redactSecretsInText(card.subtitle);
-    if (typeof card.summary === "string") card.summary = redactSecretsInText(card.summary);
-    if (typeof card.held === "string") card.held = redactSecretsInText(card.held);
-    if (typeof card.answeredText === "string") card.answeredText = redactSecretsInText(card.answeredText);
-    if (card.commandAllowlist && (
-      redactSecretsInText(card.commandAllowlist.command) !== card.commandAllowlist.command ||
-      redactSecretsInText(card.commandAllowlist.cwd) !== card.commandAllowlist.cwd
-    )) delete card.commandAllowlist;
-    if (card.questionRequest) {
-      card.questionRequest = {
-        ...card.questionRequest,
-        questions: card.questionRequest.questions.map((question) => ({
-          ...question,
-          question: redactSecretsInText(question.question),
-          ...(question.header ? { header: redactSecretsInText(question.header) } : {}),
-          options: question.options.map((option) => ({
-            ...option,
-            label: redactSecretsInText(option.label),
-            ...(option.description ? { description: redactSecretsInText(option.description) } : {}),
-          })),
-        })),
-      };
-    }
-    if (card.routineRequest) {
-      const operation = card.routineRequest.operation;
-      card.routineRequest = {
-        ...card.routineRequest,
-        operation: operation.action === "create"
-          ? {
-              ...operation,
-              routine: {
-                ...operation.routine,
-                name: redactSecretsInText(operation.routine.name),
-                instructions: redactSecretsInText(operation.routine.instructions),
-              },
-            }
-          : operation.action === "update"
-            ? {
-                ...operation,
-                changes: {
-                  ...operation.changes,
-                  ...(typeof operation.changes.name === "string"
-                    ? { name: redactSecretsInText(operation.changes.name) }
-                    : {}),
-                  ...(typeof operation.changes.instructions === "string"
-                    ? { instructions: redactSecretsInText(operation.changes.instructions) }
-                    : {}),
-                },
-              }
-            : { ...operation },
-      };
-    }
-    if (card.skillRequest) card.skillRequest = scrubbedSkillRequest(card.skillRequest);
-    if (card.profileRequest) {
-      const scrubChanges = (changes: ProfileRequestChanges): ProfileRequestChanges => {
-        const out = { ...changes };
-        for (const [key, value] of Object.entries(changes)) {
-          if (typeof value === "string") (out as Record<string, string | boolean>)[key] = redactSecretsInText(value);
-        }
-        return out;
-      };
-      card.profileRequest = {
-        ...card.profileRequest,
-        targetName: redactSecretsInText(card.profileRequest.targetName),
-        reason: redactSecretsInText(card.profileRequest.reason),
-        before: scrubChanges(card.profileRequest.before),
-        changes: scrubChanges(card.profileRequest.changes),
-      };
-    }
-    out.card = card;
-  }
-  if (out.connector) {
-    out.connector = {
-      ...out.connector,
-      label: redactSecretsInText(out.connector.label),
-      description: redactSecretsInText(out.connector.description),
-      error: out.connector.error ? redactSecretsInText(out.connector.error) : undefined,
-    };
-  }
-  if (out.secret) {
-    out.secret = {
-      ...out.secret,
-      label: redactSecretsInText(out.secret.label),
-      description: redactSecretsInText(out.secret.description),
-      error: out.secret.error ? redactSecretsInText(out.secret.error) : undefined,
-    };
-  }
-  if (out.signIn) {
-    out.signIn = {
-      ...out.signIn,
-      reason: out.signIn.reason ? redactSecretsInText(out.signIn.reason) : undefined,
-      error: out.signIn.error ? redactSecretsInText(out.signIn.error) : undefined,
-    };
-  }
-  return out;
-}
 
 export const ACTIVITY_BUSY: ReadonlySet<BotActivity> = new Set(["working", "waiting-on-you", "no-signal"]);
 
@@ -264,6 +132,26 @@ export const UNTITLED_THREAD = "New thread";
 const TASK_TITLE_MAX = 80;
 export function threadTitleFrom(title?: string): string {
   return title?.trim().slice(0, TASK_TITLE_MAX) || UNTITLED_THREAD;
+}
+
+/** A task's name, taken from the first thing you asked it to do. */
+/** The words of a "yes", "OK", "got it" or "thanks" in Chinese and Japanese, and the particles around them. */
+const CJK_ACK = /ありがとう|ありがと|ございました|ございます|どうも|はい|了解|承知|しました|かしこまりました|わかりました|分かりました|大丈夫|です|ます|お願いします|よろしく|谢谢|謝謝|多谢|多謝|感谢|感謝|收到|好的|没问题|沒問題|没事|知道了|明白|可以|[好行嗯了啊吧呢哦呀你的ねよなぁ]/gu;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+/** A first message too short to name what the conversation is about: one
+ * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
+ * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
+export function tooShortToTitle(text: string): boolean {
+  // a script written without spaces (Chinese, Japanese) counts its characters: three name it ("写测试", "直して");
+  // a "yes", "OK", "got it" or "thanks" in any of its forms ("はい", "ありがとうございました", "收到了谢谢") never does.
+  // Korean is spaced like pt-BR (INSP-R13VIS A7, B4, C4)
+  const cjk = text.match(CJK) ?? [];
+  if (cjk.length) {
+    if (!(text.replace(CJK_ACK, "").match(CJK) ?? []).length) return true;
+    // beyond a "yes" and its particles, a verb is left: "好，改", "做吧" ask (INSP-R13VIS round 4)
+    if (cjk.length >= 2) return false;
+  }
+  return (text.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
 }
 
 export function titleFromMessage(text: string): string {
@@ -432,6 +320,8 @@ export function pruneRoomHolds(group: Pick<GroupRecord, "memberIds" | "holds" | 
 function taskCountsAsBotUnread(task: { unread?: boolean; routineRunId?: string }): boolean {
   return Boolean(task.unread) && !task.routineRunId;
 }
+
+const touch = (t: ThreadState) => { t.rev = (t.rev ?? 0) + 1; };
 
 export class Store {
   bots: BotRecord[] = [];
@@ -961,7 +851,7 @@ export class Store {
   private emit(change: StoreChange) {
     for (const listener of Array.from(this.listeners)) {
       try {
-        listener(change);
+        runLabeled(`store ${change.type}`, () => listener(change));
       } catch (error) {
         console.error("store: change listener threw", error);
       }
@@ -1313,8 +1203,11 @@ export class Store {
     return this.thread(threadId).activeLeafId;
   }
 
+  /** Every turn-completed listener walks it: on a 20k-message thread the rebuild is memoised until the tree changes. */
   activePath(threadId: string): Message[] {
     const t = this.thread(threadId);
+    const memo = t.pathMemo;
+    if (memo && memo.rev === (t.rev ?? 0) && memo.length === t.messages.length && memo.leaf === t.activeLeafId) return memo.path.slice();
     const byId = new Map(t.messages.map((m) => [m.id, m]));
     const path: Message[] = [];
     let cur = t.activeLeafId ? byId.get(t.activeLeafId) : undefined;
@@ -1322,7 +1215,9 @@ export class Store {
       path.push(cur);
       cur = cur.parentId ? byId.get(cur.parentId) : undefined;
     }
-    return path.reverse();
+    path.reverse();
+    t.pathMemo = { rev: t.rev ?? 0, length: t.messages.length, leaf: t.activeLeafId, path };
+    return path.slice();
   }
 
   markTerminalAssistantMessage(threadId: string, turnId: string): Message | null {
@@ -1345,6 +1240,7 @@ export class Store {
     if (committed.id !== full.id) return committed;
     t.messages.push(full);
     t.activeLeafId = full.id;
+    touch(t);
     if (full.kind === "screen") {
       for (const pruned of this.pruneScreenFrames(t)) {
         mdb.updateMessage(threadId, pruned);
@@ -1364,6 +1260,7 @@ export class Store {
     const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message), parentId: anchorId };
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);
+    touch(t);
     mdb.insertMessage(threadId, full);
     if (full.kind === "screen") {
       for (const pruned of this.pruneScreenFrames(t)) {
@@ -1420,6 +1317,7 @@ export class Store {
     };
     t.messages.push(full);
     t.activeLeafId = full.id;
+    touch(t);
     mdb.appendMessage(threadId, full);
     this.noteThreadActivity(threadId, full.at, true);
     this.emit({ type: "message", threadId, message: full });
@@ -1431,13 +1329,17 @@ export class Store {
   setActiveLeaf(threadId: string, messageId: string): string | null {
     const t = this.thread(threadId);
     if (!t.messages.some((m) => m.id === messageId)) return null;
-    let cur = messageId;
-    for (;;) {
-      const children = t.messages.filter((m) => m.parentId === cur);
-      if (!children.length) break;
-      cur = children.reduce((a, b) => (b.at >= a.at ? b : a)).id;
+    // One pass builds the children index: a filter per level was O(depth × messages) on a long thread.
+    const newestChild = new Map<string, Message>();
+    for (const m of t.messages) {
+      if (!m.parentId) continue;
+      const seen = newestChild.get(m.parentId);
+      if (!seen || m.at >= seen.at) newestChild.set(m.parentId, m);
     }
+    let cur = messageId;
+    for (let next = newestChild.get(cur); next; next = newestChild.get(cur)) cur = next.id;
     t.activeLeafId = cur;
+    touch(t);
     mdb.setActiveLeaf(threadId, cur);
     this.emit({ type: "thread", threadId, activeLeafId: cur });
     return cur;
@@ -1455,6 +1357,7 @@ export class Store {
     if (!applied) return committed;
     if (!movesThreadToTop(t.messages[idx]) && movesThreadToTop(next)) this.noteThreadActivity(threadId, next.at, true, next.turnCompletedAt ?? next.at);
     t.messages[idx] = next;
+    touch(t);
     this.emit({ type: "message.patch", threadId, message: next });
     return next;
   }
@@ -1554,12 +1457,17 @@ export class Store {
         next = { id: operation.botId, threadId: operation.threadId, name: operation.fields.name,
           title: "", description: "", soul: "", notifications: true, color: COLORS[nextBots.length % COLORS.length], unread: false,
           resumeCursors: {}, createdAt, ...operation.fields, modelSelection,
-          autoApprove: false, composio: false, approvePeerComms: false,
-          // Absent would mean every tool once connected apps are turned on.
+          // fork: a Chief's new teammate saves Ask, on the bot and on its
+          // first thread, whatever the no-level default is. Upstream
+          // 593fd1c5a dropped this so teammates followed its Full default.
+          approvalMode: "ask", autoApprove: false, composio: false, approvePeerComms: false,
+          // No connector tools until someone grants them. An absent record
+          // would mean every tool once connected apps are turned on.
           connectorTools: {},
           // A restricted Chief never creates a bot everyone sees.
           ...(chief.visibility && chief.visibility !== "everyone" ? { visibility: structuredClone(chief.visibility) } : {}),
           tasks: [{ threadId: operation.threadId, title: UNTITLED_THREAD, createdAt, updatedAt: createdAt, resumeCursors: {},
+            approvalMode: "ask", autoApprove: false,
             unread: false, activity: "idle", busy: false }],
         };
         if (!next.cwd) delete next.cwd;
@@ -1605,6 +1513,23 @@ export class Store {
     return Boolean(thread) && modelSwitchNeedsAsk(approvalModeFor(thread!), this.driverKindOf(from.instanceId), this.driverKindOf(to.instanceId));
   }
 
+  /** The level a thread lands on when it moves onto its bot's own model and
+   * the level it had would need confirming there: the bot's own saved level
+   * — one the person set for this bot, on this engine, through the trusted
+   * channel — instead of Ask. Never a grant still pending (it reads as Ask),
+   * never a level the engine does not implement: Ask then, as before. */
+  private botLevelOnItsEngine(bot: BotRecord): Pick<TaskRecord, "approvalMode" | "autoApprove" | "alwaysAllow"> {
+    // a thread-only grant belongs to one thread; the bot's own level is what stays saved
+    const mode = approvalModeFor({ approvalMode: bot.approvalMode, autoApprove: bot.autoApprove, approvalGrant: bot.approvalGrant?.threadOnly ? undefined : bot.approvalGrant });
+    if (mode === "ask" || !supportsApprovalMode(this.driverKindOf(bot.modelSelection.instanceId), mode)) return structuredClone(ASK_NOW);
+    return { approvalMode: mode, autoApprove: mode === "auto", alwaysAllow: structuredClone(bot.alwaysAllow ?? []) };
+  }
+
+  /** A bot's threads as a change of its model to `next` leaves them. Each
+   * keeps the level it runs at now (older threads may still inherit the
+   * bot's, which may change in the same write); one that follows the bot
+   * moves with it, back to Ask where the new engine would have to confirm
+   * its level; a thread's own model stays. */
   private withDefaultModel(bot: BotRecord, next: ModelSelection): TaskRecord[] | undefined {
     return bot.tasks?.map((task) => ({
       ...task,
@@ -2284,7 +2209,7 @@ export class Store {
     const patches = bot.tasks.map((task): Partial<TaskRecord> | null => !listed.has(task.threadId) || task.modelSelection === undefined ? null : {
       ...reset(task.modelSelection, bot.modelSelection),
       modelSelection: undefined,
-      ...(this.switchNeedsAsk(botId, task.threadId, task.modelSelection, bot.modelSelection) ? structuredClone(ASK_NOW) : {}),
+      ...(this.switchNeedsAsk(botId, task.threadId, task.modelSelection, bot.modelSelection) ? this.botLevelOnItsEngine(bot) : {}),
     });
     const moved = bot.tasks.filter((_, index) => patches[index]).map((task) => task.threadId);
     if (!moved.length) return [];
@@ -2414,8 +2339,9 @@ export class Store {
     const bot = this.bot(botId);
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId);
     if (!bot || !task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
+    if (tooShortToTitle(text)) return null;
     this.commitBotChange(bot, "the thread's title", () => {
-      task.title = titleFromMessage(text);
+      task.title = titleFromMessage(tooShortToTitle(text.trim().split("\n")[0]!) ? text.trim().replace(/\s*\n\s*/g, " ") : text);
       task.titleFromFirstMessage = true;
     });
     this.emit({ type: "bot", botId });

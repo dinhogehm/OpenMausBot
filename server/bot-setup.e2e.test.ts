@@ -22,8 +22,12 @@ it("dispatches setup and canonical standing instructions through the real isolat
       await runControlOmb(["wait", "--bot", bot.id, "--timeout", "30"], { env });
       return JSON.parse(readFileSync(fixture.fixtureDumpPath, "utf8"));
     };
+    // The setup block describes this turn, so it rides the turn's message
+    // (the volatile half, system-prompt.ts), not the cached system prompt.
+    const context = (launched: { systemPrompt?: string; prompt?: unknown }) => `${launched.systemPrompt ?? ""}\n${JSON.stringify(launched.prompt ?? "")}`;
     const setup = await turn("/setup Help me track garden watering");
-    expect(setup.systemPrompt).toContain("The user explicitly asked you to set yourself up");
+    expect(context(setup)).toContain("The user explicitly asked you to set yourself up");
+    expect(setup.systemPrompt).not.toContain("The user explicitly asked you to set yourself up");
     expect(setup.systemPrompt).toContain("propose_profile");
     expect(JSON.stringify(setup.prompt)).toContain("Set yourself up for this job: Help me track garden watering");
 
@@ -32,7 +36,7 @@ it("dispatches setup and canonical standing instructions through the real isolat
     const configured = await turn("What is your job?");
     expect(configured.systemPrompt).toContain("Only water the fixture garden after approval.");
     expect(configured.systemPrompt).not.toContain("UNAPPROVED MIRROR INSTRUCTIONS");
-    expect(configured.systemPrompt).not.toContain("The user explicitly asked you to set yourself up");
+    expect(context(configured)).not.toContain("The user explicitly asked you to set yourself up");
     const drift = await api("GET", `/api/bots/${bot.id}/soul`);
     expect(drift.drift).toBe(true);
     expect(drift.fileText).toBe("UNAPPROVED MIRROR INSTRUCTIONS");

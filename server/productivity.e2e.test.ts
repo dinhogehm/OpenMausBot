@@ -144,31 +144,34 @@ posixOnly("GET /api/reports/productivity", () => {
   it("counts the day of the excerpt in São Paulo: releases, failures, refusal, what each release carried", async () => {
     const { body: report } = await get("/api/reports/productivity?granularity=day&from=2026-09-17&to=2026-09-17");
     expect(report.buckets.map((bucket: any) => bucket.key)).toEqual(["2026-09-17"]);
-    // 13:27Z and 16:16Z are the 17th in São Paulo; so is 22:02Z (19:02); the 01:33Z failures were still the 16th there
-    expect(report.kpis).toMatchObject({ deliveries: 2, failedReleases: 2, supersededReleases: 1, abortedReleases: 0, releaseSuccessRate: 0.5, declinedReleases: 1, deliveredPrs: 1, deliveredIssues: 1, mergedPrs: 1, carrierPrs: 1, closedIssues: 1 });
+    // 13:27Z and 16:16Z are the 17th in São Paulo; so is 22:02Z (19:02); the 01:33Z failures were still the 16th there.
+    // 3f99428bf stopped on the snapshot's drift and cb015584a had nothing to publish: aborted, not failures of
+    // the commit (countedRun, "entregas reais"), so both releases that ran with a verdict reached production
+    expect(report.kpis).toMatchObject({ deliveries: 2, failedReleases: 0, failedAttempts: 0, supersededReleases: 1, abortedReleases: 2, releaseSuccessRate: 1, declinedReleases: 1, deliveredPrs: 1, deliveredIssues: 1, mergedPrs: 1, carrierPrs: 1, closedIssues: 1 });
     expect(report.kpis.leadIssueToProd).toEqual({ n: 1, median: Date.parse("2026-09-17T16:16:13Z") - Date.parse("2026-09-16T10:00:00Z"), p90: Date.parse("2026-09-17T16:16:13Z") - Date.parse("2026-09-16T10:00:00Z") });
     const rows = report.releases.map((row: any) => [row.outcome, row.sha.slice(0, 9), row.prs.map((pr: any) => pr.number), row.issues.map((issue: any) => issue.number)]);
     expect(rows).toEqual([
       ["declined", "cb015584a", [], []],
-      ["failed", "cb015584a", [], []],
+      ["aborted", "cb015584a", [], []],
       // queued behind a newer commit and never ran: superseded, not a failure (INSP-V r1 #1)
       ["superseded", "94eedf2b4", [], []],
       ["released", "a76a5aa0c", [8987, 8990], [8986]],
-      ["failed", "3f99428bf", [], []],
+      ["aborted", "3f99428bf", [], []],
       ["released", "f50b70a3d", [], []],
     ]);
     expect(report.releases.find((row: any) => row.sha.startsWith("f50")).contentUnknown).toBe(true);
     expect(report.backlog).toMatchObject({ openIssues: 1, openP0: 1, prsAwaitingGate: 1 });
     expect(report.coverage.tag).toMatchObject({ sha: A76, matchesHistory: true });
-    expect(report.summary["pt-BR"]).toHaveLength(5);
+    expect(report.summary["pt-BR"]).toHaveLength(6);
     expect(report.summary["pt-BR"][0]).toMatch(/^Produção: 2 entregas/);
     expect(report.summary.en[0]).toMatch(/^Production: 2 deliveries/);
   });
 
   it("the previous day holds the night's failures (01:33Z is 22:33 of the 16th)", async () => {
     const { body: report } = await get("/api/reports/productivity?granularity=day&from=2026-09-16&to=2026-09-16");
-    // f50b70a3d (pid 76716) never ran — aborted, outside the rate; 3f99428bf ran and failed (INSP-V r1 #1)
-    expect(report.kpis).toMatchObject({ failedReleases: 1, abortedReleases: 1, supersededReleases: 0, deliveries: 0 });
+    // f50b70a3d (pid 76716) never ran — aborted, outside the rate; pid 83261 ran and failed at smart-deploy:
+    // one failed try, but no failed commit — f50b70a3d reached production the next morning (a commit is one release)
+    expect(report.kpis).toMatchObject({ failedReleases: 0, failedAttempts: 1, abortedReleases: 1, supersededReleases: 0, deliveries: 0 });
   });
 
   it("keeps the board's targets: empty by default, saved sane, and lit in the report", async () => {

@@ -1,4 +1,5 @@
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, Tray, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
+import { desktopViewerErrorPage } from "./desktop-viewer-error-page.mjs";
 import { createRequire } from "node:module";
 import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -22,7 +23,7 @@ import {
 import { migrateWorkspaceCredentials, workspaceCredentialEnv } from "./workspace-credentials.mjs";
 import { evictStartupCacheOnce } from "./startup-cache-eviction.mjs";
 import { activateExistingWindow, releaseSingleInstanceLock } from "./single-instance.mjs";
-import { bootFailureMessage, listeningSignal, pollServerIdentity, SERVER_BOOT_TIMEOUT_MS, SERVER_LISTENING_GRACE_MS } from "./server-boot-probe.mjs";
+import { bootFailureMessage, listeningSignal, pollServerIdentity, portAfterFailure, SERVER_BOOT_TIMEOUT_MS, SERVER_LISTENING_GRACE_MS } from "./server-boot-probe.mjs";
 import { createServerSupervisor } from "./server-supervisor.mjs";
 import { serverChildLaunch } from "./server-child-launch.mjs";
 import { packageUrlFromCommandLine, packageUrlFromDeepLink } from "./package-link.mjs";
@@ -307,15 +308,21 @@ const serverSupervisor = createServerSupervisor({
     companyBackupSchedule?.reconcile();
     routineWake.stop();
   },
-  onExhausted() {
+  onExhausted({ retrying, reason }) {
     // No modal: a Mac left alone would stay down until someone clicked it.
-    // The supervisor keeps retrying on a long backoff; this only tells the person.
-    slog("server recovery: quick retries exhausted; retrying in 5, 15, then every 30 minutes");
+    // Do not promise another attempt when a still-owned child stops recovery.
+    slog(retrying
+      ? "server recovery: quick retries exhausted; retrying in 5, 15, then every 30 minutes"
+      : `server recovery stopped: ${reason}; no retry scheduled`);
     try {
       if (Notification.isSupported()) {
         new Notification({
           title: "O servidor dos bots parou",
-          body: "O OpenMausBot continua tentando religá-lo sozinho (em 5, 15 e depois a cada 30 min). Turnos interrompidos não foram reenviados.",
+          body: retrying
+            ? "O OpenMausBot continua tentando religá-lo sozinho (em 5, 15 e depois a cada 30 min). Turnos interrompidos não foram reenviados."
+            : reason === "stuck-child"
+              ? "A recuperação automática parou. Não foi possível confirmar o encerramento do processo anterior; nenhum segundo servidor foi iniciado. Verifique o log antes de reiniciar o OpenMausBot."
+              : "As tentativas de recuperação automática se esgotaram. Verifique o log antes de reiniciar o OpenMausBot. Turnos interrompidos não foram reenviados.",
         }).show();
       }
     } catch (error) {
@@ -331,10 +338,12 @@ function desktopDataDir() {
   return process.env.OMB_DATA_DIR || path.join(app.getPath("home"), ".openmausbot");
 }
 
-async function stopUtilityServer(proc, timeoutMs = UTILITY_SERVER_STOP_TIMEOUT_MS) {
+async function stopUtilityServer(proc, timeoutMs = UTILITY_SERVER_STOP_TIMEOUT_MS, reason = "unspecified") {
   if (!proc) return true;
   const exited = utilityServerExits.get(proc);
   if (!exited) return false;
+  // every stop says why, so a clean "exited code=0" in server.log is never a mystery
+  slog(`stopping server pid=${proc.pid ?? "?"}: ${reason}`);
   try {
     proc.kill();
   } catch {
@@ -1200,7 +1209,7 @@ async function startServerOn(port, dataDir = runningDataDir ?? startupEnvironmen
   });
   if (identity.outcome === "ready" && serverSupervisor.isCurrent(proc)) return { proc };
   slog(bootFailureMessage(port, identity));
-  const stopped = await stopUtilityServer(proc);
+  const stopped = await stopUtilityServer(proc, undefined, `boot failed on port ${port} (${identity.outcome})`);
   if (!stopped) {
     slog(`child on port ${port} did not exit after termination; refusing to start a sibling server`);
   }
@@ -1210,7 +1219,8 @@ async function startServerOn(port, dataDir = runningDataDir ?? startupEnvironmen
 async function startServerPackaged() {
   let everyPortForeignOwned = true;
   for (let attempt = 0; attempt < 2; attempt++) {
-    for (const port of DESKTOP_PORTS) {
+    for (let index = 0, sameTries = 0; index < DESKTOP_PORTS.length;) {
+      const port = DESKTOP_PORTS[index];
       if (desktopShutdownStarted) return false;
       const started = await startServerOn(port);
       if (started.proc) {
@@ -1219,6 +1229,9 @@ async function startServerPackaged() {
       }
       if (started.abort) return false;
       if (started.reason !== "foreign-owner") everyPortForeignOwned = false;
+      // a slow boot is retried on the same port (up to 3 more times), never moved to a fallback port
+      if (portAfterFailure(started.reason) === "same") { if (sameTries < 3) { sameTries++; continue; } break; }
+      index++; sameTries = 0;
     }
     await new Promise((r) => setTimeout(r, 2500));
   }
@@ -1279,24 +1292,6 @@ function notifyDesktopViewer(open) {
       contextId: desktopViewerContextId,
     });
   }
-}
-
-function desktopViewerErrorPage(message, retryUrl) {
-  const escape = (value) =>
-    String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
-  return (
-    "data:text/html;charset=utf-8," +
-    encodeURIComponent(`<!doctype html><meta name="color-scheme" content="dark"><title>Desktop unavailable</title>
-      <body style="margin:0;display:grid;place-items:center;height:100vh;background:#070707;color:#f5f5f5;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">
-        <main style="max-width:420px;padding:32px;text-align:center"><h2 style="margin:0 0 10px;font-size:18px">Couldn't open the live desktop</h2>
-        <p style="margin:0 0 20px;color:#a1a1aa;line-height:1.5">${escape(message)}</p>
-        <a href="${escape(retryUrl)}" target="_blank" rel="noreferrer" style="display:inline-block;border-radius:9px;background:#fff;color:#111;padding:9px 14px;text-decoration:none;font-weight:600">Open in browser</a></main>
-      </body>`)
-  );
 }
 
 function openDesktopViewer(owner, rawUrl, rawTitle, contextId) {
@@ -1675,7 +1670,7 @@ async function switchLocalEnvironmentTo(targetDir, targetId) {
         stopChild: async () => {
           // A child that will not die still writes to its folder: abort with the lease still held.
           const proc = serverProc;
-          if (proc && !(await stopUtilityServer(proc))) throw new Error("the server child did not stop");
+          if (proc && !(await stopUtilityServer(proc, undefined, "switching local environment"))) throw new Error("the server child did not stop");
         },
         releaseLease: async () => {
           desktopDataDirLease?.release();
@@ -1697,7 +1692,7 @@ async function switchLocalEnvironmentTo(targetDir, targetId) {
         },
         probeReady: async () => "ready",
         rollback: async () => {
-          if (startedProc) await stopUtilityServer(startedProc);
+          if (startedProc) await stopUtilityServer(startedProc, undefined, "environment switch rolled back");
           try {
             desktopDataDirLease?.release();
           } catch (error) {
@@ -3345,15 +3340,18 @@ let signalQuitRequested = false;
 
 // Linux package managers and watchdogs stop apps with SIGTERM/SIGINT: the first becomes a normal quit,
 // a second keeps Node's default force-quit (`once` listeners).
+let quitReason = "";
 const requestSignalQuit = () => {
   if (signalQuitRequested) return;
   signalQuitRequested = true;
+  quitReason = "signal";
   app.quit();
 };
 process.once("SIGINT", requestSignalQuit);
 process.once("SIGTERM", requestSignalQuit);
 
 app.on("before-quit", (e) => {
+  if (!desktopShutdownStarted) slog(`app quitting (before-quit: ${quitReason || "quit from the menu, Dock or AppleScript"}); the server child stops with it`);
   desktopShutdownStarted = true;
   startupScreen?.dispose();
   companyBackupSchedule?.close();

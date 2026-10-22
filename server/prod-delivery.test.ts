@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, resumeNeeded, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, readReleaseRecord, releaseRecordFrom, resumeNeeded, ROLLBACK_WATCH_MS, unpublishedApps, watchProductionDelivery, type CcDelivery, type DeliveryDeps, type ReleaseRecord } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -21,7 +24,7 @@ const worktreeGit = (repo: string, args: string[]): string | null => {
   return `${HEAD}\n`;
 };
 
-function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | null; head: string }> = {}) {
+function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | null; head: string; record: ReleaseRecord | null; files: string[] }> = {}) {
   const calls: string[][] = [];
   const reports: string[] = [];
   const chips: string[] = [];
@@ -30,6 +33,7 @@ function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | 
     now: () => now,
     gh: async (args) => {
       calls.push(args);
+      if (args[0] === "pr" && args.includes("files")) return `${(over.files ?? []).join("\n")}\n`;
       if (args[0] === "pr") return JSON.stringify({ state: over.state ?? "MERGED", mergeCommit: { oid: MERGE }, headRefName: over.head ?? BRANCH, headRefOid: "f".repeat(40) });
       if (args[1]!.includes("/compare/")) return `${over.compare ?? "ahead"}\n`;
       if (args[1]!.includes("/commits/")) return "2026-09-30T19:40:00Z\n";
@@ -46,6 +50,8 @@ function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | 
     report: (_session, text) => { reports.push(text); },
     chip: (_session, text) => { chips.push(text); },
     save: () => {},
+    // the corridor's own record of the tag's commit: healthy, deployed at 30/09 16:40 BRT
+    releaseRecord: async () => (over.record === undefined ? { result: "healthy", deployedAt: "2026-09-30T19:40:00Z" } : over.record),
   };
   return { deps, calls, reports, chips, advance: (ms: number) => { now += ms; } };
 }
@@ -107,11 +113,17 @@ describe("delivery in production", () => {
     expect(reports[0]).toContain("cc_session_archive");
     expect(reports[0]).toContain("No ID, no notice");
     expect(chips[0]).toContain("PR #9400");
-    const before = calls.length;
+    // the next pass asks GitHub nothing; only the tag is read again, for a rollback within the day
+    const asked = () => calls.filter((call) => call[0] !== "git").length;
+    const before = asked();
     advance(DELIVERY_CHECK_MS);
     await watchProductionDelivery([s], deps, cache);
     expect(reports).toHaveLength(1);
-    expect(calls.length).toBe(before);
+    expect(asked()).toBe(before);
+    const tagReads = calls.filter((call) => call[0] === "git").length;
+    advance(ROLLBACK_WATCH_MS);
+    await watchProductionDelivery([s], deps, cache);
+    expect(calls.filter((call) => call[0] === "git").length).toBe(tagReads);
   });
 
   it("keeps waiting while the tag is behind the merge, and re-reads it only every 10 min", async () => {
@@ -144,14 +156,248 @@ describe("delivery in production", () => {
   });
 });
 
+describe("proof of production, from the release corridor's own record", () => {
+  const RESULT = `MODE=dry-run\nCOMMIT=${TAG}\nSTARTED_AT=2026-10-13T05:39:55Z\nFINISHED_AT=2026-10-13T05:44:29Z\nRESULT=healthy\n`;
+  const RECEIPT = `RECEIPT_VERSION=2\nCOMMIT=${TAG}\nENV=production\nDEPLOYED_AT=2026-10-13T05:38:30Z\nREMOTE_TARGET_COUNT=2\nREMOTE_TARGETS=pages:nuria-kb-pages:f2d1a3b0,worker:agenda:67ecc3f3\nPURGE_RESULT=success\n`;
+
+  it("reads the post-release verdict of the very commit, and the receipt's time and targets only when the receipt is that commit's", () => {
+    expect(releaseRecordFrom(RESULT, RECEIPT, TAG)).toEqual({ result: "healthy", finishedAt: "2026-10-13T05:44:29Z", deployedAt: "2026-10-13T05:38:30Z", targets: ["pages:nuria-kb-pages", "worker:agenda"] });
+    // the receipt is a later release's: the verdict stands, its time and targets are not this commit's
+    expect(releaseRecordFrom(RESULT, RECEIPT.replaceAll(TAG, "d".repeat(40)), TAG)).toEqual({ result: "healthy", finishedAt: "2026-10-13T05:44:29Z" });
+    expect(releaseRecordFrom(RESULT, null, TAG)).toEqual({ result: "healthy", finishedAt: "2026-10-13T05:44:29Z" });
+    expect(releaseRecordFrom(`${RESULT}PREVIOUS_COMMIT=${"9".repeat(40)}\n`, null, TAG)).toEqual({ result: "healthy", finishedAt: "2026-10-13T05:44:29Z", previousCommit: "9".repeat(40) });
+    // a receipt with no post-release result: published, health not verified
+    expect(releaseRecordFrom(null, RECEIPT, TAG)).toMatchObject({ result: "sem-verificacao", deployedAt: "2026-10-13T05:38:30Z" });
+    // nothing of this very commit: the corridor did not release it
+    expect(releaseRecordFrom(null, null, TAG)).toBeNull();
+    expect(releaseRecordFrom(RESULT.replace(`COMMIT=${TAG}`, `COMMIT=${"d".repeat(40)}`), RECEIPT.replaceAll(TAG, "d".repeat(40)), TAG)).toBeNull();
+    expect(releaseRecordFrom(RESULT.replace("RESULT=healthy", "RESULT=rolled_back"), RECEIPT, TAG)).toMatchObject({ result: "rolled_back" });
+  });
+
+  it("names the apps a PR changed that the release has no target for", () => {
+    const targets = ["pages:nuria-kb-pages", "pages:nuria-web", "worker:agenda", "worker:core"];
+    expect(unpublishedApps(["apps/kb-pages/src/search.ts"], targets)).toEqual([]);
+    expect(unpublishedApps(["apps/kb-pages/src/search.ts"], ["worker:agenda"])).toEqual(["kb-pages"]);
+    expect(unpublishedApps(["web/src/App.tsx", "apps/agenda/src/a.ts"], targets)).toEqual([]);
+    expect(unpublishedApps(["apps/sdk/index.ts", "apps/core/src/x.ts", "apps/sdk/b.ts"], targets)).toEqual(["sdk"]);
+    // scripts, docs and shared packages have no target of their own
+    expect(unpublishedApps(["scripts/release.sh", "docs/claude/deploy.md", "packages/shared/x.ts"], targets)).toEqual([]);
+  });
+
+  it("takes the time from the receipt, never from the tag's commit", async () => {
+    const f = fakeDeps({ record: { result: "healthy", deployedAt: "2026-10-13T05:38:30Z" } });
+    await watchProductionDelivery([session()], f.deps, newDeliveryCache());
+    expect(f.reports[0]).toContain("em produção desde 13/10 02:38");
+    expect(f.calls.some((call) => call[1]?.includes("/commits/"))).toBe(false);
+  });
+
+  it("says the time is unknown when the corridor's record has none", async () => {
+    const f = fakeDeps({ record: { result: "healthy" } });
+    await watchProductionDelivery([session()], f.deps, newDeliveryCache());
+    expect(f.reports[0]).toContain("horário do deploy indisponível");
+    expect(f.chips[0]).toBe("em produção, horário do deploy indisponível (PR #9400)");
+  });
+
+  it("does not announce a tag the corridor did not release, says so once, and announces once a record appears", async () => {
+    // 09/10: the tag was moved outside the corridor, and #9483 was announced to the owner, the Monitor and QA
+    const f = fakeDeps({ record: null });
+    const cache = newDeliveryCache();
+    const s = session();
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports).toHaveLength(1);
+    expect(f.reports[0]).not.toContain("delivered in production");
+    expect(f.reports[0]).toContain("sem release registrado pelo corredor");
+    expect(f.chips[0]).toContain("não anunciada");
+    expect(s.delivery?.prs["9400"]?.reportedAt).toBeUndefined();
+    f.advance(DELIVERY_CHECK_MS);
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports).toHaveLength(1);
+    f.deps.releaseRecord = async () => ({ result: "healthy", deployedAt: "2026-09-30T19:40:00Z" });
+    f.advance(DELIVERY_CHECK_MS);
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports[1]).toContain("em produção desde 30/09 16:40");
+  });
+
+  it("does not announce a PR whose app has no publish target in the release", async () => {
+    // 12/10: #9528 changed apps/kb-pages, then in DEPLOY_EXCLUDED_APPS, and was announced ~8 h before it was published
+    const f = fakeDeps({ record: { result: "healthy", deployedAt: "2026-09-30T19:40:00Z", targets: ["worker:agenda"] }, files: ["apps/kb-pages/src/search.ts"] });
+    const s = session();
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(f.reports).toHaveLength(1);
+    expect(f.reports[0]).toContain("kb-pages");
+    expect(f.reports[0]).toContain("sem caminho de publicação");
+    expect(s.delivery?.prs["9400"]?.reportedAt).toBeUndefined();
+  });
+
+  it("finds a commit's receipt where the next release kept it, in the corridor's own folder", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-deploy-history-"));
+    try {
+      const NEXT = "d".repeat(40);
+      mkdirSync(join(dir, "post-release", TAG), { recursive: true });
+      mkdirSync(join(dir, "post-release", NEXT), { recursive: true });
+      writeFileSync(join(dir, "post-release", TAG, "result.env"), RESULT);
+      writeFileSync(join(dir, "deploy-receipt-production.env"), RECEIPT.replaceAll(TAG, NEXT));
+      expect(await readReleaseRecord(dir, TAG)).toEqual({ result: "healthy", finishedAt: "2026-10-13T05:44:29Z" });
+      writeFileSync(join(dir, "post-release", NEXT, "previous-receipt.env"), RECEIPT);
+      expect(await readReleaseRecord(dir, TAG)).toEqual({ result: "healthy", finishedAt: "2026-10-13T05:44:29Z", deployedAt: "2026-10-13T05:38:30Z", targets: ["pages:nuria-kb-pages", "worker:agenda"] });
+      expect(await readReleaseRecord(dir, "0".repeat(40))).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("announces a release the corridor certifies with pre-existing failures", async () => {
+    const f = fakeDeps({ record: { result: "healthy_with_preexisting_failures", deployedAt: "2026-09-30T19:40:00Z" } });
+    await watchProductionDelivery([session()], f.deps, newDeliveryCache());
+    expect(f.reports[0]).toContain("em produção desde 30/09 16:40");
+  });
+
+  it("holds what the corridor published without a post-release check, or could not read, saying which", async () => {
+    const unchecked = fakeDeps({ record: { result: "sem-verificacao", deployedAt: "2026-09-30T19:40:00Z" } });
+    await watchProductionDelivery([session()], unchecked.deps, newDeliveryCache());
+    expect(unchecked.reports[0]).toContain("no post-release health check");
+    const unreadable = fakeDeps();
+    unreadable.deps.releaseRecord = async () => "unavailable";
+    await watchProductionDelivery([session()], unreadable.deps, newDeliveryCache());
+    expect(unreadable.chips[0]).toContain("não consegui ler os registros do corredor");
+    expect(unreadable.reports[0]).not.toContain("moved outside");
+  });
+
+  it("never announces a PR whose changed files could not be read: it is asked again next pass", async () => {
+    const f = fakeDeps({ record: { result: "healthy", deployedAt: "2026-09-30T19:40:00Z", targets: ["worker:agenda"] }, files: ["apps/agenda/src/a.ts"] });
+    const gh = f.deps.gh;
+    let fail = true;
+    f.deps.gh = async (args) => {
+      if (fail && args.includes("files")) throw new Error("gh: HTTP 502");
+      return gh(args);
+    };
+    const s = session();
+    const cache = newDeliveryCache();
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports).toEqual([]);
+    expect(f.chips).toEqual([]);
+    fail = false;
+    f.advance(DELIVERY_CHECK_MS);
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports[0]).toContain("em produção desde 30/09 16:40");
+  });
+
+  it("never announces unchecked when the pass runs out of GitHub calls before the files", async () => {
+    const f = fakeDeps({ record: { result: "healthy", deployedAt: "2026-09-30T19:40:00Z", targets: ["worker:agenda"] }, files: ["apps/onboarding-sdk/a.ts"] });
+    const gh = f.deps.gh;
+    // seven other sessions each spend a call on an open PR first
+    f.deps.gh = async (args) => (args[0] === "pr" && Number(args[2]) < 100 && !args.includes("files") ? JSON.stringify({ state: "OPEN", mergeCommit: null, headRefName: BRANCH }) : gh(args));
+    const busy = Array.from({ length: 7 }, (_, i) => ({ ...session(), id: `b${i}`, lastReport: `PR https://github.com/${SLUG}/pull/${i + 1}` }));
+    const s = { ...session(), delivery: { slug: SLUG, prs: { "9400": { url: "u", number: 9400, state: "merged" as const, mergeSha: MERGE, owned: "branch" as const } } } as CcDelivery };
+    await watchProductionDelivery([...busy, s], f.deps, newDeliveryCache());
+    expect(s.delivery.prs["9400"]?.reportedAt).toBeUndefined();
+    expect(f.chips.some((chip) => chip.includes("9400"))).toBe(false);
+  });
+
+  it("holds a PR that changed an app when no receipt of the commit can check its targets, and not one that changed only scripts", async () => {
+    const app = fakeDeps({ record: { result: "healthy" }, files: ["apps/agenda/src/a.ts"] });
+    await watchProductionDelivery([session()], app.deps, newDeliveryCache());
+    expect(app.reports[0]).toContain("no receipt of");
+    const scripts = fakeDeps({ record: { result: "healthy" }, files: ["scripts/release.sh"] });
+    await watchProductionDelivery([session()], scripts.deps, newDeliveryCache());
+    expect(scripts.reports[0]).toContain("horário do deploy indisponível");
+  });
+
+  it("does not give a PR the time of a later release when production already ran it before", async () => {
+    const PREVIOUS = "9".repeat(40);
+    const f = fakeDeps({ record: { result: "healthy", deployedAt: "2026-10-13T05:38:30Z", previousCommit: PREVIOUS } });
+    const gh = f.deps.gh;
+    f.deps.gh = async (args) => (args[1]?.includes(`...${PREVIOUS}`) ? "ahead\n" : gh(args));
+    await watchProductionDelivery([session()], f.deps, newDeliveryCache());
+    expect(f.reports[0]).toContain("horário do deploy indisponível");
+    expect(f.reports[0]).not.toContain("13/10 02:38");
+  });
+
+  it("tells the bot once per reason, not at every tag that still holds the PR", async () => {
+    const f = fakeDeps({ record: null });
+    const cache = newDeliveryCache();
+    const s = session();
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports).toHaveLength(1);
+    const NEXT = "d".repeat(40);
+    const git = f.deps.git;
+    f.deps.git = async (repo, args) => (args[0] === "ls-remote" ? `${NEXT}\trefs/tags/nuria-production-deployed\n` : git(repo, args));
+    f.advance(DELIVERY_CHECK_MS);
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports).toHaveLength(1);
+  });
+
+  it("follows a PR handed over to a session even when its report names no PR", async () => {
+    // a session told to take over a PR (claimedPrs) used to get no delivery, so it was never announced
+    const f = fakeDeps();
+    const s = { ...session(), lastReport: "Assumi a correção.", claimedPrs: [9400] };
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(s.delivery?.prs["9400"]?.reportedAt).toBeDefined();
+  });
+
+  it("keeps a session with a held PR from being archived", async () => {
+    const held = { ...session(), delivery: { slug: SLUG, prs: { "9400": { url: "u", number: 9400, state: "merged" as const, mergeSha: MERGE, owned: "branch" as const, heldAt: "no-record", heldWhy: "sem release registrado pelo corredor para cccccccc" } } } as CcDelivery };
+    const { blockers } = await archiveBlockers(held, fakeDeps().deps);
+    expect(blockers).toEqual(["a PR #9400 está na tag, mas não foi comprovada em produção (sem release registrado pelo corredor para cccccccc)"]);
+  });
+
+  it("says when only the tag was seen, where no corridor runs", async () => {
+    const f = fakeDeps();
+    delete f.deps.releaseRecord;
+    await watchProductionDelivery([session()], f.deps, newDeliveryCache());
+    expect(f.reports[0]).toContain("seen only by the tag");
+    expect(f.reports[0]).toContain("horário do deploy indisponível");
+  });
+
+  it("still follows a rollback after the session was archived, as the announcement asks", async () => {
+    const f = fakeDeps();
+    const cache = newDeliveryCache();
+    const s = session();
+    await watchProductionDelivery([s], f.deps, cache);
+    s.status = "archived";
+    const BACK = "b".repeat(40);
+    f.deps.git = async (_repo, args) => (args[0] === "remote" ? `git@github.com:${SLUG}.git\n` : `${BACK}\trefs/tags/nuria-production-deployed\n`);
+    const gh = f.deps.gh;
+    f.deps.gh = async (args) => (args[1]?.includes(`...${BACK}`) ? "behind\n" : gh(args));
+    f.advance(DELIVERY_CHECK_MS);
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports.at(-1)).toContain("saiu de produção");
+  });
+
+  it("reopens a delivery when the tag moves back past its merge", async () => {
+    const f = fakeDeps();
+    const cache = newDeliveryCache();
+    const s = session();
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(s.delivery?.prs["9400"]).toMatchObject({ productionTag: TAG });
+    // a rollback: the tag now points at a commit that does not contain the merge
+    const BACK = "b".repeat(40);
+    f.deps.git = async (_repo, args) => (args[0] === "remote" ? `git@github.com:${SLUG}.git\n` : `${BACK}\trefs/tags/nuria-production-deployed\n`);
+    const gh = f.deps.gh;
+    f.deps.gh = async (args) => (args[1]?.includes(`...${BACK}`) ? "behind\n" : gh(args));
+    f.advance(DELIVERY_CHECK_MS);
+    await watchProductionDelivery([s], f.deps, cache);
+    expect(f.reports.at(-1)).toContain("saiu de produção");
+    expect(s.delivery?.prs["9400"]?.reportedAt).toBeUndefined();
+    expect(s.delivery?.prs["9400"]?.productionTag).toBeUndefined();
+  });
+});
+
 describe("archiving before delivery", () => {
   it("holds a session whose PR is open or whose merge is not in production, and says why", async () => {
     const open = fakeDeps({ state: "OPEN" });
     expect((await archiveBlockers(session(), open.deps)).blockers).toEqual(["a PR #9400 ainda está aberta"]);
     const behind = fakeDeps({ compare: "diverged" });
     expect((await archiveBlockers(session(), behind.deps)).blockers).toEqual(["a PR #9400 foi mergeada mas ainda não está em nuria-production-deployed"]);
+    // a PR the server follows, in the tag but not yet announced: archiving now would drop the announcement (14/10: #9555)
     const shipped = fakeDeps({ compare: "ahead" });
+    const followed = { ...session(), delivery: { slug: SLUG, prs: { "9400": { url: "u", number: 9400, state: "merged" as const, mergeSha: MERGE, owned: "branch" as const } } } as CcDelivery };
+    expect(await archiveBlockers(followed, shipped.deps)).toEqual({ blockers: ["a PR #9400 está em nuria-production-deployed, mas o servidor ainda não a anunciou em produção (o anúncio sai na próxima passada, a cada 10 min)"], unknown: [] });
+    // one it does not follow yet is not promised an announcement
     expect(await archiveBlockers(session(), shipped.deps)).toEqual({ blockers: [], unknown: [] });
+    // announced: nothing holds it
+    const announced = { ...session(), delivery: { slug: SLUG, prs: { "9400": { url: "u", number: 9400, state: "merged" as const, mergeSha: MERGE, owned: "branch" as const, reportedAt: 1, productionTag: TAG } } } as CcDelivery };
+    expect(await archiveBlockers(announced, shipped.deps)).toEqual({ blockers: [], unknown: [] });
     const closed = fakeDeps({ state: "CLOSED" });
     expect((await archiveBlockers(session(), closed.deps)).blockers).toEqual([]);
     const noTag = fakeDeps({ tag: null });

@@ -42,6 +42,15 @@ describe("routine delegation through the isolated harness", () => {
     }, { timeout: 15_000 }).toBe(true);
     return parsed;
   };
+  // What a launch put in front of the model: the system prompt and its first
+  // message, which carries the turn-specific sections (system-prompt.ts).
+  const launchContext = async (threadId: string) => {
+    const launched = await dump(threadId);
+    return `${launched.systemPrompt ?? ""}\n${JSON.stringify(launched.prompt ?? "")}`;
+  };
+  // Every message the thread's CLI processes received, in order.
+  const sentTo = (threadId: string) => readFileSync(file(threadId, "prompts.jsonl"), "utf8").trim().split("\n")
+    .map((line) => JSON.stringify(JSON.parse(line).message?.content ?? ""));
   const runState = async (id: string) => (await api("GET", "/api/routines")).runs.find((run: any) => run.id === id);
   const messages = async (threadId: string) => (await api("GET", `/api/threads/${threadId}/messages?limit=100`)).messages as any[];
   const botState = async (botId: string) => (await api("GET", "/api/bots?messages=0")).bots.find((bot: any) => bot.id === botId);
@@ -86,6 +95,7 @@ describe("routine delegation through the isolated harness", () => {
       'process.env.FAKE_CLAUDE_MODE = thread === "probe" ? "happy" : "slow";',
       `process.env.FAKE_CLAUDE_SLOW_FINISH_GATE = join(${JSON.stringify(fixture.info.dataDir)}, thread + ".gate");`,
       `process.env.FAKE_CLAUDE_DUMP = join(${JSON.stringify(fixture.info.dataDir)}, thread + ".json");`,
+      `process.env.FAKE_CLAUDE_PROMPTS = join(${JSON.stringify(fixture.info.dataDir)}, thread + ".prompts.jsonl");`,
       `await import(${JSON.stringify(pathToFileURL(join(process.cwd(), "server/testing/fake-claude-cli.ts")).href)});`,
     ].join("\n"), { mode: 0o700 });
     await api("PATCH", "/api/instances/claude", { cli: wrapper });
@@ -103,11 +113,14 @@ describe("routine delegation through the isolated harness", () => {
     await oneSlotPerBot();
     const peerThread = (await botState(peer.id)).threadId;
     await control(["send", "--bot", peer.id, "--text", "An existing task occupies the peer."]);
-    expect((await dump(peerThread)).systemPrompt).not.toContain("Execute this routine now:");
+    expect(await launchContext(peerThread)).not.toContain("Execute this routine now:");
     const run = await start();
-    expect((await dump(run.threadId)).systemPrompt).toContain("Execute this routine now:");
-    expect((await dump(run.threadId)).systemPrompt).toContain("use coordinate_bots for required handoffs");
-    expect((await dump(run.threadId)).systemPrompt).toContain("after an accepted hand-off, end this turn for automatic resumption");
+    // The routine section is turn-specific: it rides the launch's first
+    // message, never the cacheable system prompt (system-prompt.ts TURN_SECTIONS).
+    expect(await launchContext(run.threadId)).toContain("Execute this routine now:");
+    expect(await launchContext(run.threadId)).toContain("use coordinate_bots for required handoffs");
+    expect(await launchContext(run.threadId)).toContain("after an accepted hand-off, end this turn for automatic resumption");
+    expect((await dump(run.threadId)).systemPrompt).not.toContain("Execute this routine now:");
     const { receipts } = await delegate(run.threadId);
     finish(run.threadId);
     await expect.poll(async () => (await runState(run.id))?.status, { timeout: 15_000 }).toBe("waiting");
@@ -124,10 +137,14 @@ describe("routine delegation through the isolated harness", () => {
     const transcript = await messages(run.threadId);
     expect(transcript.some((message) => message.tool?.name === "Routine peer replied" && message.from?.botId === peer.id)).toBe(true);
     expect(transcript.some((message) => message.tool?.name?.startsWith("Resumed with Routine peer results"))).toBe(true);
+    // The resume ran as a routine turn and its output is the run's report.
+    // The resume's message may open with the turn's context note, which can
+    // push its own lines past the run output's cut: read what was sent.
     const finished = await runState(run.id);
-    expect(finished.output).toContain(SETTLED);
-    expect(finished.output).toContain(REPORT_FROM_PEER);
-    expect((await dump(run.threadId)).systemPrompt).toContain("Execute this routine now:");
+    expect(finished.output).toContain("reply to:");
+    expect(sentTo(run.threadId).at(-1)).toContain(SETTLED);
+    expect(sentTo(run.threadId).at(-1)).toContain(REPORT_FROM_PEER);
+    expect(await launchContext(run.threadId)).toContain("Execute this routine now:");
     expect(peerWork(run.threadId)).toMatchObject({ status: "completed" });
     expect(rows().find((node) => node.id === work.parentId)?.status).toBe("completed");
     evidence.push({ waitedForBusyPeer: true, resumedRoutine: run.id, threadId: run.threadId, transcript });
@@ -190,7 +207,9 @@ describe("routine delegation through the isolated harness", () => {
       await expect.poll(async () => (await botState(source.id)).tasks.find((task: any) => task.threadId === occupiedThreads[0]).busy, { timeout: 15_000 }).toBe(false);
     }
     await expect.poll(async () => (await runState(run.id))?.status, { timeout: 15_000 }).toBe("completed");
-    expect((await runState(run.id)).output).toContain(SETTLED);
+    // the resume's message may open with the turn's context note: read what was sent
+    expect((await runState(run.id)).output).toContain("reply to:");
+    expect(sentTo(run.threadId).at(-1)).toContain(SETTLED);
     expect((await messages(run.threadId)).some((message) => message.tool?.name?.startsWith("Resumed with Routine peer results"))).toBe(true);
     const bot = await botState(source.id);
     expect(occupiedThreads.map(threadId => bot.tasks.find((task: any) => task.threadId === threadId).busy))

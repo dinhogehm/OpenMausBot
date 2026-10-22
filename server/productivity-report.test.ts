@@ -5,15 +5,24 @@
 // DORA, the backlog at each bucket's end, coverage gaps, the bots' local effort
 // only where it was recorded, and the time a report takes on a real-size cache.
 import { describe, expect, it } from "vitest";
-import { bucketStarts } from "../shared/productivity.ts";
+import { bucketStarts, presetPeriod } from "../shared/productivity.ts";
 import type { GhIssue, GhPr } from "./productivity-github.ts";
-import { buildProductivityReport, buildTimeline, businessDays, coveredBusinessDays, issuesOfPr, releasePairs, weekendMs } from "./productivity-report.ts";
+import { buildProductivityReport, buildTimeline, businessDays, coveredBusinessDays, issuesOfPr, releasePairs, wholeBusinessDays, weekendMs } from "./productivity-report.ts";
 import { brt, HOUR, run, scenario, sha } from "./testing/productivity-fixture.ts";
 
 const monthReport = () => {
   const base = scenario();
   return buildProductivityReport({ ...base, granularity: "month", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-11-01T00:00:00") } });
 };
+
+describe("issues per bucket (report-fixes)", () => {
+  it("count only the done ones, as the \"Issues resolvidas\" card does: the chart's bars add up to the card", () => {
+    const k = monthReport();
+    const bars = k.buckets.reduce((sum, bucket) => sum + bucket.closedIssues, 0);
+    expect(k.kpis.closedNotPlanned).toBeGreaterThan(0);
+    expect(bars).toBe(k.kpis.closedIssues - k.kpis.closedNotPlanned);
+  });
+});
 
 describe("release timeline", () => {
   it("attributes merges to the release whose range holds their commit; issues only by explicit reference and only when closed (INSP-V r1 #3)", () => {
@@ -84,7 +93,7 @@ describe("month buckets (São Paulo)", () => {
 
   it("counts deliveries, merges and closures by their own dates; unknown contents are flagged", () => {
     expect(september).toMatchObject({ deliveredPrs: 1, unknownContentReleases: 1, mergedPrs: 1, closedIssues: 1, closedBugs: 1, failedReleases: 0 });
-    expect(october).toMatchObject({ deliveredPrs: 3, unknownContentReleases: 0, mergedPrs: 4, closedIssues: 2, closedBugs: 0, failedReleases: 2 });
+    expect(october).toMatchObject({ deliveredPrs: 3, unknownContentReleases: 0, mergedPrs: 4, closedIssues: 1, closedBugs: 0, failedReleases: 1 }); // the one closed as not planned stays out (report-fixes)
   });
 
   it("knows where no release source existed, and where the bots were not recorded (unknown, not zero)", () => {
@@ -117,7 +126,8 @@ describe("KPIs", () => {
   });
 
   it("a failure is a run that ran; superseded and aborted runs are apart and out of the success rate (INSP-V r1 #1)", () => {
-    expect(k).toMatchObject({ failedReleases: 2, supersededReleases: 1, abortedReleases: 1, declinedReleases: 1, releaseSuccessRate: 3 / 5 });
+    // x1 and x2 are two tries of ONE commit (sha x): one failed commit, two failed tries
+    expect(k).toMatchObject({ failedReleases: 1, failedAttempts: 2, supersededReleases: 1, abortedReleases: 1, declinedReleases: 1, releaseSuccessRate: 3 / 4 });
   });
 
   it("the release pipeline stopped 5 h (production up), none of it on a weekend (INSP-V r1 #2)", () => {
@@ -125,11 +135,11 @@ describe("KPIs", () => {
   });
 
   it("DORA: deploys per business day WITH a release source; change failure rate and time to restore from the post-release check (INSP-V r2 #1)", () => {
-    // September has 21 business days (22 weekdays, Sep 7th a national holiday); Oct 1st whole, Oct 2nd half by noon
-    expect(k.businessDays).toBe(22.5);
-    // the log starts on Sep 29th: Tue 29, Wed 30, Thu 1st and half of Fri 2nd have a source — 3 deliveries in 3,5 days,
-    // not 3 in 22,5 (the days without a source are unknown, not zero)
-    expect(k).toMatchObject({ releaseBusinessDays: 3.5, deploysPerBusinessDay: 0.86, releaseCovered: "partial" });
+    // September has 21 business days (22 weekdays, Sep 7th a national holiday); Oct 1st, and Oct 2nd touched by noon: whole days
+    expect(k.businessDays).toBe(23);
+    // the log starts on Sep 29th: Tue 29, Wed 30, Thu 1st and Fri 2nd (touched) have a source — 3 deliveries in 4 whole days,
+    // not 3 in 23 (the days without a source are unknown, not zero), and not 3 in 3,5 (no rate from a fraction of a day)
+    expect(k).toMatchObject({ releaseBusinessDays: 4, deploysPerBusinessDay: 0.75, releaseCovered: "partial" });
     expect(k).toMatchObject({ changeFailures: 1, checkedReleases: 2 });
     expect(k.timeToRestore).toEqual({ n: 1, median: 10.5 * HOUR, p90: 10.5 * HOUR });
   });
@@ -161,6 +171,19 @@ describe("KPIs", () => {
     const usage = [...base.usage, { at: new Date(brt("2026-10-01T15:00:00")).toISOString(), botId: "eng", botName: "Eng PRODEV", input: 10, output: 1, costUsd: 1.2 }];
     const many = buildProductivityReport({ ...base, runs, usage, granularity: "month", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-11-01T00:00:00") } }).kpis;
     expect(many).toMatchObject({ deliveriesInUsageDays: 6, costEngineeringUsd: 1.2, costOperationsUsd: 0.75, costPerDelivery: 0.2 });
+  });
+
+  it("compares a period still under way with the same elapsed span of the one before, so a steady pace shows no change", () => {
+    // one release a day at 15:00; on Tuesday 13/10 at 09:00 the week so far holds 6 of them, and so must the week before at that point
+    const base = scenario();
+    const days = Array.from({ length: 14 }, (_, i) => new Date(Date.UTC(2026, 8, 29 + i)).toISOString().slice(0, 10));
+    const runs = days.map((day, i) => run(`d${String(i).padStart(2, "0")}`, "released", `${day}T15:00:00`, { sha: (i + 1).toString(16).padStart(40, "0") }));
+    const now = brt("2026-10-13T09:00:00");
+    const week = buildProductivityReport({ ...base, now, runs, logCoverage: { from: brt("2026-09-01T00:00:00"), to: now }, granularity: "day", period: presetPeriod("day", 7, now) });
+    expect(week.kpis.deliveries).toBe(6);
+    expect(week.previousKpis.deliveries).toBe(6);
+    // the previous period itself is still the whole week before, for its title
+    expect(week.previous).toEqual({ from: brt("2026-09-30T00:00:00"), to: brt("2026-10-07T00:00:00") });
   });
 
   it("knows when the repository was created (no comparison against a period before it)", () => {
@@ -199,7 +222,7 @@ describe("release rows", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ outcome: "failed", attempts: 2, supersededRuns: 1, abortedRuns: 1, cause: "Local CI failed at tests" });
     // the counts stay runs: 2 failures that ran, 1 superseded, 1 aborted
-    expect(report.kpis).toMatchObject({ failedReleases: 2, supersededReleases: 1, abortedReleases: 1 });
+    expect(report.kpis).toMatchObject({ failedReleases: 1, failedAttempts: 2, supersededReleases: 1, abortedReleases: 1 });
   });
 
   it("keeps the backlog snapshot at the end of a closed period apart from now (INSP-V r2 #2, #7)", () => {
@@ -281,5 +304,57 @@ describe("speed (INSP-V r1 #10)", () => {
     };
     expect(time("day", "2025-10-03T00:00:00", "2026-10-03T00:00:00")).toBeLessThan(50);
     expect(time("hour", "2026-09-19T00:00:00", "2026-10-03T00:00:00")).toBeLessThan(50);
+  });
+});
+
+describe("deploy frequency over whole business days (17/10: \"5,3/dia útil\" for 2 deliveries in 24 h)", () => {
+  // the 16–17/10 history: two releases on each side of 16/10 15:00, a source the whole time
+  const october = (granularity: "hour" | "day", from: string, to: string, goals = {}) => buildProductivityReport({
+    ...scenario(),
+    now: brt("2026-10-17T15:00:00"),
+    runs: [
+      run("p1", "released", "2026-10-16T01:16:00"),
+      run("q1", "released", "2026-10-16T06:37:00"),
+      run("f1", "failed", "2026-10-16T15:55:00"),
+      run("e1", "released", "2026-10-17T01:23:24"),
+      run("n1", "released", "2026-10-17T10:11:08"),
+    ],
+    declines: [],
+    logCoverage: { from: brt("2026-10-14T00:00:00"), to: brt("2026-10-17T15:00:00") },
+    goals,
+    granularity,
+    period: { from: brt(from), to: brt(to) },
+  });
+
+  it("rounds the business-day time up, at least 1: never a rate from a fraction", () => {
+    expect(wholeBusinessDays(0.375)).toBe(1);
+    expect(wholeBusinessDays(0)).toBe(1);
+    expect(wholeBusinessDays(1)).toBe(1);
+    expect(wholeBusinessDays(3.5)).toBe(4);
+    expect(wholeBusinessDays(5.0000001)).toBe(5);
+  });
+
+  it("the last 24 h from Friday 16/10 15:00: 2 deliveries in 1 business day, 2 a day — not 2 ÷ 0,375 = 5,3", () => {
+    const report = october("hour", "2026-10-16T15:00:00", "2026-10-17T15:00:00", { deploysPerBusinessDay: 8 });
+    expect(businessDays(brt("2026-10-16T15:00:00"), brt("2026-10-17T15:00:00"))).toBe(0.38);
+    expect(report.kpis).toMatchObject({ deliveries: 2, businessDays: 1, releaseBusinessDays: 1, deploysPerBusinessDay: 2, deployFrequencyCountOnly: false, releaseCovered: "full" });
+    // the 24 h before (Thu 15:00 – Fri 15:00) also had 2, in 1 business day
+    expect(report.previousKpis).toMatchObject({ deliveries: 2, releaseBusinessDays: 1, deploysPerBusinessDay: 2 });
+  });
+
+  it("a weekend-only window counts 1 business day, not 0 and not a fraction", () => {
+    const report = october("day", "2026-10-17T00:00:00", "2026-10-19T00:00:00");
+    expect(report.kpis).toMatchObject({ deliveries: 2, businessDays: 0, releaseBusinessDays: 1, deploysPerBusinessDay: 2 });
+  });
+
+  it("a window shorter than a day is a count, no rate", () => {
+    const report = october("hour", "2026-10-17T09:00:00", "2026-10-17T15:00:00");
+    expect(report.kpis).toMatchObject({ deliveries: 1, deploysPerBusinessDay: null, deployFrequencyCountOnly: true });
+  });
+
+  it("a whole week counts its 5 business days, a rolling 7 days from Friday 15:00 too (not 6); 12/10 is a holiday", () => {
+    expect(october("day", "2026-10-05T00:00:00", "2026-10-10T00:00:00").kpis).toMatchObject({ businessDays: 5 });
+    expect(october("day", "2026-10-02T15:00:00", "2026-10-09T15:00:00").kpis).toMatchObject({ businessDays: 5 });
+    expect(october("day", "2026-10-12T00:00:00", "2026-10-17T00:00:00").kpis).toMatchObject({ businessDays: 4 });
   });
 });

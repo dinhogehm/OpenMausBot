@@ -914,6 +914,36 @@ describe("Runtime: a cut turn that already acted outward (contract §5)", () => 
   });
 });
 
+describe("Runtime: a turn that ends while the server shuts down", () => {
+  it("leaves a turn the shutdown fails for the next open() to find cut, and keeps a failure the turn's own answer declared", async () => {
+    const store = openRuntimeStore(":memory:");
+    const first = world(() => "hold", {}, store);
+    const root = first.runtime.begin(beginReq());
+    const declared = ok(first.runtime.enqueue(toBot("declared", root.id)));
+    const cut = ok(first.runtime.enqueue(toBot("cut", root.id)));
+    first.runtime.tick();
+    expect(first.runner.runs).toHaveLength(2);
+    first.runtime.end(root.id, { ok: true, text: "handed out" });
+    first.runtime.close();
+    // a "não feito" the turn declared (RunResult `declared`) is its result: settled and reported now
+    await first.runner.release(declared.id, { kind: "failed", outcome: "provider_error", text: "Resultado não feito: o Jev barrou a escrita", declared: true });
+    // an engine the shutdown stopped is a cut turn
+    await first.runner.release(cut.id, { kind: "failed", outcome: "provider_error", text: "The engine stopped" });
+    expect(store.get(declared.id)).toMatchObject({ status: "failed", outcome: "provider_error", result: "Resultado não feito: o Jev barrou a escrita" });
+    expect(first.runner.reports.map(r => r.a.id)).toEqual([declared.id]);
+    expect(store.get(cut.id)?.status).toBe("running");
+
+    const second = world(undefined, {}, store);
+    expect(store.get(declared.id)).toMatchObject({ status: "failed", executions: 1, restarts: 0 });
+    expect(store.get(cut.id)).toMatchObject({ status: "queued", restart: "rerun", restarts: 1 });
+    invariants(second);
+    second.runtime.tick(); await flush();
+    expect(second.runner.runs.map(r => r.a.id)).toEqual([cut.id]);
+    invariants(second);
+    store.close();
+  });
+});
+
 describe("tree.ts: the outward wording and the loop guard", () => {
   it("outwardDetail dedupes, trims and clips the labels, names at most four as verb phrases, and keeps the exact prefix and close", () => {
     expect(outwardDetail(["git push", "git push", "  GMAIL_SEND_EMAIL  "]))

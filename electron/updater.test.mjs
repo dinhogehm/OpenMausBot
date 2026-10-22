@@ -200,6 +200,9 @@ it("a downloaded update installs when the app quits, except a system package, wh
   const resourcesPath = process.resourcesPath;
   const appImage = process.env.APPIMAGE;
   const resources = mkdtempSync(join(tmpdir(), "omb-updater-package-"));
+  // A package built with a publish feed carries app-update.yml; without it
+  // the updater stays dormant (this fork: a local build of a branch).
+  writeFileSync(join(resources, "app-update.yml"), "provider: github\n");
   try {
     for (const [os, marker, image, installsOnQuit] of [
       ["darwin", null, null, true],

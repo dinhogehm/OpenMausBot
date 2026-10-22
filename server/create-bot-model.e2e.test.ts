@@ -64,8 +64,9 @@ it("Chief creation uses the workspace default or a validated explicit model with
     expect(bots.length).toBe(before + 4);
     expect(bots.find((bot: any) => bot.id === chief.id).modelSelection).toEqual(chiefModel);
     for (const [id, modelSelection] of [[first.id, defaultModel], [second.id, explicit]]) {
+      // fork: a new specialist saves Ask (store.applyTeamSetup), never Full.
       expect(bots.find((bot: any) => bot.id === id)).toMatchObject({
-        section: "Design", modelSelection, approvalMode: "full", autoApprove: false, composio: false, approvePeerComms: false,
+        section: "Design", modelSelection, approvalMode: "ask", autoApprove: false, composio: false, approvePeerComms: false,
         soul: "Complete assigned work.",
       });
     }

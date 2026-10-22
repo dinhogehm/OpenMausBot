@@ -16,6 +16,7 @@ import { cacheUntilConfigChanges,
   loadConfig,
   localVmIdleTimeoutMinutes,
   localVmMaxInstances,
+  MAX_LOCAL_VM_MAX_INSTANCES,
   localVmMode,
   parseConfigPatch,
   parseStoredConfig,
@@ -550,6 +551,14 @@ describe("configuration boundaries", () => {
     expect(parseConfigPatch({ localVm: { mode: "per-bot", maxInstances: 8 } })).toEqual({
       localVm: { mode: "per-bot", maxInstances: 8 },
     });
+    expect(parseConfigPatch({ localVm: { mode: "per-bot", maxInstances: 11 } })).toEqual({
+      localVm: { mode: "per-bot", maxInstances: 11 },
+    });
+    expect(parseConfigPatch({ localVm: { mode: "per-bot", maxInstances: MAX_LOCAL_VM_MAX_INSTANCES } })).toEqual({
+      localVm: { mode: "per-bot", maxInstances: 16 },
+    });
+    expect(() => parseConfigPatch({ localVm: { maxInstances: MAX_LOCAL_VM_MAX_INSTANCES + 1 } })).toThrow("localVm");
+    expect(() => parseConfigPatch({ localVm: { maxInstances: 0 } })).toThrow("localVm");
     expect(localVmMode({ localVm: { mode: "per-bot" } })).toBe("per-bot");
     expect(localVmMaxInstances({ localVm: { maxInstances: 3 } })).toBe(3);
   });
@@ -632,7 +641,7 @@ describe("configuration boundaries", () => {
     expect(showToolCallsEnabled({ features: { showToolCalls: true } })).toBe(true);
   });
 
-  it.each([0, 1.5, 9, "2", null])("rejects an invalid per-bot VM limit: %j", (maxInstances) => {
+  it.each([0, 1.5, 17, "2", null])("rejects an invalid per-bot VM limit: %j", (maxInstances) => {
     expect(() => parseConfigPatch({ localVm: { maxInstances } })).toThrow("localVm.maxInstances");
   });
 

@@ -3,6 +3,7 @@
  * the shape. */
 import type { DataBroadcast } from "./data-surface.ts";
 import type { ApprovalMode } from "./approval-mode.ts";
+import type { NowServerStatus } from "./now-status.ts";
 import type { ToolScope } from "./tool-scope.ts";
 import type { CommandAllowlistCandidate } from "./command-allowlist.ts";
 import type { TurnDigest } from "./digest.ts";
@@ -139,6 +140,9 @@ export interface WireTask {
   /** What it asks, in one sentence (the conversation's title may only say
    * who, like "@Chief of Staff"). */
   goalNeedsInputAsk?: string;
+  /** When the server asked the bot to register that ask as an item with
+   * why, steps and options (lot J2): the item then takes its place. */
+  goalNeedsInputStepsAskedAt?: number;
   /** Watches (wake_when) running for this conversation, for its row. */
   watches?: WireWatch[];
   /** It had a standing watch and has had none for a while. */
@@ -147,6 +151,12 @@ export interface WireTask {
   ccAlerts?: WireCcAlert[];
   /** What the bot (or the server) listed as waiting on the person. */
   ownerPending?: WireOwnerPending[];
+  /** The cards (an approval, a provider question) still open here, oldest
+   * first. Said only while the conversation waits on the person (activity
+   * "waiting-on-you"), an empty list included: "Precisa de você" shows and
+   * answers them through the same /respond as the chat, and an empty list
+   * means nothing is left to answer there (already answered or expired). */
+  pendingRequests?: WireMessage[];
   /** Its Claude Code sessions not archived, CLI ones included (they are not in the app). */
   ccSessions?: WireCcSession[];
   threadId: string;
@@ -928,6 +938,8 @@ export interface BotAssignedSkillsWire {
 export type ServerFrame =
   | { kind: "sections"; sections: string[] }
   | { kind: "bot.queued"; queues: BotQueuedMessages }
+  /** "Agora" (lot Y): the delivery line changed; admin streams only. */
+  | { kind: "now"; status: NowServerStatus }
   | { kind: "message"; threadId: string; message: WireMessage }
   | { kind: "message.patch"; threadId: string; message: WireMessage }
   | { kind: "thread"; threadId: string; activeLeafId: string }

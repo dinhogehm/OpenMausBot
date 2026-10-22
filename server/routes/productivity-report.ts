@@ -1,12 +1,17 @@
 // The productivity report and its targets: read-only, built from the collector's cache (never waits on GitHub).
 import type { ProductivityCollector } from "../productivity-collector.ts";
+import type { OwnWorktreeStore } from "../own-worktrees.ts";
 import { executiveSummary, exportFileName, reportMarkdown, reportPdf } from "../productivity-export.ts";
 import { exportReadiness, GRANULARITIES, resolveReportPeriod, type Granularity } from "../../shared/productivity.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
 const REPORT_PATHS = new Set(["/api/reports/productivity", "/api/reports/productivity.md", "/api/reports/productivity.pdf"]);
 
-export function createProductivityReportRoutes(deps: { productivity: ProductivityCollector; enabled: boolean }): RouteHandler {
+export function createProductivityReportRoutes(deps: {
+  productivity: Pick<ProductivityCollector, "getGoals" | "report" | "requestSync" | "setGoals">;
+  enabled: boolean;
+  ownStore?: Pick<OwnWorktreeStore, "summary">;
+}): RouteHandler {
   const { productivity } = deps;
   return async ({ req, res, url, path, method, json, readBody }) => {
     // the report's targets: empty by default; a target lights its KPI
@@ -27,6 +32,7 @@ export function createProductivityReportRoutes(deps: { productivity: Productivit
     if ("error" in resolved) return json(res, 400, { error: resolved.error });
     if (url.searchParams.get("refresh") === "1" && deps.enabled) productivity.requestSync();
     const report = { ...productivity.report(granularity, resolved.period), enabled: deps.enabled };
+    if (deps.ownStore) report.worktrees = deps.ownStore.summary(resolved.period.from, resolved.period.to);
     report.summary = { "pt-BR": executiveSummary(report, "pt-BR"), en: executiveSummary(report, "en") };
     if (path.endsWith(".md") || path.endsWith(".pdf")) {
       const pdf = path.endsWith(".pdf");

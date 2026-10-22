@@ -47,6 +47,7 @@ import { useHeldMenuMotion, useMenuMotion } from "./MenuMotion";
 import { lastNonReceipt } from "@/lib/receipts";
 import { botPreview, groupPreview } from "./sidebar-preview";
 import { activeLocale, t } from "@/lib/i18n";
+import { shownTaskTitle, titleMatches } from "@/lib/thread-title";
 import { copyText } from "@/lib/copy-text";
 import type { LocaleKey } from "@/locales";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -129,16 +130,15 @@ import { SignalIcons } from "./SignalIcons";
 import { botShowsUnread } from "@/lib/bot-unread";
 import { attentionHasRunningWork, attentionJumpAction, attentionTriggerLabel, attentionUnpinAction, AttentionThreadRows, crossBotAttentionThreads, crossBotPinnedThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
-import { SidebarNeedsYou } from "./SidebarNeedsYou";
-import { NeedsYouResolver } from "./NeedsYouResolver";
-import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
-import { decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
-import { openExternalLink } from "@/lib/app-links";
-import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
 import { SidebarPinnedThreadsPanel } from "./SidebarPinnedThreadsPanel";
 import { useLiveMedia } from "@/lib/live-call-media";
 import { LiveCallPill, liveBadgeFor } from "./LiveCallPill";
+import { SidebarNeedsYouSection } from "./SidebarNeedsYouSection";
+import { SidebarNow } from "./NowPanel";
+import { needsYouItems, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
+import { OPEN_NEEDS_YOU_EVENT } from "@/lib/pipeline-board";
 import { ShortcutHint } from "./ShortcutHint";
+import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
 import { roomThreadSpeakerId, roomThreadWorking } from "@/lib/room-threads";
 import { usePopoverDismiss } from "@/hooks/use-popover-dismiss";
 import { useAdvancedMode } from "@/lib/interface-mode";
@@ -164,7 +164,6 @@ function sectionLabel(id: string): string {
   const key = SECTION_LABEL_KEYS[id];
   return key ? t(key) : sidebarSectionLabel(id);
 }
-
 
 interface MenuState {
   botId: string;
@@ -1204,7 +1203,7 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
               {sidebarStamp(last.at)}
             </span>
           )}
-          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} sessions={signals.sessions} /></span>}
+          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} sessions={signals.sessions} worded={density === "comfortable"} /></span>}
           {(expanded || (quiet && !statusLine)) && unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {(!expanded || deleting) && (!quiet || statusLine) && <div className="flex items-center justify-between gap-2">
@@ -1521,10 +1520,10 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         b.name.toLowerCase().includes(q) ||
         (b.title ?? "").toLowerCase().includes(q) ||
         botPreview(b, visibleMessages(b), state.instances, advanced).toLowerCase().includes(q) ||
-        b.tasks?.some((task) => !task.routineRunId && task.title.toLowerCase().includes(q)) ||
+        b.tasks?.some((task) => !task.routineRunId && titleMatches(task, q)) ||
         b.projects?.some((folder) => folder.name.toLowerCase().includes(q)),
     );
-  const visibleGroups = state.groups.filter((g) => !q || g.name.toLowerCase().includes(q) || g.tasks?.some((task) => task.title.toLowerCase().includes(q)));
+  const visibleGroups = state.groups.filter((g) => !q || g.name.toLowerCase().includes(q) || g.tasks?.some((task) => titleMatches(task, q)));
   const {
     unsectionedChief,
     pinnedBots,
@@ -1635,6 +1634,17 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   useEffect(() => startNeedsYouClock(() => needsYouRef.current, setNeedsYouClock), [nextNeedsYouChange]);
   // the resolution screen: open on one item (its key) or on the list (null)
   const [resolver, setResolver] = useState<{ open: boolean; key: string | null }>({ open: false, key: null });
+  // a card on "Esteira" opens its item here (the screen this sidebar owns)
+  useEffect(() => {
+    const open = (event: Event) => {
+      const key = (event as CustomEvent<{ key?: unknown }>).detail?.key;
+      setResolver({ open: true, key: typeof key === "string" ? key : null });
+    };
+    window.addEventListener(OPEN_NEEDS_YOU_EVENT, open);
+    return () => window.removeEventListener(OPEN_NEEDS_YOU_EVENT, open);
+  }, []);
+  // Every pinned thread across every bot and room — the thread-level twin
+  // of the built-in pinned-bots section, which only ever covered whole bots.
   const pinnedThreads = crossBotPinnedThreads(state.bots, state.groups, state.pendingQueued);
   const pendingBotUndo = teamFeedback?.restoreBot;
   const botRow = (bot: Bot) => botRowProps(state, dispatch, bot, { density, quiet: quietRows, query: q, onMenu: setMenu });
@@ -1851,6 +1861,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
               </>
             )}
           </div>}
+          <SidebarNow density={density} onOpenNeedsYou={() => setResolver({ open: true, key: null })} />
           {plusControl}
         </div>}
       </div>
@@ -1870,6 +1881,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           />
         </div>
       </div>}
+
 
       {universalPins && pinnedBots.length > 0 && (
         <div
@@ -1892,36 +1904,13 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         </div>
       )}
 
-      <SidebarNeedsYou
-        items={needsYou}
-        now={needsYouClock}
+      <SidebarNeedsYouSection
+        needsYou={needsYou}
+        needsYouClock={needsYouClock}
         density={density}
-        onOpen={(item) => setResolver({ open: true, key: item ? needsYouKey(item) : null })}
-        onResolve={(item) => {
-          void resolveOwnerPending(item)
-            .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
-        }}
-      />
-      <NeedsYouResolver
-        open={resolver.open}
-        items={needsYou}
-        initialKey={resolver.key}
-        onClose={() => setResolver({ open: false, key: null })}
-        onOpenConversation={(item) => {
-          setResolver({ open: false, key: null });
-          dispatch({ type: "switchTask", botId: item.botId, threadId: item.threadId });
-        }}
-        onOpenLink={(url) => void openExternalLink(url)}
-        onCopy={(text) => void copyText(text)}
-        onDecide={(item, option) => replyToOwnerPending(item, decisionReply(item, option), dispatch)}
-        onAskSteps={(item) => replyToOwnerPending(item, { ask: "steps" }, dispatch)}
-        onAskRecommend={(item) => replyToOwnerPending(item, { ask: "recommend" }, dispatch)}
-        onReply={(item, text, resolve) => item.pendingId
-          ? replyToOwnerPending(item, { text, resolve }, dispatch)
-          // an approval or a question in the conversation: the answer is an ordinary message there, awaited
-          : sendToConversation(item, text, dispatch)}
-        onResolve={resolveOwnerPending}
-        onRemind={remindOwnerPending}
+        resolver={resolver}
+        setResolver={setResolver}
+        dispatch={dispatch}
       />
 
       {attentionPinned && density !== "icons" && (
@@ -1985,7 +1974,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             const headless = simple && id === BOTS_SECTION_ID && index === 0;
             const collapsed = !headless && sectionCollapsed(id);
             const queued = collapsed ? [...sectionChiefItems, ...sectionBotItems].flatMap((bot) =>
-              sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.queued).map((task) => `${bot.name}: ${task.title}`)) : [];
+              sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.queued).map((task) => `${bot.name}: ${shownTaskTitle(task)}`)) : [];
             const attention = collapsed
               ? sidebarSectionAttention(
                   [...sectionChiefItems, ...sectionBotItems],
@@ -2105,7 +2094,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           setSearchOpen(true);
           toggleCollapsed();
         }}
-        plus={plusControl}
+        plus={<><SidebarNow density={density} onOpenNeedsYou={() => setResolver({ open: true, key: null })} />{plusControl}</>}
         server={<DesktopWorkspaceSwitcher rail cloudHome={state.config?.cloudHome === true} owner={cloudOwner} howTo={state.cloudHowTo} onMenuClosed={endHowTo} />}
       /> : <div className={cn("pb-3 pt-2", density === "icons" ? "flex flex-col items-center gap-1 px-2" : "px-3")}>
         <SidebarFooterNav
@@ -2119,7 +2108,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             onOpen={() => dispatch(phoneSettingsAction())}
           />
         )}
-
         {density === "icons" ? (
           <div className="flex flex-col items-center justify-center gap-1">
             <UpdateIndicator />

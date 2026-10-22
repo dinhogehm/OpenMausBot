@@ -58,7 +58,7 @@ it("takes cron through the real routine tools, applying the bot's own routine at
     const { resultId: routineId } = applied(create);
     const current = async () => (await api("GET", "/api/routines")).routines.find((routine: any) => routine.id === routineId);
     expect(await current()).toMatchObject({ schedule, enabled: true, runOn: "maus", overlap: "queue", runOnStartup: true });
-    expect(create.subtitle).toContain("Queue one scheduled run");
+    expect(create.subtitle).toContain("Keep one scheduled run pending and start it once free");
     expect(create.subtitle).toContain("On startup: Also runs once each time OpenMausBot starts");
     expect((await current()).nextRunAt).toBe(nextCronRuns(schedule, create.routineRequest.createdAt, 1)[0]);
 
@@ -86,7 +86,7 @@ it("takes cron through the real routine tools, applying the bot's own routine at
     expect(update.routineRequest.undo.before).toMatchObject({ schedule, overlap: "queue", runOnStartup: true });
     expect(update.subtitle).toContain("On startup: Runs only on its schedule");
     expect((await current()).schedule).toEqual(lastDay);
-    expect((await current()).overlap).toBeUndefined();
+    expect((await current()).overlap).toBe("skip");
     expect((await current()).runOnStartup).toBeUndefined();
     const pause = await proposal("manage_trigger", { action: "pause", trigger_id: routineId }, "Pause the monthly report.");
     applied(pause);

@@ -88,6 +88,15 @@ export interface AutoVerdict {
   source: AutoVerdictSource;
 }
 
+/** May the implicit read-only set (cat, ls, echo…) answer a permission
+ * request the engine sent? Only on "edits" with a person at the Mac. On Ask
+ * a person wants to see every command; on Auto/Custom the request reaching
+ * the server is the engine itself asking for a person; an unattended run
+ * keeps its cards (the owner, 20/10). A saved rule still answers anywhere. */
+export function implicitReadOnlyFor(mode: ApprovalMode, unattended: boolean): boolean {
+  return mode === "edits" && !unattended;
+}
+
 export function autoVerdict(
   mode: ApprovalMode,
   tool: string,

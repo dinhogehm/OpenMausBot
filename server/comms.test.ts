@@ -536,7 +536,8 @@ describe("routine comms e2e on the job runtime (fake ACP fleet)", () => {
         composio: false,
         autoApprove: false,
         approvePeerComms: false,
-        approvalMode: "full",
+        // fork: a Chief's new teammate saves Ask (store.applyTeamSetup).
+        approvalMode: "ask",
         modelSelection: defaultSelection,
       });
       expect(operator.chiefOfStaff).toBeFalsy();

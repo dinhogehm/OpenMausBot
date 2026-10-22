@@ -11,7 +11,7 @@ const HOUR = 3_600_000;
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function harness() {
+function harness(botState: () => "ready" | "busy" = () => "ready") {
   const dir = mkdtempSync(join(tmpdir(), "omb-limit-routines-"));
   dirs.push(dir);
   let now = START;
@@ -23,7 +23,7 @@ function harness() {
     file: join(dir, "routines.json"),
     now: () => now,
     emit: (payload: Record<string, unknown>) => emitted.push(payload),
-    botState: () => "ready" as const,
+    botState,
     createTask: () => ({ threadId: `thread-${++task}` }),
     joinConversation: (run: RoutineRun) => run.sourceThreadId ?? null,
     startTurn: async (_botId: string, threadId: string, prompt: string) => { started.push({ threadId, prompt }); },
@@ -125,6 +125,43 @@ describe("limit-reset routines", () => {
     await h.manager.tick();
     expect(h.started).toHaveLength(1);
     expect(h.manager.listRuns()[0]!.status).toBe("running");
+  });
+
+  it("keeps a reset queued while busy across a restart after twelve hours, then starts that receipt once", async () => {
+    let state: "ready" | "busy" = "busy";
+    const h = harness(() => state);
+    h.reset("claude", START + HOUR);
+    const routine = h.create();
+    const scheduledFor = START + HOUR + 60_000;
+    h.at(scheduledFor);
+    await h.manager.tick();
+    expect(h.started).toEqual([]);
+    expect(h.manager.listRuns()).toEqual([
+      expect.objectContaining({ routineId: routine.id, status: "queued", scheduledFor }),
+    ]);
+    const pending = h.manager.listRuns()[0]!;
+    expect(h.manager.listRoutines()[0]).toMatchObject({ enabled: false, nextRunAt: null });
+
+    h.at(START + 20 * HOUR);
+    const again = new RoutineManager(h.options);
+    await again.tick();
+    expect(h.started).toEqual([]);
+    expect(again.listRuns()).toEqual([
+      expect.objectContaining({ id: pending.id, status: "queued", scheduledFor }),
+    ]);
+
+    state = "ready";
+    await again.tick();
+    expect(h.started).toHaveLength(1);
+    expect(again.listRuns()).toEqual([
+      expect.objectContaining({ id: pending.id, status: "running", scheduledFor, threadId: "thread-1", startedAt: START + 20 * HOUR }),
+    ]);
+    again.handleRuntimeEvent({ type: "turn.completed", threadId: "thread-1", ok: true } as never);
+    await again.tick();
+    expect(h.started).toHaveLength(1);
+    expect(again.listRuns()).toEqual([
+      expect.objectContaining({ id: pending.id, status: "completed", scheduledFor }),
+    ]);
   });
 
   it("does not also run at startup when it runs once", () => {

@@ -265,7 +265,7 @@ test("the preload gives every page of the window the notices and the switch's st
 
 test("production wiring: main answers this computer's page, My Cloud's own page and the active saved server's own page, and no other", async () => {
   const main = readFileSync(new URL("./main.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-  assert.match(main, /for \(const port of DESKTOP_PORTS\)/, "main tries the ports this module names, in order");
+  assert.match(main, /const port = DESKTOP_PORTS\[index\];/, "main selects its startup port from the shared ordered list");
   assert.deepEqual([...DESKTOP_PORTS], [8799, 18799, 28799]);
   const start = main.indexOf("  registerDesktopPrefs({"), end = main.indexOf("\n", main.indexOf("thisComputer:", start));
   assert.ok(start >= 0 && end > start, "main.mjs registers the desktop prefs");

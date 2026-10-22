@@ -232,7 +232,11 @@ export interface RunInput {
 
 export type RunResult =
   | { kind: "completed"; text: string; evidence?: TurnEvidence }
-  | { kind: "failed"; outcome: Exclude<Outcome, "done" | "needs_input">; text: string; evidence?: TurnEvidence }
+  /** `declared`: the turn ran to its end and its own answer declared the
+   * failure (a "não feito" RESULTADO line, server/result-contract.ts). That
+   * is the work's result, not a turn the shutdown cut, so it settles even
+   * while the runtime is closing (fork: RoomHandoffs.settle kept it too). */
+  | { kind: "failed"; outcome: Exclude<Outcome, "done" | "needs_input">; text: string; evidence?: TurnEvidence; declared?: true }
   | { kind: "needs_input"; question: string; cards?: string[]; evidence?: TurnEvidence }
   /** The turn stopped short (a step cap, a seat it could not get) and the
    * same node continues in place with its next execution. */

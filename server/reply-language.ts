@@ -28,3 +28,39 @@ export function languagePrompt(language?: string): string {
 export function languageReminder(language?: string): string {
   return target(language).reminder;
 }
+
+/** The owner's language is Portuguese (the default, or a "pt-…" picked in the app). */
+export function isPortugueseLanguage(language?: string): boolean {
+  return target(language) === PT;
+}
+
+// Function words only one of the two languages uses ("no", "a", "as", "do",
+// "se" are both, so neither list has them). Code, commands, links and #refs
+// are taken out first: "git push", "PR #9376" or "merge" read as neither.
+const ENGLISH_WORDS = new Set([
+  "the", "and", "is", "are", "was", "were", "be", "it", "it's", "its", "this", "that", "these", "those", "of", "to", "in", "on", "with", "without", "for", "from", "by",
+  "now", "then", "only", "just", "will", "i'll", "i'm", "let", "let's", "me", "them", "they", "both", "one", "ones", "has", "have", "not", "but", "or", "all", "any",
+  "check", "quickly", "via", "here", "there", "what", "which", "when", "after", "before", "still", "leave", "remove", "next", "done",
+]);
+const PORTUGUESE_WORDS = new Set([
+  "o", "os", "um", "uma", "de", "da", "das", "dos", "na", "nas", "nos", "em", "para", "pra", "com", "sem", "que", "e", "é", "não", "já", "mais", "foi", "está", "estão",
+  "vou", "eu", "você", "ele", "ela", "isso", "esse", "essa", "este", "esta", "por", "pelo", "pela", "agora", "depois", "ainda", "também", "só", "aqui", "quando", "como", "sua", "seu",
+]);
+
+/** A line the bot wrote reads as English (and not Portuguese): two or more
+ * English-only function words, at least twice the Portuguese ones, and no
+ * Portuguese accents (R12-followup #4: "Published (tag ahead of merge),
+ * only graft change… Fits the authorized routine." in the owner's channel). */
+export function readsAsEnglish(text: string): boolean {
+  const prose = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/(?:https?|claude):\/\/\S+/g, " ")
+    .replace(/(?:^|\s)--?[\w-]+/g, " ")
+    .replace(/#\d+/g, " ");
+  if (/[ãõçáéíóúâêôà]/i.test(prose)) return false;
+  const words = prose.toLowerCase().replace(/’/g, "'").match(/[a-z']+/g) ?? [];
+  const english = words.filter((word) => ENGLISH_WORDS.has(word)).length;
+  const portuguese = words.filter((word) => PORTUGUESE_WORDS.has(word)).length;
+  return english >= 2 && english >= 2 * portuguese;
+}

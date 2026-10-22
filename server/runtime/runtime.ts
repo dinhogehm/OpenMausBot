@@ -404,7 +404,11 @@ export class Runtime {
       if (this.turns.get(id) !== live) return;
       const n = this.store.get(id);
       if (!n || n.status !== "running") return;
-      if (this.closing && result.kind === "failed") return;
+      // A turn the shutdown fails is left for the next open() to find cut;
+      // one that still finishes keeps its result, a failure its own answer
+      // declared included (RunResult `declared`): that is no cut, and a
+      // rerun at the next open() would do the work again or lose the reason.
+      if (this.closing && result.kind === "failed" && result.declared !== true) return;
       this.withBatch(() => this.finishTurn(n, result));
     } catch (error) {
       this.log(`settling ${id} failed: ${String(error)}`);

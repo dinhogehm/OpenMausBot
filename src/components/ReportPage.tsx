@@ -19,21 +19,37 @@ import {
   minutesSince, periodLabel, reportHeading, reportPath, summaryLines, zonedToday,
   type Comparison, type ComparisonKind, type Granularity, type Polarity, type ProductivityReport, type ReportBucket, type ReportGoals, type ReportQuery, type Tone,
 } from "@/lib/productivity";
-import { EXPORT_MAX_AGE_MS, GOAL_KEYS, beforeRepo, closedMonth, compareKpi, exportReadiness, goalStatus, releaseComparable, releaseCountParts, type ExportBlocker, type GoalKey, type ReportRelease } from "../../shared/productivity";
+import { EXPORT_MAX_AGE_MS, GOAL_KEYS, PERIOD_PRESETS, beforeRepo, closedMonth, compareKpi, exportReadiness, goalStatus, releaseComparable, releaseCountParts, type ExportBlocker, type GoalKey, type ReportRelease } from "../../shared/productivity";
 import { BarChart, LineChart, unknownAt, type ChartSeries } from "./ReportCharts";
 
 const QUERY_KEY = "omb-report-query";
 const POLL_MS = 60_000;
 const SYNC_POLL_MS = 3_000;
 
+/** The window saved last time, only if this screen still offers it: a count no preset has (an older
+ * build's, a hand-edited value) left the select on one window while the server, falling back to its
+ * default, reported another; a range only with both ends as dates. */
+export function sanitizeQuery(raw: unknown): ReportQuery {
+  if (!raw || typeof raw !== "object") return DEFAULT_QUERY;
+  const value = raw as { granularity?: unknown; count?: unknown; from?: unknown; to?: unknown };
+  const granularity = value.granularity;
+  if (granularity !== "hour" && granularity !== "day" && granularity !== "month") return DEFAULT_QUERY;
+  const date = granularity === "month" ? /^\d{4}-\d{2}$/ : /^\d{4}-\d{2}-\d{2}$/;
+  if (typeof value.from === "string" && typeof value.to === "string" && date.test(value.from) && date.test(value.to) && value.from <= value.to) {
+    return { granularity, from: value.from, to: value.to };
+  }
+  const count = Number(value.count);
+  const offered = PRESETS[granularity].some((preset) => (preset.granularity ?? granularity) === granularity && preset.count === count);
+  return { granularity, count: offered ? count : defaultCount(granularity) };
+}
+
 function loadQuery(): ReportQuery {
   try {
-    const raw = JSON.parse(localStorage.getItem(QUERY_KEY) ?? "null");
-    if (raw && ["hour", "day", "month"].includes(raw.granularity)) return { granularity: raw.granularity, ...(raw.count ? { count: Number(raw.count) } : {}), ...(raw.from && raw.to ? { from: String(raw.from), to: String(raw.to) } : {}) };
+    return sanitizeQuery(JSON.parse(localStorage.getItem(QUERY_KEY) ?? "null"));
   } catch {
     /* storage blocked or a stale value: the default */
+    return DEFAULT_QUERY;
   }
-  return DEFAULT_QUERY;
 }
 
 function saveQuery(query: ReportQuery): void {
@@ -46,11 +62,20 @@ function saveQuery(query: ReportQuery): void {
 
 // ── period bar ──────────────────────────────────────────────────────────────
 
-const PRESETS: Record<Granularity, Array<{ count: number; label: LocaleKey }>> = {
-  hour: [{ count: 48, label: "report.preset.hour48" }],
-  day: [{ count: 30, label: "report.preset.day30" }, { count: 90, label: "report.preset.day90" }],
+// shortest first; each grouping still opens with the window it always had (PERIOD_PRESETS[g][0])
+const PRESETS: Record<Granularity, Array<{ count: number; label: LocaleKey; granularity?: Granularity }>> = {
+  hour: [{ count: 24, label: "report.preset.hour24" }, { count: 48, label: "report.preset.hour48" }],
+  // day, week and fortnight side by side where the screen opens; the last day is grouped by hour
+  // (one daily bar would say nothing), so choosing it here switches the grouping
+  day: [{ count: 24, granularity: "hour", label: "report.preset.hour24" }, { count: 7, label: "report.preset.day7" }, { count: 15, label: "report.preset.day15" }, { count: 30, label: "report.preset.day30" }, { count: 90, label: "report.preset.day90" }],
   month: [{ count: 12, label: "report.preset.month12" }],
 };
+const defaultCount = (granularity: Granularity) => PERIOD_PRESETS[granularity][0]!;
+const presetValue = (preset: { count: number; granularity?: Granularity }) => (preset.granularity ? `${preset.granularity}:${preset.count}` : String(preset.count));
+
+/** "Personalizado" opens on the day the shown period starts, in São Paulo: the UTC date was a day
+ * late whenever the start fell after 21:00 (the last 24/48 hours). */
+export const customStart = (periodFrom: number): string => zonedToday(periodFrom);
 
 export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onChange: (query: ReportQuery) => void; report: ProductivityReport | null }) {
   const name = useId();
@@ -74,7 +99,7 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
               query.granularity === granularity ? "bg-raised font-medium text-ink" : "text-ink-secondary hover:text-ink",
             )}>
               <input type="radio" name={name} value={granularity} checked={query.granularity === granularity} className="sr-only"
-                onChange={() => onChange({ granularity, count: PRESETS[granularity][0]!.count })} />
+                onChange={() => onChange({ granularity, count: defaultCount(granularity) })} />
               {t(`report.granularity.${granularity}` as LocaleKey)}
             </label>
           ))}
@@ -82,15 +107,18 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
       </fieldset>
       <label className="flex flex-col gap-1 text-[12px] font-medium text-ink-secondary">
         {t("report.window")}
-        <Select value={isClosed ? "closed" : custom ? "custom" : String(query.count ?? PRESETS[query.granularity][0]!.count)}
+        <Select value={isClosed ? "closed" : custom ? "custom" : String(query.count ?? defaultCount(query.granularity))}
           onChange={(event) => {
             const value = event.target.value;
             if (value === "closed") onChange({ granularity: query.granularity, from: closed.from, to: closed.to });
-            else if (value === "custom") onChange({ granularity: query.granularity, from: normalize(report ? new Date(report.period.from).toISOString().slice(0, 10) : today), to: normalize(today) });
-            else onChange({ granularity: query.granularity, count: Number(value) });
+            else if (value === "custom") onChange({ granularity: query.granularity, from: normalize(report ? customStart(report.period.from) : today), to: normalize(today) });
+            else {
+              const [granularity, count] = value.includes(":") ? value.split(":") as [Granularity, string] : [query.granularity, value];
+              onChange({ granularity, count: Number(count) });
+            }
           }}
           size="md">
-          {PRESETS[query.granularity].map((preset) => <option key={preset.count} value={preset.count}>{t(preset.label)}</option>)}
+          {PRESETS[query.granularity].map((preset) => <option key={presetValue(preset)} value={presetValue(preset)}>{t(preset.label)}</option>)}
           {query.granularity !== "hour" && <option value="closed">{t("report.preset.closedMonth")}</option>}
           <option value="custom">{t("report.preset.custom")}</option>
         </Select>
@@ -124,10 +152,11 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
 // ── KPI cards ───────────────────────────────────────────────────────────────
 
 /** The comparison under a card, by the one rule the exports use: a trend on a
- * comparable base of at least 5, the previous value below it, a reason otherwise. */
+ * comparable base of at least 5, the previous value below it, a reason otherwise.
+ * No release source for both periods is said once, above the cards (R13-visual N17). */
 export function DeltaLine({ comparison, polarity, kind = "count" }: { comparison: Comparison; polarity: Polarity; kind?: ComparisonKind }) {
   if (comparison.kind === "none") {
-    const key: LocaleKey = comparison.reason === "before-repo" ? "report.delta.beforeRepo" : comparison.reason === "not-comparable" ? "report.delta.noSource" : "report.delta.none";
+    const key: LocaleKey = comparison.reason === "before-repo" ? "report.delta.beforeRepo" : comparison.reason === "not-comparable" ? "report.delta.noSourceShort" : "report.delta.none";
     return <p className="text-[12px] text-ink-secondary">{t(key)}</p>;
   }
   if (comparison.kind === "absolute") return <p className="text-[12px] text-ink-secondary">{t("report.delta.previous", { value: formatComparisonValue(comparison.previous, kind) })}</p>;
@@ -221,11 +250,11 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
       <h2 id="report-kpis" className="sr-only">{t("report.kpis")}</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label={t("report.kpi.deliveries")} value={`${partial ? "≥" : ""}${formatCount(k.deliveries)}`} definition={t("report.kpi.deliveries.def")} short={t("report.kpi.deliveries.short")}
-          detail={`${t(k.unknownContentReleases ? "report.kpi.deliveries.detailLower" : "report.kpi.deliveries.detail", { prs: `${lower}${formatCount(k.deliveredPrs)}`, issues: `${lower}${formatCount(k.deliveredIssues)}`, unknown: formatCount(k.unknownContentReleases) })}${partial ? ` · ${t("report.kpi.deliveries.partial", { covered: formatCount(k.releaseBusinessDays, 1), days: formatCount(k.businessDays, 1) })}` : ""}`}
+          detail={`${t(k.unknownContentReleases ? "report.kpi.deliveries.detailLower" : "report.kpi.deliveries.detail", { prs: `${lower}${formatCount(k.deliveredPrs)}`, issues: `${lower}${formatCount(k.deliveredIssues)}`, unknown: formatCount(k.unknownContentReleases) })}${partial ? ` · ${t("report.kpi.deliveries.partial", { covered: formatCount(k.releaseBusinessDays), days: formatCount(k.businessDays) })}` : ""}`}
           comparison={compareKpi(k.deliveries, p.deliveries, { comparable: release })} polarity="up" />
-        <KpiCard label={t("report.kpi.frequency")} value={k.deploysPerBusinessDay === null ? "—" : t("report.kpi.frequency.value", { value: formatDecimal(k.deploysPerBusinessDay) })}
-          definition={t("report.kpi.frequency.def")} short={t("report.kpi.frequency.short")}
-          detail={`${t("report.kpi.frequency.detail", { deliveries: formatCount(k.deliveries), covered: formatCount(k.releaseBusinessDays, 1) })}${partial ? ` ${t("report.kpi.frequency.of", { days: formatCount(k.businessDays, 1) })}` : ""}`}
+        <KpiCard label={t("report.kpi.frequency")} value={k.deployFrequencyCountOnly ? t("report.kpi.frequency.count", { deliveries: formatCount(k.deliveries) }) : k.deploysPerBusinessDay === null ? "—" : t("report.kpi.frequency.value", { value: formatDecimal(k.deploysPerBusinessDay) })}
+          definition={`${t("report.kpi.frequency.def")} ${t("report.kpi.frequency.whole")}`} short={t("report.kpi.frequency.short")}
+          detail={k.deployFrequencyCountOnly ? t("report.kpi.frequency.countDetail") : `${t(k.releaseBusinessDays === 1 ? "report.kpi.frequency.detailOne" : "report.kpi.frequency.detail", { deliveries: formatCount(k.deliveries), covered: formatCount(k.releaseBusinessDays) })}${partial ? ` ${t("report.kpi.frequency.of", { days: formatCount(k.businessDays) })}` : ""}`}
           comparison={compareKpi(k.deploysPerBusinessDay, p.deploysPerBusinessDay, { comparable: release, base: p.deliveries })} polarity="up" kind="decimal"
           goal={goalOf(report, "deploysPerBusinessDay", k.deploysPerBusinessDay, (goal) => t("report.goal.perDay", { value: decimals(goal) }))} />
         <KpiCard label={t("report.kpi.success")} value={formatRate(k.releaseSuccessRate)} definition={t("report.kpi.success.def")} short={t("report.kpi.success.short")}
@@ -237,7 +266,7 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
           comparison={compareKpi(k.leadIssueToProd.median, p.leadIssueToProd.median, { comparable: release, samples: { current: k.leadIssueToProd.n, previous: p.leadIssueToProd.n } })} polarity="down" kind="span"
           goal={goalOf(report, "leadTimeHours", k.leadIssueToProd.median === null ? null : k.leadIssueToProd.median / 3_600_000, (goal) => `≤ ${decimals(goal)} h`)} />
         <KpiCard label={t("report.kpi.mergedPrs")} value={formatCount(k.mergedPrs)} definition={t("report.kpi.mergedPrs.def")} short={t("report.kpi.mergedPrs.short")}
-          detail={t("report.kpi.mergedPrs.detail", { carriers: formatCount(k.carrierPrs) })}
+          detail={t("report.kpi.mergedPrs.detail", { carriers: formatCount(k.carrierPrs), batched: formatCount(k.batchedPrs ?? 0) })}
           comparison={compareKpi(k.mergedPrs, p.mergedPrs, { beforeRepo: oldRepo })} polarity="up" />
         <KpiCard label={t("report.kpi.closedIssues")} value={formatCount(resolved)} definition={t("report.kpi.closedIssues.def")} short={t("report.kpi.closedIssues.short")}
           detail={t("report.kpi.closedIssues.detail", { bugs: formatCount(k.closedByType.bug), improvements: formatCount(k.closedByType.improvement), p1: formatCount(k.closedByPriority.p0 + k.closedByPriority.p1), p2: formatCount(k.closedByPriority.p2) })}
@@ -260,7 +289,7 @@ export function DoraPanel({ report }: { report: ProductivityReport }) {
   const k = report.kpis;
   const cfr = k.checkedReleases ? k.changeFailures / k.checkedReleases : null;
   const rows: Array<[string, string, string]> = [
-    [t("report.dora.frequency"), k.deploysPerBusinessDay === null ? t("report.dora.frequency.none") : t("report.dora.frequency.value", { value: formatDecimal(k.deploysPerBusinessDay), deliveries: formatCount(k.deliveries), covered: formatCount(k.releaseBusinessDays, 1), days: formatCount(k.businessDays, 1) }), t("report.dora.frequency.def")],
+    [t("report.dora.frequency"), k.deployFrequencyCountOnly ? t("report.dora.frequency.count", { deliveries: formatCount(k.deliveries) }) : k.deploysPerBusinessDay === null ? t("report.dora.frequency.none") : t("report.dora.frequency.value", { value: formatDecimal(k.deploysPerBusinessDay), deliveries: formatCount(k.deliveries), covered: formatCount(k.releaseBusinessDays), days: formatCount(k.businessDays) }), `${t("report.dora.frequency.def")}; ${t("report.kpi.frequency.whole")}`],
     [t("report.dora.lead"), k.leadMergeToProd.n ? t("report.dora.lead.value", { median: formatSpan(k.leadMergeToProd.median), p90: formatSpan(k.leadMergeToProd.p90), n: formatCount(k.leadMergeToProd.n) }) : "—", t("report.dora.lead.def")],
     [t("report.dora.cfr"), cfr === null ? t("report.dora.cfr.none") : t("report.dora.cfr.value", { rate: formatRate(cfr), failures: formatCount(k.changeFailures), checked: formatCount(k.checkedReleases) }), t("report.dora.cfr.def")],
     [t("report.dora.restore"), k.timeToRestore.n ? t("report.dora.restore.value", { median: formatSpan(k.timeToRestore.median), n: formatCount(k.timeToRestore.n) }) : t(k.changeFailures ? "report.dora.restore.open" : "report.dora.restore.none"), t("report.dora.restore.def")],
@@ -376,7 +405,7 @@ export function ReportCharts({ report }: { report: ProductivityReport }) {
   const deliveries: ChartSeries = { key: "deliveries", label: t("report.series.deliveries"), color: "var(--color-accent-text)", value: (bucket) => bucket.deliveries, source: "release" };
   const failures: ChartSeries = { key: "failures", label: t("report.series.failures"), color: "var(--color-danger)", value: (bucket) => bucket.failedReleases, source: "release" };
   const merged: ChartSeries = { key: "merged", label: t("report.series.mergedPrs"), color: "var(--color-accent-text)", value: (bucket) => bucket.mergedPrs };
-  const closed: ChartSeries = { key: "closed", label: t("report.series.closedIssues"), color: "var(--color-ink-secondary)", value: (bucket) => bucket.closedIssues };
+  const closed: ChartSeries = { key: "closed", label: t("report.kpi.closedIssues"), color: "var(--color-ink-secondary)", value: (bucket) => bucket.closedIssues };
   const backlog: ChartSeries = { key: "backlog", label: t("report.series.openIssues"), color: "var(--color-accent-text)", value: (bucket) => bucket.openIssuesAtEnd };
   const turns: ChartSeries = { key: "turns", label: t("report.series.turns"), color: "var(--color-ink-secondary)", value: (bucket) => bucket.turns, source: "usage" };
   const active: ChartSeries = { key: "active", label: t("report.series.activeHours"), color: "var(--color-accent-text)", value: (bucket) => (bucket.activeMs === null ? null : Math.round((bucket.activeMs / 3_600_000) * 10) / 10), format: (value) => `${formatCount(value, 1)} h`, source: "usage" };
@@ -408,7 +437,8 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const approximate = release.timeSource !== "log";
-  const prs = release.prs.filter((pr) => !pr.carrier);
+  // the work: not the carriers, nor a lote whose PRs are listed (lot AA)
+  const prs = release.prs.filter((pr) => !pr.carrier && !pr.batch);
   const expandable = release.outcome === "released" ? release.prs.length > 0 || release.issues.length > 0 : Boolean(release.cause);
   const outcome = t(`report.outcome.${release.outcome}` as LocaleKey);
   return (
@@ -457,7 +487,7 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
               <div className="grid gap-3 md:grid-cols-2">
                 <div>
                   <h4 className="mb-1 text-[12px] font-medium text-ink-secondary">{t("report.releases.prs")}</h4>
-                  <ul className="space-y-0.5">{release.prs.map((pr) => <li key={pr.number} className="text-ink"><span className="tabular-nums">#{pr.number}</span> {pr.title}{pr.carrier ? <span className="text-ink-secondary"> · {t("report.releases.carrierTag")}</span> : null}</li>)}</ul>
+                  <ul className="space-y-0.5">{release.prs.map((pr) => <li key={pr.number} className="text-ink"><span className="tabular-nums">#{pr.number}</span> {pr.title}{pr.carrier ? <span className="text-ink-secondary"> · {t("report.releases.carrierTag")}</span> : null}{pr.batch ? <span className="text-ink-secondary"> · {t("report.releases.batchTag")}</span> : null}{pr.viaBatch ? <span className="text-ink-secondary"> · {t("report.releases.viaBatch", { number: String(pr.viaBatch) })}</span> : null}</li>)}</ul>
                 </div>
                 <div>
                   <h4 className="mb-1 text-[12px] font-medium text-ink-secondary">{t("report.releases.issues")}</h4>
@@ -681,6 +711,12 @@ export function ReportView({ report, onGoalsSaved }: { report: ProductivityRepor
           <p>{t("report.gaps", { gaps: gaps.map((gap) => `${formatWhen(gap.from, false)} – ${formatWhen(gap.to, false)}`).join("; ") })}</p>
         </div>
       )}
+      {!releaseComparable(report) && (
+        <div role="note" className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[13px] text-ink">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warning" aria-hidden />
+          <p>{t("report.releaseNotComparable")}</p>
+        </div>
+      )}
       {lines.length > 0 && (
         <section aria-labelledby="report-summary" className="rounded-xl border border-hairline/40 bg-card p-4">
           <h2 id="report-summary" className="mb-2 text-[14px] font-semibold text-ink">{t("report.summary.title")}</h2>
@@ -703,11 +739,18 @@ export function ReportView({ report, onGoalsSaved }: { report: ProductivityRepor
   );
 }
 
+/** After a failed sync, how old the numbers on screen are: they are the last good sync's. */
+function lastSync(at: number | null): string {
+  const minutes = minutesSince(at);
+  if (minutes === null) return ` · ${t("report.sync.never")}`;
+  return ` · ${minutes * 60_000 > EXPORT_MAX_AGE_MS ? t("report.sync.stale", { age: formatSpan(minutes * 60_000) }) : t("report.sync.updated", { minutes: formatCount(minutes) })}`;
+}
+
 function SyncStatus({ report, busy }: { report: ProductivityReport | null; busy: boolean }) {
   if (!report) return null;
   const sync = report.sync;
   if (busy || sync.state === "syncing") return <span role="status" className="flex items-center gap-1.5 text-[12px] text-ink-secondary"><Loader2 size={13} className="animate-spin" aria-hidden />{t("report.sync.running")}</span>;
-  if (sync.state === "error") return <span role="status" className="flex min-w-0 max-w-[420px] items-center gap-1.5 text-[12px] text-ink" title={sync.error ?? ""}><AlertTriangle size={13} className="shrink-0 text-danger" aria-hidden /><span className="truncate">{t("report.sync.error", { error: sync.error ?? "" })}</span></span>;
+  if (sync.state === "error") return <span role="status" className="flex min-w-0 max-w-[420px] items-center gap-1.5 text-[12px] text-ink" title={sync.error ?? ""}><AlertTriangle size={13} className="shrink-0 text-danger" aria-hidden /><span className="truncate">{t("report.sync.error", { error: sync.error ?? "" })}{lastSync(sync.lastSyncAt)}</span></span>;
   if (sync.state === "rate-limited" && sync.rateLimit) return <span role="status" className="flex items-center gap-1.5 text-[12px] text-ink"><AlertTriangle size={13} className="shrink-0 text-warning" aria-hidden />{t("report.sync.rateLimited", { when: formatWhen(sync.rateLimit.resetAt) })}</span>;
   const minutes = minutesSince(sync.lastSyncAt);
   // older than the export limit: said in words and marked, not a quiet grey line (INSP-V r2 #3)

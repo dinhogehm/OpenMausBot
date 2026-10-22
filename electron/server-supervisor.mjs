@@ -4,7 +4,8 @@
 // When the quick retries run out, `slowRetryDelaysMs` (if given) keeps trying
 // on a long backoff, its last delay repeating forever: a Mac left alone must
 // not stay down until someone clicks a dialog. onExhausted fires once per
-// streak, when the quick budget is spent.
+// streak, when the quick budget is spent, or when an unreaped child stops
+// recovery. Its payload distinguishes scheduled retries from a hard stop.
 export function createServerSupervisor({
   restart,
   stop,
@@ -36,7 +37,7 @@ export function createServerSupervisor({
 
   function schedule() {
     if (stopped || paused) return;
-    if (attempts === retryDelaysMs.length) onExhausted();
+    if (attempts === retryDelaysMs.length) onExhausted({ retrying: slowRetryDelaysMs.length > 0, reason: "budget" });
     if (attempts >= retryDelaysMs.length && !slowRetryDelaysMs.length) return;
     const slow = attempts - retryDelaysMs.length;
     const delay = slow < 0 ? retryDelaysMs[attempts] : slowRetryDelaysMs[Math.min(slow, slowRetryDelaysMs.length - 1)];
@@ -55,7 +56,7 @@ export function createServerSupervisor({
       }
       if (stopped || paused) return;
       if (result?.proc && ready(result.proc)) return;
-      if (result?.abort) onExhausted();
+      if (result?.abort) onExhausted({ retrying: false, reason: "stuck-child" });
       else schedule();
     }, delay);
     timer.unref?.();

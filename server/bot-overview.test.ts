@@ -55,8 +55,10 @@ describe("buildBotOverview", () => {
     expect(overview.does).toEqual([]);
   });
 
-  it("describes a fresh bot at the default level, Full access", () => {
-    expect(buildBotOverview(baseFacts()).wont).toEqual(WONT_ORDER.slice(1, -1));
+  // fork: a fresh bot (no saved level) is on Ask, never Full access.
+  it("describes a fresh bot at the default level, Ask", () => {
+    expect(buildBotOverview(baseFacts()).wont).toEqual(WONT_ORDER);
+    expect(buildBotOverview(baseFacts()).does).toEqual([]);
   });
 
   it("drops the first wont line when autoApprove is on", () => {

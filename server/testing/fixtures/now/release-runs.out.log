@@ -1,0 +1,221 @@
+ADMISSION_INTENT kind=release label=release:production:23a9f93c544a5e8c1c8035da781e926baeb2894a pid=14500
+ADMISSION_WAITING kind=release label=release:production:23a9f93c544a5e8c1c8035da781e926baeb2894a blocked_by=ci-full:72196 waited=0s limit=2700s
+ADMISSION_WAITING kind=release label=release:production:23a9f93c544a5e8c1c8035da781e926baeb2894a blocked_by=ci-full:72196 waited=600s limit=2700s
+ADMISSION_GRANTED kind=release label=release:production:23a9f93c544a5e8c1c8035da781e926baeb2894a pid=14500 waited=610s
+ADMISSION_RELEASE_STARTED_MARKER path=<release-started.json>
+ADMISSION_RELEASE_STARTED_WEBHOOK_SKIP reason=NURIA_CHAT_DEPLOY_START_WEBHOOK_URL-unset
+ADMISSION_LOAD_WAIT label=release:production load1=5.08 threshold=12.00 ncpu=10 clear=1/3 waited=0s
+ADMISSION_LOAD_CLEAR label=release:production load1=4.42 threshold=12.00 ncpu=10 waited=30s
+ADMISSION_NESTED kind=ci-full label=local-ci:23a9f93c544a holder_kind=release holder_pid=14500
+[13:03:30] build
+[13:05:18] lint
+[13:06:38] typecheck
+[13:09:31] tests
+[13:24:14] smart-deploy
+[13:35:53] migration-lint
+[13:35:56] migration-contracts
+[13:38:16] schema-syntax
+[13:38:19] script-contracts
+**Data:** 2026-10-03T13:52:40Z | **Branch:**  | **Commit:** 23a9f93c5 | **Duracao:** 668s
+=== RELEASE ORQUESTRADO ===
+=== DEPLOY ===
+[INFO] Impacto do release: incremental (alvos-localizados)
+[INFO] Banco/migrations: verificacao completa (embedded-ddl; review=schema)
+[OK] Migrations globais confirmadas em nuria-core
+[INFO] Workers a deployar (1): atendimento
+[INFO] [DRY-RUN] Snapshot, configs e migrations aprovados; nenhuma mutacao executada
+[OK] Migrations globais confirmadas em nuria-core
+[OK] Migrations globais confirmadas em nuria-core
+=== DEPLOY ===
+[INFO] Impacto do release: incremental (alvos-localizados)
+[OK] Migrations globais confirmadas em nuria-core
+[INFO] Workers a deployar (1): atendimento
+[INFO] Deploying atendimento...
+[INFO] Purging CDN cache...
+[OK] Concluido! (10371s)
+post-release: sample 1/5 all healthy
+post-release: sample 2/5 all healthy
+post-release: sample 3/5 all healthy
+post-release: sample 4/5 all healthy
+post-release: sample 5/5 all healthy
+POST_RELEASE_RESULT=healthy exit=0 record=<post-release record>
+-e Production receipt tag update — source tests already sealed by release
+Certification tag nuria-production-deployed advanced to 23a9f93c544a5e8c1c8035da781e926baeb2894a
+Release production completed for 23a9f93c544a5e8c1c8035da781e926baeb2894a
+ADMISSION_RELEASED kind=release pid=14500
+Release production completed for 23a9f93c5
+HEAD=f82d10edb Merge pull request #9367 from dinhogehm/chore/release-carrier-9356-widget-tickets-hmac
+ADMISSION_INTENT kind=release label=release:production:f82d10edb99b702a5c3a227121eabbbc33fbd1ac pid=88474
+ADMISSION_GRANTED kind=release label=release:production:f82d10edb99b702a5c3a227121eabbbc33fbd1ac pid=88474 waited=0s
+ADMISSION_RELEASE_STARTED_MARKER path=<release-started.json>
+ADMISSION_RELEASE_STARTED_WEBHOOK_SKIP reason=NURIA_CHAT_DEPLOY_START_WEBHOOK_URL-unset
+ADMISSION_LOAD_WAIT label=release:production load1=3.24 threshold=12.00 ncpu=10 clear=1/3 waited=0s
+ADMISSION_LOAD_CLEAR label=release:production load1=3.52 threshold=12.00 ncpu=10 waited=30s
+ADMISSION_NESTED kind=ci-full label=local-ci:f82d10edb99b holder_kind=release holder_pid=88474
+[18:53:02] build
+[18:54:45] lint
+[18:56:03] typecheck
+[18:59:03] tests
+[19:14:38] smart-deploy
+[19:27:16] migration-lint
+[19:27:19] migration-contracts
+[19:29:42] schema-syntax
+[19:29:45] script-contracts
+**Data:** 2026-10-03T19:37:59Z | **Branch:**  | **Commit:** f82d10edb | **Duracao:** 311s
+=== RELEASE ORQUESTRADO ===
+=== DEPLOY ===
+[INFO] Impacto do release: full (dependencia-compartilhada:package.json)
+[INFO] Banco/migrations: verificacao completa (database-state-unverified; review=unknown)
+[OK] Migrations globais confirmadas em nuria-core
+[INFO] Workers a deployar (46): db-gateway core auth agenda ai analytics atendimento automations backoffice bi billing calls contacts demos domain-proxy email-marketing email-router finder-colle
+[INFO] [DRY-RUN] Snapshot, configs e migrations aprovados; nenhuma mutacao executada
+[OK] Migrations globais confirmadas em nuria-core
+[OK] Migrations globais confirmadas em nuria-core
+=== DEPLOY ===
+[INFO] Impacto do release: full (dependencia-compartilhada:package.json)
+[OK] Migrations globais confirmadas em nuria-core
+[INFO] Workers a deployar (46): db-gateway core auth agenda ai analytics atendimento automations backoffice bi billing calls contacts demos domain-proxy email-marketing email-router finder-colle
+[INFO] Deploying db-gateway...
+[INFO] Deploying core...
+[INFO] Deploying auth...
+[INFO] Deploying agenda...
+[INFO] Deploying ai...
+[INFO] Deploying analytics...
+[INFO] Deploying atendimento...
+[INFO] Deploying automations...
+[INFO] Deploying backoffice...
+[INFO] Deploying bi...
+[INFO] Deploying billing...
+[INFO] Deploying calls...
+[INFO] Deploying contacts...
+[INFO] Deploying demos...
+[INFO] Deploying domain-proxy...
+[INFO] Deploying email-marketing...
+[INFO] Deploying email-router...
+[INFO] Deploying finder-collector...
+[INFO] Deploying finder...
+[INFO] Deploying flags...
+[INFO] Deploying forms...
+[INFO] Deploying github...
+[INFO] Deploying google-ads...
+[INFO] Deploying helpdesk...
+[INFO] Deploying knowledge...
+[INFO] Deploying link-redirect...
+[INFO] Deploying links...
+[INFO] Deploying mcp...
+[INFO] Deploying meets...
+[INFO] Deploying migrator...
+[INFO] Deploying notification...
+[INFO] Deploying nuria-assistant...
+[INFO] Deploying nuria...
+[INFO] Deploying onboarding...
+[INFO] Deploying payments...
+[INFO] Deploying portal...
+[INFO] Deploying projects...
+[INFO] Deploying scout...
+[INFO] Deploying shapes...
+[INFO] Deploying site...
+[INFO] Deploying suggest...
+[INFO] Deploying surveys...
+[INFO] Deploying talks...
+[INFO] Deploying widgets...
+[INFO] Deploying workflow...
+[INFO] Deploying gateway...
+[INFO] Deploying web...
+[INFO] Deploying widget Pages...
+[INFO] Purging CDN cache...
+[OK] Concluido! (9939s)
+post-release: sample 1/5 all healthy
+post-release: sample 2/5 all healthy
+post-release: sample 3/5 all healthy
+post-release: sample 4/5 all healthy
+post-release: sample 5/5 all healthy
+POST_RELEASE_RESULT=healthy exit=0 record=<post-release record>
+-e Production receipt tag update — source tests already sealed by release
+Certification tag nuria-production-deployed advanced to f82d10edb99b702a5c3a227121eabbbc33fbd1ac
+Release production completed for f82d10edb99b702a5c3a227121eabbbc33fbd1ac
+ADMISSION_RELEASED kind=release pid=88474
+Release production completed for f82d10edb
+HEAD=f9e7a2350 Merge pull request #9369 from dinhogehm/chore/release-carrier-9352-sidebar-fila-atendimento
+ADMISSION_INTENT kind=release label=release:production:f9e7a2350e58397d155858568184650b66e24a91 pid=76254
+ADMISSION_GRANTED kind=release label=release:production:f9e7a2350e58397d155858568184650b66e24a91 pid=76254 waited=0s
+ADMISSION_RELEASE_STARTED_MARKER path=<release-started.json>
+ADMISSION_RELEASE_STARTED_WEBHOOK_SKIP reason=NURIA_CHAT_DEPLOY_START_WEBHOOK_URL-unset
+ADMISSION_LOAD_WAIT label=release:production load1=3.27 threshold=12.00 ncpu=10 clear=1/3 waited=0s
+ADMISSION_LOAD_CLEAR label=release:production load1=3.36 threshold=12.00 ncpu=10 waited=30s
+ADMISSION_NESTED kind=ci-full label=local-ci:f9e7a2350e58 holder_kind=release holder_pid=76254
+[23:16:52] build
+[23:18:43] lint
+[23:19:59] typecheck
+[23:22:27] tests
+[23:37:13] smart-deploy
+[23:46:38] script-contracts
+**Data:** 2026-10-03T23:54:37Z | **Branch:**  | **Commit:** f9e7a2350 | **Duracao:** 293s
+=== RELEASE ORQUESTRADO ===
+=== DEPLOY ===
+[INFO] Impacto do release: incremental (alvos-localizados)
+[INFO] Banco/migrations: NAO APLICAVEL (queries-without-schema-change; baseline=f82d10edb99b702a5c3a227121eabbbc33fbd1ac)
+[INFO] Workers a deployar (0):
+[INFO] [DRY-RUN] Snapshot, configs e migrations aprovados; nenhuma mutacao executada
+=== DEPLOY ===
+[INFO] Impacto do release: incremental (alvos-localizados)
+[INFO] Workers a deployar (0):
+[INFO] Deploying web...
+[INFO] Purging CDN cache...
+[OK] Concluido! (530s)
+post-release: sample 1/5 all healthy
+post-release: sample 2/5 all healthy
+post-release: sample 3/5 all healthy
+post-release: sample 4/5 all healthy
+post-release: sample 5/5 all healthy
+POST_RELEASE_RESULT=healthy exit=0 record=<post-release record>
+-e Production receipt tag update — source tests already sealed by release
+Certification tag nuria-production-deployed advanced to f9e7a2350e58397d155858568184650b66e24a91
+Release production completed for f9e7a2350e58397d155858568184650b66e24a91
+ADMISSION_RELEASED kind=release pid=76254
+Release production completed for f9e7a2350
+HEAD=3c04d7c3d Merge pull request #9370 from dinhogehm/chore/release-carrier-9195-rodizio-equipe-atomico
+ADMISSION_INTENT kind=release label=release:production:3c04d7c3d2608c36f082fded54bcb0d99e833a85 pid=83221
+ADMISSION_GRANTED kind=release label=release:production:3c04d7c3d2608c36f082fded54bcb0d99e833a85 pid=83221 waited=0s
+ADMISSION_RELEASE_STARTED_MARKER path=<release-started.json>
+ADMISSION_RELEASE_STARTED_WEBHOOK_SKIP reason=NURIA_CHAT_DEPLOY_START_WEBHOOK_URL-unset
+ADMISSION_LOAD_WAIT label=release:production load1=2.94 threshold=12.00 ncpu=10 clear=1/3 waited=0s
+ADMISSION_LOAD_CLEAR label=release:production load1=3.51 threshold=12.00 ncpu=10 waited=30s
+ADMISSION_NESTED kind=ci-full label=local-ci:3c04d7c3d260 holder_kind=release holder_pid=83221
+[00:59:17] build
+[01:01:05] lint
+[01:02:15] typecheck
+[01:04:37] tests
+[01:19:52] smart-deploy
+[01:29:07] migration-lint
+[01:29:09] migration-contracts
+[01:31:27] schema-syntax
+[01:31:29] script-contracts
+**Data:** 2026-10-04T01:39:30Z | **Branch:**  | **Commit:** 3c04d7c3d | **Duracao:** 301s
+=== RELEASE ORQUESTRADO ===
+=== DEPLOY ===
+[INFO] Impacto do release: incremental (alvos-localizados)
+[INFO] Banco/migrations: verificacao completa (unclassified-sql; review=unknown)
+[OK] Migrations globais confirmadas em nuria-core
+[INFO] Workers a deployar (1): helpdesk
+[INFO] [DRY-RUN] Snapshot, configs e migrations aprovados; nenhuma mutacao executada
+[OK] Migrations globais confirmadas em nuria-core
+[OK] Migrations globais confirmadas em nuria-core
+=== DEPLOY ===
+[INFO] Impacto do release: incremental (alvos-localizados)
+[OK] Migrations globais confirmadas em nuria-core
+[INFO] Workers a deployar (1): helpdesk
+[INFO] Deploying helpdesk...
+[INFO] Purging CDN cache...
+[OK] Concluido! (8874s)
+post-release: sample 1/5 all healthy
+post-release: sample 2/5 all healthy
+post-release: sample 3/5 all healthy
+post-release: sample 4/5 all healthy
+post-release: sample 5/5 all healthy
+POST_RELEASE_RESULT=healthy exit=0 record=<post-release record>
+-e Production receipt tag update — source tests already sealed by release
+Certification tag nuria-production-deployed advanced to 3c04d7c3d2608c36f082fded54bcb0d99e833a85
+Release production completed for 3c04d7c3d2608c36f082fded54bcb0d99e833a85
+ADMISSION_RELEASED kind=release pid=83221
+Release production completed for 3c04d7c3d

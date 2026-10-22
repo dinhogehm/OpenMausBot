@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,36 @@ describe("webhook-only ingress", () => {
     expect(await health.json()).toEqual({ app: "openmausbot-webhooks", ready: true });
     expect((await fetch(`${ingress.baseUrl}/api/bots`)).status).toBe(404);
   });
+
+  it("rejects malformed request targets without terminating the receiver", () => {
+    // Keep a potential unhandled server rejection inside a disposable process,
+    // so a regression cannot terminate the test runner or a real workspace.
+    const child = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+      import { request } from "node:http";
+      import { listenWebhookIngress } from ${JSON.stringify(new URL("./webhook-ingress.ts", import.meta.url).href)};
+      const receiver = await listenWebhookIngress({ authorize: () => false, recordUnauthorized: () => null }, { port: 0 });
+      try {
+        const invalid = await new Promise((resolve, reject) => {
+          const req = request({ hostname: "127.0.0.1", port: receiver.port, path: "http://[", method: "GET" }, res => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode));
+          });
+          req.on("error", reject);
+          req.end();
+        });
+        const health = await fetch(receiver.baseUrl + "/health");
+        console.log(JSON.stringify({ invalid, health: health.status, body: await health.json() }));
+      } finally {
+        receiver.server.closeAllConnections();
+        await new Promise(resolve => receiver.server.close(resolve));
+      }
+    `], { encoding: "utf8", timeout: 10_000 });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout.trim())).toEqual({
+      invalid: 400, health: 200, body: { app: "openmausbot-webhooks", ready: true },
+    });
+  }, 15_000);
 
   it("accepts capability URLs and deduplicates retries", async () => {
     const credential = webhookCredential(ingress.baseUrl, endpointId, secret);

@@ -26,7 +26,11 @@ async function launch(boat?: string, enterprise?: { dir: string; licenseKey: str
   const file = (threadId: string, extension: string) => join(dataDir, `${threadId}.${extension}`);
   const dump = async (threadId: string) => {
     await expect.poll(() => existsSync(file(threadId, "json")), { timeout: 20_000 }).toBe(true);
-    return JSON.parse(readFileSync(file(threadId, "json"), "utf8"));
+    const launched = JSON.parse(readFileSync(file(threadId, "json"), "utf8"));
+    // This fork: a Claude turn's per-turn sections (the surface plan among
+    // them) ride its first message, not the cached system prompt.
+    const first = launched.prompt?.message?.content ?? launched.prompt;
+    return { ...launched, systemPrompt: `${launched.systemPrompt ?? ""}\n${typeof first === "string" ? first : JSON.stringify(first ?? "")}` };
   };
   const messages = async (threadId: string) => (await api("GET", `/api/threads/${threadId}/messages?limit=100`)).messages as any[];
   const botsNow = async () => (await api("GET", "/api/bots")).bots as any[];
@@ -191,7 +195,11 @@ it("queues reports that find the Chief's incidents thread busy, answers them tog
     const second = await dump(incidents);
     expect(JSON.stringify(second.prompt)).toContain("Cara's run in its thread #File the expense report. failed");
     expect(Object.keys(second.mcpConfig.mcpServers)).not.toContain("computer");
-    expect(second.systemPrompt).toContain("This turn answers a Team incidents report and your computer could not be prepared for it");
+    // This fork: the same session already holds that per-turn note (first
+    // turn above); it is sent again only when it changes, so this turn either
+    // repeats it or carries no other surface.
+    expect(second.systemPrompt.includes("This turn answers a Team incidents report and your computer could not be prepared for it")
+      || !second.systemPrompt.includes("Your team shares the cloud computer")).toBe(true);
     expect((await control(["wait", "--bot", chief.id, "--task", incidents, "--timeout", "30"])).status).toBe("settled");
 
     const lines = await messages(incidents);

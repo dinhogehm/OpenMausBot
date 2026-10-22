@@ -101,6 +101,7 @@ export class BotCreationDraft {
       updatedAt: Date.now(), nextRunAt: null, runOn: "maus", ...previous, ...fields,
       enabled: input.enabled ?? previous?.enabled ?? true, target: "bot", botId: this.id,
       timeoutMinutes: input.timeoutMinutes ?? undefined,
+      lane: input.lane ?? undefined,
       durationMinutes: input.durationMinutes ?? previous?.durationMinutes ?? 30,
       schedule: normalizedSchedule,
     };

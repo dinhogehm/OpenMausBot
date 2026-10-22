@@ -1,10 +1,12 @@
 // Everything that waits on the person, across all bots: approvals a bot
 // stopped for, goals that asked, bots whose last reply asked something. One
 // list, oldest first — what has waited longest is what to answer first.
-import type { Bot, Task } from "@/state/store";
+import { visibleMessages, type Bot, type Message, type Task } from "@/state/store";
 import { t } from "@/lib/i18n";
 import type { WireOwnerPending } from "../../shared/wire";
 import { isMentionOnly, stripLeadingMentions } from "../../shared/owner-pending-title";
+import { displayThreadTitle, isHandoffTitle } from "@/lib/thread-title";
+import { toolLabel } from "@/components/ApprovalCard";
 
 export type NeedsYouStep = NonNullable<WireOwnerPending["steps"]>[number];
 export type NeedsYouOption = NonNullable<WireOwnerPending["options"]>[number];
@@ -19,6 +21,8 @@ export interface NeedsYouItem {
   rawTitle?: string;
   /** The conversation it came from ("Abrir conversa"). */
   threadTitle?: string;
+  /** That conversation is a routine's run, or archived: it still opens, and the screen says which. */
+  threadKind?: "routine" | "archived";
   since: number;
   approval: boolean;
   /** An owner_pending item: its id (the person can resolve it), deadline and link. */
@@ -41,13 +45,61 @@ export interface NeedsYouItem {
   awaitingSince?: number;
   /** When the bot last rewrote it. */
   updatedAt?: number;
+  /** A routine's item said once and let go: under "Talvez já resolvido", out of the count and the chip. */
+  demotedAt?: number;
+  /** "Delegar a um agente" (lote del): the button shows; else why only the person can do it. */
+  delegable?: true;
+  onlyYou?: string;
+  /** Delegated to a Claude Code session: it waits on the session, out of the count. */
+  delegation?: NonNullable<WireOwnerPending["delegation"]>;
+  /** Back from a delegation: on top, with what the agent did and what is left. */
+  delegationBack?: NonNullable<WireOwnerPending["delegationBack"]>;
+  /** Another item said its commands must not run: decisions and commands off (R13-intake #1). */
+  superseded?: NonNullable<WireOwnerPending["superseded"]>;
+  /** Its commands write a fixed sheet row and are older than 6 h. */
+  rowWarning?: string;
+  /** An approval (or a provider question) the conversation stopped on: the
+   * cards still open there, oldest first — the panel shows what each asks
+   * and offers the same decisions as the chat. Absent: not known (a server
+   * older than this field), the panel falls back to "Abrir conversa". */
+  requests?: Message[];
 }
+
+/** A card still waiting on an answer (an approval, a provider question):
+ * answered, dismissed and expired ones are settled. */
+export const openRequestCard = (message: Pick<Message, "kind" | "card">): boolean =>
+  message.kind === "options" && Boolean(message.card?.requestId) && !message.card?.answered && !message.card?.dismissed && !message.card?.expired;
+
+/** The open cards of a conversation that waits on the person: what the chat
+ * holds when it is the bot's open conversation (live, settles the moment it
+ * is answered there), else what the server said with the conversation.
+ * null: not known. An empty list: nothing left to answer there. */
+export function openRequests(bot: Pick<Bot, "threadId" | "messages" | "activeLeafId">, task: Pick<Task, "threadId" | "pendingRequests">): Message[] | null {
+  const chat = task.threadId === bot.threadId && bot.messages?.length ? visibleMessages(bot) : null;
+  const live = chat?.filter(openRequestCard) ?? null;
+  if (live?.length) return live;
+  // else the server's list — over a chat that shows nothing open too: the card may not have arrived
+  // yet — but never a card the chat already settled (answered there a moment before the next frame)
+  const settled = new Set((chat ?? []).filter((message) => message.card?.requestId && !openRequestCard(message)).map((message) => message.card!.requestId!));
+  return task.pendingRequests?.filter((message) => openRequestCard(message) && !settled.has(message.card!.requestId!)) ?? null;
+}
+
+/** What an open card asks, as the list's title: "<bot> quer <ação>" for an
+ * approval, the question for a question. */
+export function requestTitle(request: Message, botName: string): string {
+  const card = request.card!;
+  if (!card.tool) return card.title.trim() || t("needsYou.answerBot", { name: botName });
+  return t("approval.card.namedWantsTo", { name: botName, action: toolLabel(card.tool) });
+}
+
+/** A routine's item said once and let go (INSP-N22 r2 F2): shown apart, folded, never counted as waiting on the person. */
+export const maybeResolved = (item: Pick<NeedsYouItem, "demotedAt">): boolean => item.demotedAt !== undefined;
 
 /** How long an answered item waits on its bot before it comes back to the
  * person as "o bot não respondeu" (INSP-J2 #2). */
 export const AWAITING_MAX_MS = 2 * 3_600_000;
 
-type Awaitable = Pick<NeedsYouItem, "awaitingSince" | "history">;
+type Awaitable = Pick<NeedsYouItem, "awaitingSince" | "history"> & { delegation?: unknown };
 
 /** The person's last answer still waits its turn in a busy conversation: the
  * bot has not had it (INSP-J2 r3 R2). */
@@ -57,7 +109,11 @@ export const answerQueued = (item: Awaitable): boolean =>
 /** Answered, and its bot still has time to rewrite or resolve it — or the
  * answer waits its turn, within the same 2 h: not the person's. */
 export const awaitingBot = (item: Awaitable, now: number): boolean =>
-  item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS;
+  // delegated to an agent (lote del): it waits on the session the same way
+  item.delegation !== undefined || (item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS);
+
+/** Delegated to an agent (lote del): it waits on the session, like an answered item on its bot. */
+export const delegated = (item: Pick<NeedsYouItem, "delegation">): boolean => item.delegation !== undefined;
 
 /** Answered, and the bot did nothing for AWAITING_MAX_MS since it got it: the person's again. */
 export const botSilent = (item: Awaitable, now: number): boolean =>
@@ -80,8 +136,8 @@ export function answerNotDelivered(item: Awaitable & Pick<NeedsYouItem, "updated
   return last;
 }
 
-/** What waits on the person (the count, the sidebar, the badge): not what waits on a bot. */
-export const waitingOnYou = <T extends Awaitable>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
+/** What waits on the person (the count, the sidebar, the badge): not what waits on a bot, nor what may be resolved already. */
+export const waitingOnYou = <T extends Awaitable & Pick<NeedsYouItem, "demotedAt">>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now) && !maybeResolved(item));
 
 /** When the next answered item goes back to the person (its bot's 2 h run
  * out, delivered or still queued), or null: the sidebar re-renders exactly
@@ -171,13 +227,15 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
     if (bot.hidden) continue;
     const tasks: Task[] = bot.tasks ?? [{ threadId: bot.threadId, title: bot.name, createdAt: 0, activity: bot.activity, goalNeedsInput: bot.goalNeedsInput, goalNeedsInputSince: bot.goalNeedsInputSince } as Task];
     for (const task of tasks) {
-      if (task.routineRunId || task.archivedAt) continue;
+      // an item stays the person's wherever the bot opened it: a routine's run
+      // or an archived conversation hides only the conversation's own line below
+      const threadKind = task.routineRunId ? "routine" as const : task.archivedAt ? "archived" as const : undefined;
       // listed by the bot (or the server): one row each, until resolved
       for (const pending of task.ownerPending ?? []) {
         // never the "why" as the title: it is shown under it (INSP-I r1 #2)
         const title = needsYouTitle(pending.title, { botName: bot.name, botNames });
         items.push({
-          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title,
+          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: displayThreadTitle(task.title, botNames), title, ...(threadKind ? { threadKind } : {}),
           // a mention was set aside: what the bot wrote stays one line away (INSP-I r2 #1);
           // moved references or a capital letter are no reason to repeat it (INSP-I r3 #2)
           ...(stripLeadingMentions(pending.title, botNames) !== pending.title.replace(/\s+/g, " ").trim() ? { rawTitle: pending.title } : {}),
@@ -189,14 +247,34 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.history?.length ? { history: pending.history } : {}),
           ...(pending.awaitingSince ? { awaitingSince: pending.awaitingSince } : {}),
           ...(pending.updatedAt ? { updatedAt: pending.updatedAt } : {}),
+          ...(pending.demotedAt ? { demotedAt: pending.demotedAt } : {}),
+          // "Delegar a um agente" (lote del)
+          ...(pending.delegable ? { delegable: true as const } : {}), ...(pending.onlyYou ? { onlyYou: pending.onlyYou } : {}),
+          ...(pending.delegation ? { delegation: pending.delegation } : {}), ...(pending.delegationBack ? { delegationBack: pending.delegationBack } : {}),
+          ...(pending.superseded ? { superseded: pending.superseded } : {}), ...(pending.rowWarning ? { rowWarning: pending.rowWarning } : {}),
         });
       }
+      // the conversation's own line (an approval, a question): never from a routine's run nor an archived one
+      if (threadKind) continue;
       const approval = task.activity === "waiting-on-you";
-      if (!approval && task.goalNeedsInput !== true) continue;
+      // an approval answered (or expired) already, in the chat or anywhere: nothing left to do here
+      const requests = approval ? openRequests(bot, task) : null;
+      const waiting = approval && (requests === null || requests.length > 0);
+      if (!waiting && task.goalNeedsInput !== true) continue;
       // the bot's question says what it waits for better than the conversation's title
       const ask = task.goalNeedsInputAsk?.trim();
-      const title = ask || needsYouTitle(task.title, { botName: bot.name, botNames });
-      items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval });
+      // an approval says the action it waits on, never only who asks (the conversation is named under it)
+      const first = waiting && requests?.length ? requests[0]! : null;
+      // a teammate's handoff conversation ("@Chief of Staff · work") reads as one, never "· work" (R11-visual N9)
+      const title = first ? requestTitle(first, first.from?.name ?? bot.name)
+        : ask || (isHandoffTitle(task.title) ? displayThreadTitle(task.title, botNames) : needsYouTitle(task.title, { botName: bot.name, botNames }));
+      items.push({
+        botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: displayThreadTitle(task.title, botNames), title,
+        since: first?.at ?? task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval: waiting,
+        // the server asked the bot to register the question as an item with steps (lot J2): the screen says so
+        ...(!waiting && task.goalNeedsInputStepsAskedAt ? { stepsRequestedAt: task.goalNeedsInputStepsAskedAt } : {}),
+        ...(waiting && requests?.length ? { requests } : {}),
+      });
     }
   }
   return items.sort((a, b) => a.since - b.since);
@@ -261,6 +339,13 @@ export type NeedsYouSort = "due" | "age";
 /** "due": what falls due first (items without a deadline after, oldest
  * first); "age": what has waited longest. */
 export function sortNeedsYou(items: readonly NeedsYouItem[], sort: NeedsYouSort, now = Date.now()): NeedsYouItem[] {
+  const sorted = sortedNeedsYou(items, sort, now);
+  // back from a delegation: on top, the latest first (lote del)
+  const back = sorted.filter((item) => item.delegationBack).sort((a, b) => b.delegationBack!.at - a.delegationBack!.at);
+  return back.length ? [...back, ...sorted.filter((item) => !item.delegationBack)] : sorted;
+}
+
+function sortedNeedsYou(items: readonly NeedsYouItem[], sort: NeedsYouSort, now: number): NeedsYouItem[] {
   if (sort === "age") return items.toSorted((a, b) => a.since - b.since);
   const when = new Map(items.map((item) => [item, dueAt(item.due, now)]));
   return items.toSorted((a, b) => {

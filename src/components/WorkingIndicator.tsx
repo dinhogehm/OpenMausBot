@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 import { formatElapsed } from "@/lib/working-time";
+import { onSecond } from "@/lib/shared-clock";
 
 export function WorkingDots({ size = 4, className }: { size?: number; className?: string }) {
   return (
@@ -25,8 +26,7 @@ export function WorkingTimer({ since, className }: { since: number; className?: 
       if (node.current) node.current.textContent = formatElapsed(Date.now() - since);
     };
     tick();
-    const timer = setInterval(tick, 1000);
-    return () => clearInterval(timer);
+    return onSecond(tick);
   }, [since]);
   return <span ref={node} className={cn("tabular-nums", className)} />;
 }

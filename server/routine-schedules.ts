@@ -170,6 +170,21 @@ export function loadSchedule(value: unknown, after: number): RoutineSchedule | n
   }
 }
 
+/** The shortest gap between the next few occurrences after `from` (null: fewer than two). */
+export function scheduleCadenceMs(schedule: RoutineSchedule, from: number): number | null {
+  if (schedule.type === "interval") return schedule.everyMinutes * 60_000;
+  if (schedule.type === "once" || schedule.type === "limit_reset") return null;
+  let shortest: number | null = null;
+  let at = nextOccurrence(schedule, from);
+  for (let i = 0; i < 3 && at !== null; i++) {
+    const next = nextOccurrence(schedule, at);
+    if (next === null) break;
+    shortest = shortest === null ? next - at : Math.min(shortest, next - at);
+    at = next;
+  }
+  return shortest;
+}
+
 export function nextOccurrence(schedule: RoutineSchedule, after: number): number | null {
   if (schedule.type === "once") return schedule.at > after ? schedule.at : null;
   if (schedule.type === "limit_reset") return schedule.at !== null && schedule.at > after ? schedule.at : null;

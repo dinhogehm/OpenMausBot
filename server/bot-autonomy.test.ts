@@ -16,10 +16,14 @@ import {
   parseGoalInput,
   parsePromiseInput,
   prsCited,
+  goalCitedPrs,
+  productionGoalProblem,
+  citedPrsOutcome,
   lastQuestionAt,
   ownerAskAt,
   ownerAsk,
   ownerAskText,
+  echoAsk,
   ownerPendingReplyText,
   ownerPendingAwaitNote,
   ownerPendingRemindReport,
@@ -42,6 +46,20 @@ import {
   wakeFiredChip,
   watchLabel,
   wakePrompt,
+  noteWrittenAt,
+  questionStepsAutoReport,
+  questionReportRef,
+  QUESTION_REPORT_PREFIX,
+  parseReplacesAsk,
+  ANSWERED_IN_CONVERSATION,
+  answerToAsk,
+  answeredInConversationReport,
+  ANSWER_WINDOW_MS,
+  INTERRUPTED_PREFIX,
+  STALE_PREFIX,
+  OUTWARD_CUT_PREFIX,
+  outwardCutNote,
+  leaseRecoveryFor,
 } from "./bot-autonomy.ts";
 
 let dir: string;
@@ -75,6 +93,12 @@ describe("input parsing", () => {
     expect(parseGoalEndInput({ status: "needs_input", detail: "which env?" })).toEqual({ ok: true, status: "needs-input", detail: "which env?" });
     expect(parseGoalEndInput({ status: "done", detail: "x" }).ok).toBe(false);
     expect(parseGoalEndInput({ status: "completed" }).ok).toBe(false);
+    // completed needs a proof someone can check, not just a detail
+    expect(parseGoalEndInput({ status: "completed", detail: "entregue" })).toMatchObject({ ok: false, error: expect.stringContaining("proof") });
+    expect(parseGoalEndInput({ status: "completed", detail: "entregue", proof: "tudo certo" }).ok).toBe(false);
+    expect(parseGoalEndInput({ status: "completed", detail: "entregue", proof: "PR #9528 em produção (recibo 61a5d68cd)" })).toEqual({ ok: true, status: "completed", detail: "entregue — prova: PR #9528 em produção (recibo 61a5d68cd)", proof: "PR #9528 em produção (recibo 61a5d68cd)" });
+    // blocked and needs_input carry no proof
+    expect(parseGoalEndInput({ status: "blocked", detail: "o Jev barrou" })).toEqual({ ok: true, status: "blocked", detail: "o Jev barrou" });
   });
 });
 
@@ -350,6 +374,10 @@ describe("leases across a restart", () => {
     autonomy.leaseWake(wake);
     expect(autonomy.wakeFor("t1")).toBeNull();
     const reloaded = make(); // restart mid-turn
+    // this fork: held until the host has looked at the cut turn (resumeCutLeases)
+    expect(reloaded.wakeFor("t1")).toBeNull();
+    expect(reloaded.recoveringLeases().map((lease) => lease.threadId)).toEqual(["t1"]);
+    reloaded.reconcileRecoveredLeases(() => ({ kind: "rerun" }));
     const back = reloaded.wakeFor("t1")!;
     expect(back.reason).toContain("interrompida por um restart");
     expect(back.reason).toContain("checar o deploy");
@@ -368,6 +396,7 @@ describe("leases across a restart", () => {
     expect(autonomy.leaseReports("t2")?.items).toEqual(["PR #9300 pronta"]);
     expect(autonomy.hasReports("t2")).toBe(false);
     const reloaded = make();
+    reloaded.reconcileRecoveredLeases(() => ({ kind: "rerun" }));
     const back = reloaded.takeReports("t2")!;
     expect(back.items[0]).toContain("interrompida por um restart");
     expect(back.items).toContain("PR #9300 pronta");
@@ -422,6 +451,7 @@ describe("leases across a restart", () => {
     now += 7 * 3_600_000;
     autonomy.leaseWake(autonomy.setWake("bot", "t2", 1, "checar o deploy de novo"));
     const reloaded = make();
+    reloaded.reconcileRecoveredLeases(() => ({ kind: "rerun" }));
     expect(reloaded.wakeFor("t1")).toBeNull();
     const asked = reloaded.takeReports("t1")!;
     expect(asked.items[0]).toContain("NÃO foi repetido automaticamente");
@@ -435,6 +465,144 @@ describe("leases across a restart", () => {
     const watch = autonomy.setWatch("bot", "t1", { command: "gog chat messages list", argv: ["gog"], everyMinutes: 3, maxMinutes: 60, reason: "chat", baseline: "m1", standing: true });
     autonomy.leaseWake(watch);
     expect(make().standingFor("t1")?.watch?.baseline).toBe("m1");
+  });
+});
+
+// This fork: a turn a restart cut off with its wake or reports leased is
+// given back only after the host looked at it (resumeCutLeases in index.ts):
+// one that already acted outward is never run again, and one whose own root
+// goes on (teammates' results, the person's cards) is not run a second way.
+describe("cut leases, looked at before they are given back", () => {
+  const ledger = () => JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")) as { inFlight?: Array<{ threadId: string }>; reports?: Array<{ threadId: string; items: string[] }> };
+
+  it("decides from what the host found: its own live root wins, then an outward action, else a rerun", () => {
+    const lease = { startedAt: 1_000 };
+    expect(leaseRecoveryFor(lease, { roots: [], outward: [] })).toEqual({ kind: "rerun" });
+    expect(leaseRecoveryFor(lease, { roots: [], outward: ["git push", "npm run pr:merge"] })).toEqual({ kind: "outward", labels: ["git push", "npm run pr:merge"] });
+    // a root of an earlier autonomous turn in the conversation is not this one's
+    expect(leaseRecoveryFor(lease, { roots: [{ createdAt: 999 }], outward: [] })).toEqual({ kind: "rerun" });
+    expect(leaseRecoveryFor(lease, { roots: [{ createdAt: 999 }, { createdAt: 1_000 }], outward: [] })).toEqual({ kind: "continued" });
+    // the root goes on by itself: even after an outward action nothing is given back (its resume is the one path)
+    expect(leaseRecoveryFor(lease, { roots: [{ createdAt: 1_500 }], outward: ["git push"] })).toEqual({ kind: "continued" });
+  });
+
+  it("writes the question with what the turn did, capped, or that it could not be read", () => {
+    const note = outwardCutNote(["git push", "npm run pr:merge"]);
+    expect(note.startsWith(OUTWARD_CUT_PREFIX)).toBe(true);
+    expect(note).toContain("NÃO foi repetido automaticamente");
+    expect(note).toContain("já tinha agido para fora antes do corte: git push, npm run pr:merge.");
+    expect(note).toContain("Não repita nada disso");
+    const many = Array.from({ length: 11 }, (_, i) => `gh pr comment ${i}`);
+    expect(outwardCutNote(many)).toContain("gh pr comment 7 e mais 3.");
+    expect(outwardCutNote(many)).not.toContain("gh pr comment 8");
+    expect(outwardCutNote([])).toContain("não deu para conferir o que ele já tinha feito para fora");
+  });
+
+  it("holds a cut lease as a lease on disk until it is looked at: a second restart loses nothing", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("bot", "t1", 1, "checar a tag"));
+    now += 60_000;
+    const first = make();
+    expect(first.wakeFor("t1")).toBeNull();
+    expect(first.reportThreads()).toEqual([]);
+    expect(first.wakeHold(60 * 60_000)).toMatchObject({ hold: true, reason: "running" });
+    expect(ledger().inFlight?.map((lease) => lease.threadId)).toEqual(["t1"]);
+    // the server died again before its first tick
+    const second = make();
+    expect(second.recoveringLeases().map((lease) => lease.threadId)).toEqual(["t1"]);
+    expect(second.recoveredOnLoad.map((lease) => [lease.threadId, lease.stale])).toEqual([["t1", false]]);
+    second.reconcileRecoveredLeases(() => ({ kind: "rerun" }));
+    expect(second.wakeFor("t1")?.reason).toBe(`${INTERRUPTED_PREFIX} checar a tag`);
+    expect(second.recoveringLeases()).toEqual([]);
+    expect(ledger().inFlight).toEqual([]);
+    // looked at once: a later call gives nothing back again
+    second.reconcileRecoveredLeases(() => { throw new Error("never asked again"); });
+    expect(second.reportThreads()).toEqual([]);
+  });
+
+  it("does not run again a cut turn that acted outward: the bot is asked, with what it did, and the report says so", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("chief", "t1", 1, "mesclar a PR #9300 quando o gate passar"));
+    autonomy.addReport("monitor", "t2", "Relatório da sessão #9301");
+    autonomy.leaseReports("t2");
+    now += 60_000;
+    const reloaded = make();
+    const labels: Record<string, string[]> = { t1: ["npm run pr:merge", "git push"], t2: ["gog chat send"] };
+    const asked: string[] = [];
+    reloaded.reconcileRecoveredLeases((lease) => {
+      asked.push(lease.threadId);
+      return { kind: "outward", labels: labels[lease.threadId]! };
+    });
+    expect(asked).toEqual(["t1", "t2"]);
+    // never run again: no wake comes back
+    expect(reloaded.wakeFor("t1")).toBeNull();
+    expect(reloaded.dueWakes()).toEqual([]);
+    const wake = reloaded.takeReports("t1")!;
+    expect(wake.items).toEqual([outwardCutNote(["npm run pr:merge", "git push"]), "Wake-up note: mesclar a PR #9300 quando o gate passar"]);
+    expect(wake.items.some((item) => item.includes(INTERRUPTED_PREFIX))).toBe(false);
+    const reports = reloaded.takeReports("t2")!;
+    expect(reports.items).toEqual([outwardCutNote(["gog chat send"]), "Relatório da sessão #9301"]);
+    expect(reloaded.recoveredOnLoad.map((lease) => [lease.threadId, lease.outward, lease.continued])).toEqual([["t1", ["npm run pr:merge", "git push"], undefined], ["t2", ["gog chat send"], undefined]]);
+    expect(ledger().inFlight).toEqual([]);
+  });
+
+  it("asks about a stale lease whose turn acted outward with what it did, not the stale note alone", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("bot", "t1", 1, "responder ao cliente ACME"));
+    now += 7 * 3_600_000;
+    const reloaded = make();
+    reloaded.reconcileRecoveredLeases(() => ({ kind: "outward", labels: ["gog gmail send"] }));
+    const asked = reloaded.takeReports("t1")!;
+    expect(asked.items[0]).toBe(outwardCutNote(["gog gmail send"]));
+    expect(asked.items[0]).not.toBe(STALE_PREFIX);
+    expect(asked.items[1]).toContain("responder ao cliente ACME");
+  });
+
+  it("gives nothing back when the cut turn's own root goes on: one path, not a second turn beside it", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("chief", "t1", 1, "delegar a revisão da #9302"));
+    autonomy.addReport("chief", "t2", "QA terminou a #9303");
+    autonomy.leaseReports("t2");
+    now += 60_000;
+    const reloaded = make();
+    reloaded.reconcileRecoveredLeases(() => ({ kind: "continued" }));
+    expect(reloaded.wakeFor("t1")).toBeNull();
+    expect(reloaded.dueWakes()).toEqual([]);
+    expect(reloaded.reportThreads()).toEqual([]);
+    expect(reloaded.recoveredOnLoad.map((lease) => lease.continued)).toEqual([true, true]);
+    expect(reloaded.wakeHold(60 * 60_000)).toEqual({ hold: false });
+    expect(ledger().inFlight).toEqual([]);
+    // and the next restart finds nothing to give back
+    expect(make().recoveringLeases()).toEqual([]);
+  });
+
+  it("does not run a cut turn whose rows could not be read: asked, as one that may have acted", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("bot", "t1", 1, "publicar o release"));
+    now += 60_000;
+    const reloaded = make();
+    reloaded.reconcileRecoveredLeases(() => { throw new Error("runtime.db is locked"); });
+    expect(reloaded.wakeFor("t1")).toBeNull();
+    expect(reloaded.takeReports("t1")?.items).toEqual([outwardCutNote([]), "Wake-up note: publicar o release"]);
+    expect(reloaded.recoveredOnLoad[0]?.outward).toEqual([]);
+  });
+
+  it("drops a held lease the person stopped, or whose conversation went, before it is looked at", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("bot", "t1", 1, "checar o chat"));
+    autonomy.addReport("bot", "t2", "relatório");
+    autonomy.leaseReports("t2");
+    now += 60_000;
+    const reloaded = make();
+    expect(reloaded.dropRecoveredLeases("t1").map((lease) => lease.kind)).toEqual(["wake"]);
+    expect(reloaded.dropRecoveredLeases("t1")).toEqual([]);
+    reloaded.forgetThread("t2");
+    expect(ledger().inFlight).toEqual([]);
+    reloaded.reconcileRecoveredLeases(() => ({ kind: "rerun" }));
+    expect(reloaded.wakeFor("t1")).toBeNull();
+    expect(reloaded.reportThreads()).toEqual([]);
+    expect(reloaded.recoveredOnLoad.map((lease) => [lease.threadId, lease.dropped])).toEqual([["t1", true], ["t2", true]]);
+    expect(make().recoveringLeases()).toEqual([]);
   });
 });
 
@@ -898,7 +1066,11 @@ describe("reports", () => {
 });
 
 describe("a goal waiting on the person about a PR", () => {
-  it("reads the PRs its question cites, and closes it when the question is moot", () => {
+  const ASKED = Date.UTC(2026, 9, 9, 12, 0);
+  const after = ASKED + 3_600_000;
+  const before = ASKED - 3_600_000;
+
+  it("reads the PRs its question cites, and the server only ever stops a waiting goal, never completes it", () => {
     expect(prsCited("GO para mergear a PR #9303? https://github.com/example-org/example-repo/pull/9286 e pull request 9290")).toEqual([
       { number: 9286, slug: "example-org/example-repo" }, { number: 9303 }, { number: 9290 },
     ]);
@@ -907,9 +1079,105 @@ describe("a goal waiting on the person about a PR", () => {
     autonomy.startGoal("chief", "t1", { goal: "merge", maxTurns: 5, maxHours: 2 });
     autonomy.finishGoal("t1", "needs-input", "GO para a PR #9303?");
     expect(autonomy.needsInputGoals().map((goal) => goal.threadId)).toEqual(["t1"]);
-    expect(autonomy.resolveNeedsInput("t1", "PR #9303 mergeada")?.status).toBe("completed");
+    expect(autonomy.resolveNeedsInput("t1", "sem resposta há mais de 12 h", "blocked")?.status).toBe("blocked");
     expect(autonomy.needsInputGoals()).toEqual([]);
-    expect(autonomy.resolveNeedsInput("t1", "x")).toBeNull();
+    expect(autonomy.resolveNeedsInput("t1", "x", "blocked")).toBeNull();
+  });
+
+  it("also checks the bare #N a question names, which may be the delivery and not the dependency", () => {
+    // cc5c122f: "PR #9300" was only a dependency; the delivery was the bare "#9286"
+    expect(goalCitedPrs("GO para a #9286 depois que a PR #9300 entrar?")).toEqual([{ number: 9300, explicit: true }, { number: 9286, explicit: false }]);
+    expect(goalCitedPrs("https://github.com/o/r/pull/9286 e #9286")).toEqual([{ number: 9286, slug: "o/r", explicit: true }]);
+    // an anchor or a two-digit tag is not a PR
+    expect(goalCitedPrs("veja issues/12#issuecomment-1 e o item #12")).toEqual([]);
+  });
+
+  it("never closes the goal as completed: merged after the question resumes it to check the result", () => {
+    const outcome = citedPrsOutcome([{ number: 9303, state: "MERGED", explicit: true, changedAt: after }, { number: 9290, state: "MERGED", explicit: true, changedAt: before }], ASKED);
+    expect(outcome?.kind).toBe("merged");
+    expect(outcome?.report).toContain("#9303, #9290");
+    expect(outcome?.report).toContain("Merge não é entrega");
+    expect(outcome?.report).toContain("goal_end");
+  });
+
+  it("says nothing new when every cited PR was already merged or closed when the bot asked", () => {
+    // "Levar a PR #9300 até produção" — merged, then "posso rodar o release?": resuming that looped every 10 min
+    expect(citedPrsOutcome([{ number: 9300, state: "MERGED", explicit: true, changedAt: before }], ASKED)).toBeNull();
+    // a state with no time cannot prove it changed after the question
+    expect(citedPrsOutcome([{ number: 9300, state: "MERGED", explicit: true }], ASKED)).toBeNull();
+  });
+
+  it("treats a PR closed without merge as news for the bot, not as an answer", () => {
+    const outcome = citedPrsOutcome([{ number: 9303, state: "MERGED", explicit: true, changedAt: before }, { number: 9290, state: "CLOSED", explicit: true, changedAt: after }], ASKED);
+    expect(outcome?.kind).toBe("closed");
+    expect(outcome?.report).toContain("#9290");
+    expect(outcome?.report).toContain("fechada sem merge");
+    expect(outcome?.report).not.toContain("atualize a pergunta");
+    expect(outcome?.kind === "closed" && outcome.signature).toBe("9290:CLOSED,9303:MERGED");
+  });
+
+  it("changes nothing while a cited PR is open or unknown, or when only bare numbers are cited", () => {
+    expect(citedPrsOutcome([], ASKED)).toBeNull();
+    expect(citedPrsOutcome([{ number: 1, state: "MERGED", explicit: true, changedAt: after }, { number: 2, state: "OPEN", explicit: false }], ASKED)).toBeNull();
+    expect(citedPrsOutcome([{ number: 1, state: "CLOSED", explicit: true, changedAt: after }, { number: 2, state: "?", explicit: true }], ASKED)).toBeNull();
+    expect(citedPrsOutcome([{ number: 9286, state: "MERGED", explicit: false, changedAt: after }], ASKED)).toBeNull();
+  });
+
+  it("does not loop: once the bot asks again after the merge, the same PRs answer nothing", () => {
+    const autonomy = make();
+    autonomy.startGoal("chief", "t1", { goal: "Levar a PR #9300 até produção", maxTurns: 5, maxHours: 2 });
+    const asked = autonomy.finishGoal("t1", "needs-input", "GO para mergear a PR #9300?")!;
+    const merged = asked.finishedAt! + 60_000;
+    expect(citedPrsOutcome([{ number: 9300, state: "MERGED", explicit: true, changedAt: merged }], asked.finishedAt!)?.kind).toBe("merged");
+    autonomy.resumeGoalAfterInput("t1");
+    now += 120_000;
+    const again = autonomy.finishGoal("t1", "needs-input", "A PR #9300 entrou. Posso rodar o release de produção?")!;
+    expect(citedPrsOutcome([{ number: 9300, state: "MERGED", explicit: true, changedAt: merged }], again.finishedAt!)).toBeNull();
+  });
+
+  it("tells the bot about a closed PR once, while the goal keeps waiting", () => {
+    const autonomy = make();
+    autonomy.startGoal("chief", "t1", { goal: "lote", maxTurns: 5, maxHours: 2 });
+    autonomy.finishGoal("t1", "needs-input", "GO para a PR #9290?");
+    expect(autonomy.notePrNotice("t1", "9290:CLOSED")).toBe(true);
+    expect(autonomy.notePrNotice("t1", "9290:CLOSED")).toBe(false);
+    expect(autonomy.needsInputGoals().map((goal) => goal.threadId)).toEqual(["t1"]);
+    // a different state is news again
+    expect(autonomy.notePrNotice("t1", "9290:CLOSED,9291:MERGED")).toBe(true);
+    // a goal that resumed starts with no notice, and a running goal takes none
+    expect(autonomy.resumeGoalAfterInput("t1")?.prNotice).toBeUndefined();
+    expect(autonomy.notePrNotice("t1", "9290:CLOSED")).toBe(false);
+  });
+});
+
+describe("a goal about production, ended as completed", () => {
+  const SHA = "2e0e7c42584b46be220a46030a14308fac1df688";
+  const STARTED = Date.UTC(2026, 9, 13, 12, 0);
+  const none = { announcedPrs: new Set<number>(), certifiedReleases: new Map<string, number>() };
+
+  it("needs every PR the goal names announced in production by the server, not just a PR number", () => {
+    // a goal closed "em produção" 8 min before the P1 #9512, with only a detail
+    const goal = "Levar a PR #9555 até produção";
+    expect(productionGoalProblem({ goalText: goal, goalStartedAt: STARTED, proof: "PR #9555 mergeada", ...none })).toContain("#9555 ainda não foi anunciada");
+    expect(productionGoalProblem({ goalText: goal, goalStartedAt: STARTED, proof: "PR #9555 mergeada", ...none, announcedPrs: new Set([9555]) })).toBeNull();
+    // another PR already announced is no proof for this one, nor is a certified release
+    expect(productionGoalProblem({ goalText: "Levar a PR #9600 até produção", goalStartedAt: STARTED, proof: "PR #9600 mergeada; a dependência #9556 já está em produção", ...none, announcedPrs: new Set([9556]) })).toContain("#9600");
+    expect(productionGoalProblem({ goalText: "Levar a PR #9600 até produção", goalStartedAt: STARTED, proof: `tag ${SHA}`, ...none, certifiedReleases: new Map([[SHA, STARTED + 60_000]]) })).toContain("#9600");
+  });
+
+  it("takes, for a goal that names no PR, a release the corridor certified after the goal started", () => {
+    const goal = "Publicar a correção do widget em produção";
+    // the tag still pointing at a release older than the goal proves nothing about it
+    expect(productionGoalProblem({ goalText: goal, goalStartedAt: STARTED, proof: `tag ${SHA}`, ...none, certifiedReleases: new Map([[SHA, STARTED - 3_600_000]]) })).not.toBeNull();
+    expect(productionGoalProblem({ goalText: goal, goalStartedAt: STARTED, proof: `release ${SHA}`, ...none, certifiedReleases: new Map([[SHA, STARTED + 60_000]]) })).toBeNull();
+    // a short commit cannot be checked against the corridor's records
+    expect(productionGoalProblem({ goalText: goal, goalStartedAt: STARTED, proof: "release 2e0e7c42", ...none, certifiedReleases: new Map([[SHA, STARTED + 60_000]]) })).not.toBeNull();
+  });
+
+  it("only judges goals whose own text is about delivering to production", () => {
+    for (const goal of ["Revisar o texto do artigo 9430", "Triar o 503 em produção do PIPERUN e comentar na #9337", "Investigar por que o deploy do widget falhou"]) {
+      expect(productionGoalProblem({ goalText: goal, goalStartedAt: STARTED, proof: "comentário publicado #9430", ...none })).toBeNull();
+    }
   });
 });
 
@@ -950,6 +1218,84 @@ describe("a standing watch's old note", () => {
     const late = wakePrompt(wake, null, now + 5 * 3_600_000);
     expect(late).toContain("written 5 h ago — check it still holds");
     expect(late).toContain("Conferir se contém 2995ef215");
+  });
+});
+
+// R11/R12-followup #2: the Chief's 'prod' kept a note of 01/10 with no
+// reasonAt, and each re-arm moved createdAt — the note read as fresh
+describe("a standing watch's note keeps its age across re-arms", () => {
+  const prodArgv = ["git", "ls-remote", "origin", "refs/tags/nuria-production-deployed"];
+  const prodReason = "Tag de produção andou: fechar carrier #9327, avisar sessões 9295 (#9314), 8891 (#9318) e pedir ao QA a validação";
+
+  it("the real 'prod' without reasonAt: two firings 10 min apart both say the note is old", () => {
+    // as on 05/10: re-armed for the last time at 12:13 BRT by the old build, no reasonAt
+    const armed = Date.parse("2026-10-05T15:13:06.046Z");
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      goals: [], inFlight: [],
+      wakes: [{ botId: "chief", threadId: "dbb9f1cf", reason: prodReason, createdAt: armed, dueAt: armed + 240 * 60_000, watch: { command: prodArgv.join(" "), argv: prodArgv, everyMs: 300_000, baseline: "e3e9e7ddc\trefs/tags/nuria-production-deployed", baselineFingerprint: "f1", lastFingerprint: "f1", stdoutFingerprint: true, lastRunAt: armed, runs: 900, failures: 0, standing: true, label: "prod", maxMs: 240 * 60_000, fired: 12 } }],
+    }));
+    const autonomy = make();
+    const wake = autonomy.standingFor("dbb9f1cf", "prod")!;
+    expect(noteWrittenAt(wake)).toBe(armed);
+    // the carrier #9377 goes out at 14:20 BRT: the tag moves
+    now = armed + 127 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "51c3bf741\trefs/tags/nuria-production-deployed", fingerprint: "f2", matched: false })).toBe("changed");
+    expect(wakePrompt(wake, null, now)).toContain(`Your note for this moment, written more than 2 h 7 min ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${prodReason}`);
+    autonomy.rearmStanding(wake);
+    expect(wake.createdAt).toBe(armed);
+    expect(wake.watch!.reasonAt).toBeUndefined();
+    // a hotfix 10 min later: before, createdAt was 10 min old and no age was said
+    now += 10 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "7a0c2d915\trefs/tags/nuria-production-deployed", fingerprint: "f3", matched: false })).toBe("changed");
+    expect(wakePrompt(wake, null, now)).toContain("written more than 2 h 17 min ago — check it still holds");
+    autonomy.rearmStanding(wake);
+    // and after a restart too
+    expect(noteWrittenAt(make().standingFor("dbb9f1cf", "prod")!)).toBe(armed);
+    // the bot writes a current note: its age starts there, and re-arms keep it
+    autonomy.updateStandingReason("dbb9f1cf", "prod", "Tag andou: conferir qual carrier entrou e avisar o QA");
+    const written = now;
+    expect(wake.watch!.reasonAt).toBe(written);
+    now += 30 * 60_000;
+    expect(wakePrompt(wake, null, now)).toContain("Your note for this moment: Tag andou");
+    now += 4 * 60 * 60_000;
+    autonomy.rearmStanding(wake);
+    expect(wake.watch!.reasonAt).toBe(written);
+    expect(wakePrompt(wake, null, now)).toContain("written 4 h 30 min ago — check it still holds");
+  });
+
+  it("a watch set now and re-armed keeps its first createdAt; set again with the same note keeps the note's age, with another it starts over", () => {
+    const autonomy = make();
+    const set = now;
+    const input = { argv: prodArgv, command: prodArgv.join(" "), everyMinutes: 5, maxMinutes: 240, reason: "Conferir o carrier e pedir ao QA", baseline: "a", standing: true, label: "prod" };
+    const wake = autonomy.setWatch("chief", "t1", input);
+    now += 5 * 3_600_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "b", fingerprint: "fb", matched: false });
+    autonomy.rearmStanding(wake);
+    expect(wake.createdAt).toBe(set);
+    now += 10 * 60_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "c", fingerprint: "fc", matched: false });
+    expect(wakePrompt(wake, null, now)).toContain("written 5 h 10 min ago — check it still holds");
+    const again = autonomy.setWatch("chief", "t1", { ...input, baseline: "c" });
+    expect(again.watch!.reasonAt).toBe(set);
+    expect(again.createdAt).toBe(set);
+    const other = autonomy.setWatch("chief", "t1", { ...input, reason: "Outra nota", baseline: "c" });
+    expect(other.watch!.reasonAt).toBe(now);
+    expect(wakePrompt(other, null, now)).toContain("Your note for this moment: Outra nota");
+  });
+
+  // INSP-R12F F9: set again with the same note, a legacy watch's unknown age stayed "more than", not exact
+  it("a legacy watch set again with the same note keeps its age unknown", () => {
+    const armed = now;
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      goals: [], inFlight: [],
+      wakes: [{ botId: "chief", threadId: "t1", reason: prodReason, createdAt: armed, dueAt: armed + 240 * 60_000, watch: { command: prodArgv.join(" "), argv: prodArgv, everyMs: 300_000, baseline: "a", lastRunAt: armed, runs: 9, failures: 0, standing: true, label: "prod", maxMs: 240 * 60_000 } }],
+    }));
+    const autonomy = make();
+    now += 2 * 3_600_000;
+    const again = autonomy.setWatch("chief", "t1", { argv: prodArgv, command: prodArgv.join(" "), everyMinutes: 5, maxMinutes: 240, reason: prodReason, baseline: "b", standing: true, label: "prod" });
+    expect(again.watch!.reasonAt).toBeUndefined();
+    expect(again.createdAt).toBe(armed);
+    expect(wakePrompt(again, null, now)).toContain("written more than 2 h ago — check it still holds");
   });
 });
 
@@ -1430,5 +1776,250 @@ describe("a standing watch's note", () => {
     expect(wake.watch!.baseline).toBe("90b3ef2a5");
     expect(wake.dueAt).toBe(due);
     expect(autonomy.updateStandingReason("t1", "chat", "x")).toBeNull();
+  });
+});
+
+// Lot J2 bug 2: a bot's bare question is asked, once, to become an item with
+// why, steps and options; the item the bot opens then takes its place.
+describe("a bare question asked to become an item (lot J2)", () => {
+  const ask = { threadId: "main", askAt: Date.parse("2026-09-29T00:00:00Z"), text: "A decisão de produto da #9356 continua com você. Sigo com a opção A ou B?" };
+  const steps = [{ text: "Leia a issue" }];
+
+  it("asks as the server, never in the person's voice, and reads its own Ref back", () => {
+    const report = questionStepsAutoReport(ask, "@Chief of Staff");
+    expect(report.startsWith(`${QUESTION_REPORT_PREFIX} Ref main@${ask.askAt}.`)).toBe(true);
+    expect(report).toContain("na conversa «@Chief of Staff»");
+    expect(report).toContain(`owner_pending add: replacesAsk "main@${ask.askAt}"`);
+    expect(report).toContain("UMA com recommended: true e why");
+    expect(report).toContain("Não escreva ao dono só por isto.");
+    expect(questionReportRef(report)).toEqual({ threadId: "main", askAt: ask.askAt });
+    expect(questionReportRef("[Servidor: lembrete de pendência] o1")).toBeNull();
+    expect(parseReplacesAsk(`main@${ask.askAt}`)).toEqual({ threadId: "main", askAt: ask.askAt });
+    for (const bad of ["main", "main@", "@1", "main@x", 12, "a b@1"]) expect(parseReplacesAsk(bad)).toBeNull();
+  });
+
+  it("is one request per exact question — the same words asked later are a new one (INSP-J2b #2); remembered across a restart", () => {
+    const autonomy = make();
+    const asked = autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" });
+    expect(asked.askedAt).toBe(now);
+    expect(autonomy.askPromotionFor("b", "main", ask.askAt)).toEqual(asked);
+    expect(autonomy.askPromotionFor("b", "main", ask.askAt + 60_000)).toBeNull();
+    expect(autonomy.askPromotionFor("b", "other", ask.askAt)).toBeNull();
+    expect(autonomy.askPromotionFor("other", "main", ask.askAt)).toBeNull();
+    // "Pedir de novo": the same request, dated now
+    now += 20 * 60_000;
+    expect(autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" }).askedAt).toBe(now);
+    expect(make().askPromotionFor("b", "main", ask.askAt)?.askedAt).toBe(now);
+    // ~/.nuria/stop dropped the request before it reached the bot: the question goes back to unasked
+    autonomy.dropAskPromotion("b", "main", ask.askAt);
+    expect(make().askPromotionFor("b", "main", ask.askAt)).toBeNull();
+  });
+
+  // INSP-J2b #1: three items the old word/#ref/thread rules took for the answer
+  it("is replaced only by the item linked with replacesAsk — never by one in the same channel, a short look-alike or the same #ref", () => {
+    const autonomy = make();
+    // FP2: "Decisão de produto pendente", another conversation, before the request
+    autonomy.addOwnerPending("b", "elsewhere", { title: "Decisão de produto pendente", why: "x", steps });
+    now += 60_000;
+    const asked = autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" });
+    now += 60_000;
+    // FP1: another subject, in the owner's channel, after the request
+    autonomy.addOwnerPending("b", "channel", { title: "Autorizar a linha nova da #9355 na planilha", why: "x", steps });
+    // FP3: another decision about the same issue
+    autonomy.addOwnerPending("b", "main", { title: "Liberar o merge da #9356 em produção", why: "x", steps });
+    expect(autonomy.askPromotionItem(asked)).toBeNull();
+    expect(make().askPromotionItem(make().askPromotionFor("b", "main", ask.askAt)!)).toBeNull();
+    // the bot's item, linked: it replaces the question, open or settled, across a restart
+    const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B para o cliente", why: "A cliente espera.", steps });
+    autonomy.linkAskPromotion(asked, item);
+    expect(autonomy.askPromotionItem(asked)?.id).toBe(item.id);
+    expect(autonomy.askPromotionOpenItem(asked)?.id).toBe(item.id);
+    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
+    const reloaded = make();
+    const again = reloaded.askPromotionFor("b", "main", ask.askAt)!;
+    expect(reloaded.askPromotionItem(again)?.id).toBe(item.id);
+    expect(reloaded.askPromotionOpenItem(again)).toBeNull();
+    expect(reloaded.resolvedOwnerPendingOf("b").find((each) => each.id === item.id)).toMatchObject({ resolvedBy: "owner", resolvedNote: "respondida na conversa" });
+    // a new question with the same words never inherits it
+    expect(reloaded.askPromotionFor("b", "main", ask.askAt + 86_400_000)).toBeNull();
+    // answered in the conversation: marked once, kept
+    reloaded.markAskAnswered(again);
+    expect(make().askPromotionFor("b", "main", ask.askAt)?.answeredAt).toBe(now);
+  });
+
+  // INSP-J2b r2 c-2: only an answer to THIS question settles its item
+  it("takes as the answer the person's first message after the question (before the bot asks anything else), or one naming its #ref — never one about another #ref", () => {
+    const at = ask.askAt;
+    const asked = { role: "bot", kind: "text", at, text: "A decisão de produto da #9356 continua com você: qual caminho sigo com o cliente?" };
+    const person = (when: number, text: string) => ({ role: "user", kind: "text", at: when, text });
+    const bot = (when: number, text: string) => ({ role: "bot", kind: "text", at: when, text });
+    // the 04/10 case: next day the owner asks about #9355 in the same conversation — not an answer
+    expect(answerToAsk([person(at - 60_000, "E a #9356?"), asked, person(at + 86_400_000, "status da #9355?")], at, asked.text)).toBeNull();
+    // …and a later message naming #9356 is
+    expect(answerToAsk([asked, person(at + 1, "status da #9355?"), bot(at + 2, "A #9355 está em QA."), person(at + 3, "Na #9356, siga com o caminho A.")], at, asked.text)).toEqual({ at: at + 3, text: "Na #9356, siga com o caminho A." });
+    // the first message right after, with no #ref of its own, answers it
+    expect(answerToAsk([asked, person(at + 1, "Siga com o caminho A.")], at, asked.text)?.text).toBe("Siga com o caminho A.");
+    // once the bot asked something else, a plain message answers that, not this
+    expect(answerToAsk([asked, bot(at + 1, "Posso arquivar as conversas antigas?"), person(at + 2, "Pode.")], at, asked.text)).toBeNull();
+    // a bot's statement in between changes nothing; peers and other bots' handoffs are not the person
+    expect(answerToAsk([asked, bot(at + 1, "Vou conferir o QA."), { ...person(at + 2, "x"), from: { botId: "other" } }, person(at + 3, "Caminho B.")], at, asked.text)?.text).toBe("Caminho B.");
+    // a question without #refs: a first message about some #ref is about something else
+    expect(answerToAsk([bot(at, "Fica 10 min ou sem limite?"), person(at + 1, "Olhe a #9355.")], at, "Fica 10 min ou sem limite?")).toBeNull();
+    expect(answeredInConversationReport({ id: "o20", title: "Decidir o caminho da #9356" }, { threadId: "main", askAt: at, text: "Qual caminho sigo?" }, "Caminho B.")).toBe(
+      `[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Qual caminho sigo?»: «Caminho B.». O item o20 («Decidir o caminho da #9356») foi fechado como respondida na conversa. Se era a resposta, siga com ela. Se não era resposta a esta pergunta, reabra o item com owner_pending add replacesAsk "main@${at}" (o mesmo title, why, steps e options). Não escreva ao dono só por isto.`);
+  });
+
+  // INSP-J2b r3, with the real question of 04/10
+  it("never takes a later plain order nor a question back as the answer — only within 2 h, and never a message ending in '?'", () => {
+    const at = ask.askAt;
+    const real = "A decisão de produto da #9356 continua com você: qual caminho sigo com o Filipe?";
+    const asked = { role: "bot", kind: "text", at, text: real };
+    const person = (when: number, text: string) => ({ role: "user", kind: "text", at: when, text });
+    // an order with no # a day later: about something else
+    expect(answerToAsk([asked, person(at + 86_400_000, "Arquive as conversas antigas.")], at, real)).toBeNull();
+    // …the same within 2 h answers it; just past 2 h it does not
+    expect(answerToAsk([asked, person(at + ANSWER_WINDOW_MS, "Siga com o caminho A.")], at, real)?.text).toBe("Siga com o caminho A.");
+    expect(answerToAsk([asked, person(at + ANSWER_WINDOW_MS + 1, "Siga com o caminho A.")], at, real)).toBeNull();
+    // the owner asking back, even naming #9356, is not an answer — nor does it let a later plain message count
+    expect(answerToAsk([asked, person(at + 60_000, "o Filipe respondeu sobre a #9356?")], at, real)).toBeNull();
+    expect(answerToAsk([asked, person(at + 60_000, "o Filipe respondeu sobre a #9356?"), person(at + 120_000, "Ok.")], at, real)).toBeNull();
+    // a later statement naming #9356 still is, past the 2 h
+    expect(answerToAsk([asked, person(at + 86_400_000, "Na #9356 siga com o caminho B.")], at, real)?.text).toBe("Na #9356 siga com o caminho B.");
+  });
+});
+
+// R11-visual N15: the one row that counted for 10 h said the owner was not needed
+describe("a reply that says the person is not needed asks nothing (R11-visual N15)", () => {
+  const real = "Somadas, as três órfãs do Grok Bot ocupam cerca de 8,6 GB. Adotar cada uma com uma sessão ou descartá-la com justificativa na issue é o que mais liberaria espaço. Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua. Registrei esta rodada no log do dia.";
+  const at = Date.parse("2026-10-04T13:39:00Z");
+  const thread = (reply: string) => [{ role: "user", kind: "text", at: at - 60_000, text: "Rotina de limpeza de disco." }, { role: "bot", kind: "text", at, text: reply }];
+
+  it("the Chief's real reply of 04/10 is no ask, nor an ask line", () => {
+    expect(ownerAskAt(thread(real), at + 60_000)).toBeNull();
+    expect(echoAsk("Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua.")).toBe(true);
+    for (const said of ["Não precisa de nada seu: sigo sozinho.", "Nada para você aqui.", "Isso fica comigo.", "Não há decisão para você nesta rodada."]) {
+      expect(ownerAskAt(thread(`Feito. ${said}`), at + 60_000), said).toBeNull();
+      expect(echoAsk(said), said).toBe(true);
+    }
+  });
+
+  it("a real ask still counts — a question, or 'continua com você' — even beside a denial", () => {
+    expect(ownerAskAt(thread("A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282."), at + 60_000)).toBe(at);
+    expect(ownerAskAt(thread(`${real} Mesclo a #9350?`), at + 60_000)).toBe(at);
+    expect(ownerAskAt(thread("O cache é meu. A decisão do merge da #9350 continua com você."), at + 60_000)).toBe(at);
+    expect(ownerAskText("O cache é meu, já limpei. A decisão do merge da #9350 continua com você.")).toBe("A decisão do merge da #9350 continua com você.");
+    expect(echoAsk("A decisão do merge da #9350 continua com você.")).toBe(false);
+  });
+
+  // INSP-R11fix F-1: a denial in one clause never cancels an ask in another
+  it("reads a sentence by its clauses: 'é meu, mas preciso…' and 'não preciso de você para X, só preciso que…' still ask", () => {
+    for (const said of [
+      "O merge é meu, mas preciso de uma decisão sua sobre o carrier.",
+      "Não preciso de você para o merge, só preciso que você aprove o carrier.",
+      "O cache fica comigo; preciso de você para liberar o disco.",
+      "Isso é meu, porém a decisão do carrier fica com você.",
+    ]) {
+      expect(ownerAskAt(thread(said), at + 60_000), said).toBe(at);
+      expect(echoAsk(said), said).toBe(false);
+    }
+    expect(ownerAskText("O merge é meu, mas preciso de uma decisão sua sobre o carrier.")).toBe("O merge é meu, mas preciso de uma decisão sua sobre o carrier.");
+    // the Chief's real reply of 04/10 still asks nothing
+    expect(ownerAskAt(thread(real), at + 60_000)).toBeNull();
+    expect(echoAsk("Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua.")).toBe(true);
+    // a denial on both sides of the cut stays a denial
+    expect(ownerAskAt(thread("O merge é meu, mas não depende de decisão sua."), at + 60_000)).toBeNull();
+  });
+});
+
+// R12-followup #3: "o3" was given 13 times to the Chief, and the Monitor has two
+// settled "o2" — the link of a question to its item read the first one
+describe("owner_pending ids are never reused", () => {
+  const steps = [{ text: "Leia a issue" }];
+
+  it("go up per bot, past every settled id, across a restart", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [], goals: [], inFlight: [],
+      resolvedOwnerPending: [
+        ...[1, 2, 3].map((day) => ({ id: "o3", botId: "chief", threadId: "52417e4a", title: `Decisão ${day}`, createdAt: day * 1_000, resolvedAt: day * 1_000 + 1, resolvedBy: "bot" })),
+        { id: "o2", botId: "chief", threadId: "52417e4a", title: "Outra", createdAt: 5_000, resolvedAt: 5_001, resolvedBy: "bot" },
+        { id: "o9", botId: "monitor", threadId: "dc38193b", title: "Do Monitor", createdAt: 5_000, resolvedAt: 5_001, resolvedBy: "bot" },
+      ],
+    }));
+    const autonomy = make();
+    const first = autonomy.addOwnerPending("chief", "52417e4a", { title: "Decidir a #9374", why: "x", steps });
+    expect(first.id).toBe("o4");
+    autonomy.resolveOwnerPending({ botId: "chief", id: first.id });
+    // the open list is empty again: the old rule (open count + 1) said "o1"
+    expect(autonomy.addOwnerPending("chief", "52417e4a", { title: "Abrir a issue do Supervisor", why: "x", steps }).id).toBe("o5");
+    expect(autonomy.addOwnerPending("monitor", "dc38193b", { title: "Escrever na planilha", why: "x", steps }).id).toBe("o10");
+    const reloaded = make();
+    reloaded.resolveOwnerPending({ botId: "chief", id: "all", threadId: "52417e4a" });
+    expect(reloaded.addOwnerPending("chief", "52417e4a", { title: "Remover as pastas de disco", why: "x", steps }).id).toBe("o6");
+    expect(JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")).ownerPendingSeq).toEqual({ chief: 6, monitor: 10 });
+  });
+
+  // the Monitor's ledger of 05/10: o2 of 01/10 and o2 of 04/10, the request linked to "o2"
+  const monitor = "891b6b94";
+  const channel = "dc38193b";
+  const ledger = (notes: { first?: string; second?: string }) => ({
+    wakes: [], goals: [], inFlight: [],
+    resolvedOwnerPending: [
+      { id: "o2", botId: monitor, threadId: channel, title: "Escrever na linha 105 da planilha Atendimento (#9058, Filipe…)", createdAt: Date.parse("2026-10-01T20:00:00.110Z"), resolvedAt: Date.parse("2026-10-03T12:46:34.065Z"), resolvedBy: "bot", ...(notes.first ? { resolvedNote: notes.first } : {}) },
+      { id: "o2", botId: monitor, threadId: channel, title: "Decidir o caminho de produto da #9356 (widget pede código na…)", createdAt: Date.parse("2026-10-04T23:34:17.653Z"), resolvedAt: Date.parse("2026-10-04T23:44:02.753Z"), resolvedBy: "bot", ...(notes.second ? { resolvedNote: notes.second } : {}) },
+    ],
+    askPromotions: [{ botId: monitor, threadId: channel, reportThreadId: channel, askAt: Date.parse("2026-10-03T22:32:34.187Z"), askedAt: Date.parse("2026-10-04T23:33:56.989Z"), itemId: "o2", answeredAt: Date.parse("2026-10-04T23:41:47.034Z"), text: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282." }],
+  });
+
+  it("a request linked before the birth was kept finds its own o2 — the one opened for it, not the one of 01/10", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger({ first: ANSWERED_IN_CONVERSATION })));
+    const autonomy = make();
+    const [promotion] = autonomy.allAskPromotions();
+    expect(autonomy.askPromotionItem(promotion!)?.title).toContain("#9356");
+    // the reopening rule reads that item: the 01/10 one was settled "respondida na conversa", this one by the bot
+    expect(autonomy.askPromotionResolvedItem(promotion!)?.resolvedNote).toBeUndefined();
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger({ second: ANSWERED_IN_CONVERSATION })));
+    expect(make().askPromotionResolvedItem(make().allAskPromotions()[0]!)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
+    // and the next item of the Monitor is past both
+    expect(make().addOwnerPending(monitor, channel, { title: "Novo pedido", why: "x", steps }).id).toBe("o3");
+  });
+
+  it("a link keeps the item's conversation and birth: an item that took the same id elsewhere is not it", () => {
+    const autonomy = make();
+    const asked = autonomy.noteAskPromotion({ botId: "b", threadId: "main", askAt: now - 60_000, text: "Sigo com A ou B?", reportThreadId: "channel" });
+    const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B", why: "x", steps });
+    autonomy.linkAskPromotion(asked, item);
+    expect(asked).toMatchObject({ itemId: item.id, itemThreadId: "channel", itemCreatedAt: now });
+    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
+    // an older ledger's open item with the same id, born later, in another conversation
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      ...JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")),
+      ownerPending: [{ id: item.id, botId: "b", threadId: "other", title: "Outra coisa", createdAt: now + 3_600_000 }],
+    }));
+    const reloaded = make();
+    const again = reloaded.allAskPromotions()[0]!;
+    expect(reloaded.askPromotionOpenItem(again)).toBeNull();
+    expect(reloaded.askPromotionItem(again)?.title).toBe("Escolher entre A e B");
+    expect(reloaded.askPromotionResolvedItem(again)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
+  });
+});
+
+describe("a superseded item (R13-intake #1)", () => {
+  it("stays superseded, across a restart and when said again with the same commands, until its bot rewrites them", () => {
+    const autonomy = make();
+    const steps = [{ text: "B190", command: "gog sheets update ID 'Atendimento!B190' --values-json '[[\"Matheus\"]]'" }];
+    const item = autonomy.addOwnerPending("chief", "t1", { title: "Aprovar a criação da linha 190", why: "Linha nova.", steps });
+    const by = { botId: "monitor", botName: "Monitor", id: "o1", at: now, text: "Os comandos antigos para a linha 190 apagariam a linha dela: não rode esses." };
+    autonomy.patchOwnerPending("chief", item.id, { supersededBy: by });
+    const reloaded = make();
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // the same item said again, same commands: still superseded
+    reloaded.addOwnerPending("chief", "t1", { title: "Aprovar a criação da linha 190", why: "Linha nova.", steps });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // the why rewritten only: still superseded
+    reloaded.updateOwnerPending("chief", item.id, { why: "Ainda vale." });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toEqual(by);
+    // its commands rewritten: the bot's new answer
+    reloaded.updateOwnerPending("chief", item.id, { steps: [{ text: "Linha nova pelo append", command: "gog sheets append ID 'Atendimento!B:I' --values-json '[[\"Matheus\"]]'" }] });
+    expect(reloaded.ownerPendingById("chief", item.id)?.supersededBy).toBeUndefined();
   });
 });

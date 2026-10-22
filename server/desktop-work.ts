@@ -14,17 +14,21 @@
 import { existsSync, statSync } from "node:fs";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import type { WireCcSession } from "../shared/wire.ts";
-import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
+import { basename } from "node:path";
+import type { CcDesktopPending, CcOwnWorktree, CcSession, CcSessionLedger } from "./cc-sessions.ts";
 import { ccHeldQueueReport, ccReportForOwner, ccStallReport, issueTitle, titleOpensWithIssue, type CcStallFacts } from "./cc-sessions.ts";
 export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
 import {
   archiveDesktopSession,
   createDesktopSession,
+  openDesktopSessionIn,
+  ownWorktreeFolder,
   renameDesktopSession,
   recordBlocked,
   recordInWorktree,
   summaryIsCurrent,
   sendToDesktopSession,
+  worktreeBranch,
   type DesktopDriver,
   type DesktopRecord,
   type DesktopStep,
@@ -47,7 +51,22 @@ export const DESKTOP_HELPER_MAX_TRIES = 3;
 /** Screens that did not show what was expected (unlocked, Claude in front) before giving up. */
 export const DESKTOP_MAX_MISSES = 5;
 export const DESKTOP_RENAME_MAX_MISSES = 3;
-export const DESKTOP_BACKOFF_BASE_MS = 30_000;
+/** A send whose session is not on screen this many times in a row is parked (19/10: 50+ silent tries held the Chief of Staff). */
+export const DESKTOP_SEND_PARK_MISSES = 3;
+/** Parks before the send gives up for good (the owner is told). */
+export const DESKTOP_SEND_MAX_PARKS = 3;
+export const DESKTOP_PARK_BASE_MS = 5 * 60_000;
+export const DESKTOP_PARK_MAX_MS = 60 * 60_000;
+
+/** Wait after the n-th park (1-based): 5 min, 10 min, 20 min… up to an hour. */
+export function desktopParkMs(parks: number): number {
+  return Math.min(DESKTOP_PARK_BASE_MS * 2 ** Math.max(0, parks - 1), DESKTOP_PARK_MAX_MS);
+}
+
+/** A parked send: it waits out its backoff without holding anything. */
+export const parkedPending = (session: Pick<CcSession, "desktop">): boolean => session.desktop?.pending?.parkedAt !== undefined;
+/** 60 s, doubling: a retry never lands in the middle of another step's screen (was 30 s). */
+export const DESKTOP_BACKOFF_BASE_MS = 60_000;
 export const DESKTOP_BACKOFF_MAX_MS = 10 * 60_000;
 /** After the Archive click, the app's record must say archived within this... */
 export const DESKTOP_ARCHIVE_CONFIRM_MS = 2 * 60_000;
@@ -64,6 +83,7 @@ export const CC_STALL_MAX_REPORTS = 3;
 
 export interface DesktopWorkDeps {
   ledger: CcSessionLedger;
+  canRunSession?: (session: CcSession) => boolean;
   now: () => number;
   getDriver: () => Promise<DesktopDriver>;
   readRecord: (localId: string) => DesktopRecord | null;
@@ -89,6 +109,17 @@ export interface DesktopWorkDeps {
   liveWorktrees?: () => string[];
   /** The repository's base branch ("main"): a new session must open on it. */
   baseBranch?: (session: CcSession) => string;
+  /** The branch git's HEAD of the repository root is on ("HEAD" when detached), and the repository's branches: an unreadable branch chip is judged by them, with the root session New Session opened from (R11-2, INSP-R12a-r2 R2-1). */
+  rootHead?: (session: CcSession) => string | null;
+  branches?: (session: CcSession) => string[];
+  /** "on": a new session the old way must have the worktree option on (the app makes its worktree), and the server switches it on (o73). */
+  worktreeWanted?: (session: CcSession) => "on" | undefined;
+  /** The real paths of the worktrees git lists for the session's repository: a "trust this workspace" is clicked only for one of them. */
+  registeredWorktrees?: (session: CcSession) => string[];
+  /** The tail of the Claude app's own log (main.log), read only: what ties a "trust" prompt to a folder. */
+  trustLog?: () => string;
+  /** Trust these folders in the Claude app's config before its link is opened (the app ignores the link's folder otherwise, since 2.31226.0): the error, or null. */
+  trustFolders?: (folders: string[]) => string | null;
   /** A session of the app in the repository root to open before New Session (claude-desktop.ts rootAnchorSession). */
   rootAnchor?: (session: CcSession) => { localId: string; title?: string } | null;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
@@ -103,15 +134,48 @@ export interface DesktopWorkDeps {
   folderBornAt?: (path: string) => number | null;
   /** One line per screen action (server.log). */
   log?: (line: string) => void;
+  /** A send was parked (parkSend): let go of what waits on the session (the owner's hold). */
+  onParked?: (session: CcSession) => void;
   /** The app confirmed the session archived (remove its worktree if asked). */
   onArchived?: (session: CcSession) => void;
+  /** The worktrees the server makes for its app sessions (lote X). */
+  own?: OwnWorktreeDeps;
   steps?: {
+    openIn?: typeof openDesktopSessionIn;
     create?: typeof createDesktopSession;
     send?: typeof sendToDesktopSession;
     archive?: typeof archiveDesktopSession;
     rename?: typeof renameDesktopSession;
   };
 }
+
+/** The worktrees the server makes for its app sessions (own-worktrees.ts), as the flow needs them. */
+export interface OwnWorktreeDeps {
+  /** Make the session's worktree (and its alias for the app) and clone its caches. */
+  prepare: (session: CcSession) => Promise<{ ok: true; head: string; link: string; caches: NonNullable<CcOwnWorktree["caches"]>; fetchError?: string } | { ok: false; reason: string }>;
+  /** The app's text once the worktree is ready (ownBriefText, with the session's footer). */
+  briefFor: (session: CcSession) => string;
+  /** Why New Session, the old way, would land in a wrong folder now (the 409's words), or null. */
+  classicBlocked: (session: CcSession) => string | null;
+  /** A session opened through the server's worktree landed in `folder` instead (the breaker counts it). */
+  wrongFolder?: (session: CcSession, folder: string) => void;
+  /** A create through the server's worktree given up because the new session's worktree option read ON or unreadable (the breaker counts it). */
+  chipRefused?: (session: CcSession, option: "on" | "unknown", seen?: string) => void;
+  /** A create through the server's worktree given up for any other miss —
+   * the link opened no new session, its chips showed another folder — with
+   * the last reason and what the screen showed: the breaker counts it too
+   * (R13-dispatch R13-2: 13 such give-ups on 06/10, none counted). */
+  abandoned?: (session: CcSession, reason: string, seen?: string) => void;
+  /** Both ways of the app failed for this create (its own worktree, then
+   * New Session): the same brief goes to the cli, as one start with the
+   * failure on record. The cli session's id, its queue entry, or why not. */
+  toCli?: (session: CcSession, why: string) => { sessionId: string } | { queueId: string } | { refusal: string };
+  /** A create was adopted in a worktree of its own (either way): the breaker rearms. */
+  adopted?: (session: CcSession) => void;
+}
+
+/** Screens that did not show the new session in its folder before New Session is used instead. */
+export const OWN_OPEN_MAX_MISSES = 3;
 
 /** The issue a session is about: the number its title opens with ("9311 …",
  * or "#N …" from before the owner's no-"#" rule), else a "#NNNN" further
@@ -128,12 +192,59 @@ export function issueNumber(title: string, brief = ""): string | undefined {
  * for in the sidebar. The marker that finds the session again goes on its
  * own line below. */
 export function desktopBriefText(title: string, marker: string, brief: string, footer = "", folderSince?: number): string {
+  return briefWith(title, marker, brief, footer, folderSince !== undefined ? folderGuard(folderSince) : null);
+}
+
+/** The brief of a session opened in the worktree the server made for it:
+ * the same first lines, and a folder check against that very folder. */
+export function ownBriefText(title: string, marker: string, brief: string, footer: string, own: { path: string; branch: string }, caches: string): string {
+  return briefWith(title, marker, brief, footer, ownFolderGuard(own.path, own.branch, caches));
+}
+
+function briefWith(title: string, marker: string, brief: string, footer: string, guard: string | null): string {
   const number = issueNumber(title, brief);
   const named = issueTitle(title);
   // One "NNNN" at the start, never twice ("9311 9311 Chat…"); a title that
   // already names its issue further in ("Chat #N …") is left as it is.
   const first = !number || titleOpensWithIssue(named, number) || new RegExp(`#${number}(?!\\d)`).test(named) ? named : `${number} ${named}`;
-  return `${first}\n[${marker}]\n\n${folderSince !== undefined ? `${folderGuard(folderSince)}\n\n` : ""}${brief}${footer}`;
+  // the app's own title would drop the number: the session names itself, right after its folder check
+  const naming = number ? sessionTitleStep(first, guard !== null) : null;
+  return `${first}\n[${marker}]\n\n${guard ? `${guard}\n\n` : ""}${naming ? `${naming}\n\n` : ""}${brief}${footer}`;
+}
+
+/** The Claude app's tool, in every session it runs, that sets that
+ * session's title (Claude 2.42304.0, ccd_session_mgmt): with session_id
+ * "self" it renames the session itself, no approval asked while the title is
+ * the app's own (only a title the person typed asks them first). */
+export const SESSION_TITLE_TOOL = "mcp__ccd_session_mgmt__set_session_title";
+/** The app caps a title it is given at 200 characters. */
+const SESSION_TITLE_MAX = 200;
+
+/** The step that has a session name itself "NNNN …" in the app. The app
+ * titles a session with a summary of its own that drops the number
+ * ("9636 Reconciliar…" became "Reconciliar desdobramentos…"), its menus have
+ * no rename, and a title set through its tool is never replaced by its
+ * summary afterwards: so the session does it, and nobody is ever asked to
+ * rename a session by hand. */
+export function sessionTitleStep(title: string, afterGuard: boolean): string {
+  const named = title.length > SESSION_TITLE_MAX ? title.slice(0, SESSION_TITLE_MAX).trimEnd() : title;
+  return [
+    `${afterGuard ? "Passo 1, logo depois do passo 0 e antes da tarefa" : "Passo 1, antes da tarefa"}: dê a esta sessão o título certo no app Claude. Chame a ferramenta ${SESSION_TITLE_TOOL} com session_id "self" e title ${JSON.stringify(named)} (se ela estiver entre as ferramentas adiadas, carregue-a antes com ToolSearch "select:${SESSION_TITLE_TOOL}").`,
+    "Só isso com essa ferramenta: não renomeie nem mexa em outras sessões. Se ela não existir ou recusar, siga com a tarefa sem insistir e sem pedir a ninguém que renomeie a sessão.",
+  ].join("\n");
+}
+
+/** The first step of a session in the server's own worktree: its folder is
+ * known, so the check is exact (`pwd -P`, the alias the app was given
+ * resolved). Anything else — the root, another worktree, one the app made
+ * inside it — stops it untouched, as folderGuard does. */
+export function ownFolderGuard(path: string, branch: string, caches: string): string {
+  return [
+    "Passo 0, antes de qualquer outra coisa (não leia, edite, faça checkout nem rode mais nada antes dele): confira que esta sessão abriu na worktree que o gerente criou para ela.",
+    `Rode \`pwd -P\`. Se a saída não for exatamente ${path}, pare aí: responda só "${WRONG_FOLDER_ANSWER}: <a saída do pwd>" e encerre o turno. O gerente cuida do resto.`,
+    `Se for, siga com a tarefa abaixo nessa pasta, na branch ${branch} (feita agora de origin/main; pode renomeá-la).`,
+    caches,
+  ].join("\n");
 }
 
 /** What a session that landed in a wrong folder answers, and nothing else. */
@@ -191,7 +302,80 @@ export function pickDesktopPending(sessions: CcSession[], now: number): CcSessio
   return sessions
     .filter((session) => liveApp(session) && session.desktop!.pending && !session.desktop!.pending!.verifyUntil && (session.desktop!.pending!.nextAttemptAt ?? 0) <= now)
     .filter((session) => session.desktop!.pending!.kind !== "rename" || session.status === "idle")
+    // a create waits for the worktree the server is still making for it
+    .filter((session) => session.desktop!.pending!.kind !== "create" || session.desktop!.own?.state !== "planned")
     .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0] ?? null;
+}
+
+/** Make the worktree of the oldest create that waits for one (one at a
+ * time: git and the clone run with nice, never on the screen). Made: the
+ * create opens the app in it, with a brief that checks that very folder.
+ * Not made: the create goes on through New Session, as before — unless
+ * that would land in a wrong folder now (the 409), and then it fails with
+ * those words. Nothing made is ever removed. */
+export async function prepareOwnWorktrees(deps: DesktopWorkDeps, state: { preparing: boolean }): Promise<void> {
+  if (!deps.own || state.preparing) return;
+  const next = deps.ledger.all()
+    .filter((session) => liveApp(session) && session.desktop!.own?.state === "planned" && session.desktop!.pending?.kind === "create")
+    .filter((session) => deps.canRunSession?.(session) !== false)
+    .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0];
+  if (!next) return;
+  const own = next.desktop!.own!;
+  state.preparing = true;
+  try {
+    deps.log?.(`own worktree: making ${own.path} (${own.branch}) for session ${next.id}`);
+    let made: Awaited<ReturnType<OwnWorktreeDeps["prepare"]>>;
+    try {
+      made = await deps.own.prepare(next);
+    } catch (error) {
+      made = { ok: false, reason: error instanceof Error ? error.message.slice(0, 300) : String(error) };
+    }
+    // stopped or archived meanwhile: what was made stays, as it is
+    if (!liveApp(next) || next.desktop?.own !== own || own.state !== "planned" || next.desktop.pending?.kind !== "create" || deps.canRunSession?.(next) === false) {
+      deps.log?.(`own worktree: ${own.path} ${made.ok ? "made" : "not made"} for session ${next.id}, which no longer waits to open; left as it is`);
+      return;
+    }
+    if (!made.ok) {
+      own.state = "failed";
+      own.reason = made.reason;
+      deps.log?.(`own worktree: could not make ${own.path} for session ${next.id} — ${made.reason}`);
+      fallBackToNewSession(deps, next, `não consegui criar a worktree da sessão (${made.reason})`);
+      return;
+    }
+    own.state = "ready";
+    own.head = made.head;
+    own.link = made.link;
+    own.caches = made.caches;
+    next.desktop!.pending!.text = deps.own.briefFor(next);
+    deps.ledger.save();
+    const caches = made.caches.mode === "cloned"
+      ? `dependências clonadas da semente (${made.caches.dirs?.length ?? 0} pasta(s), ~${Math.round((made.caches.savedKb ?? 0) / 1024)} MB sem ocupar disco)`
+      : `dependências NÃO clonadas — a sessão roda npm ci (${(made.caches.reason ?? "?").slice(0, 120)})`;
+    deps.chip(next, `worktree criada pelo OMB: ${own.path} (${own.branch}); ${caches}${made.fetchError ? `; o fetch de origin falhou, usei a origin/main conhecida (${made.fetchError.slice(0, 80)})` : ""}`, made.caches.mode === "cloned");
+    deps.log?.(`own worktree: ${own.path} ready at ${made.head.slice(0, 9)} for session ${next.id} — caches ${made.caches.mode}${made.caches.reason ? ` (${made.caches.reason})` : ""}`);
+  } finally {
+    state.preparing = false;
+  }
+}
+
+/** The create goes on through New Session with its own folder check (the
+ * classic brief), or fails with the 409's words when New Session would
+ * land in a wrong folder now. */
+function fallBackToNewSession(deps: DesktopWorkDeps, session: CcSession, why: string): void {
+  const desktop = session.desktop!;
+  const own = desktop.own!;
+  const blocked = deps.own?.classicBlocked(session) ?? null;
+  if (blocked) {
+    const reason = `${why}; and New Session, the old way, would land in a wrong folder now — ${blocked}`;
+    // the app would not open in the worktree, and New Session is barred: both ways of the app failed (a worktree never made is not one)
+    if (own.state === "abandoned") appWaysFailed(deps, session, reason);
+    else failDesktopSession(deps, session, reason);
+    return;
+  }
+  desktop.pending = { kind: "create", text: own.classicText, since: desktop.pending?.since ?? deps.now(), attempts: 0 };
+  deps.ledger.save();
+  deps.chip(session, `${why} — abrindo pelo jeito antigo (Nova sessão), com a conferência de pasta de sempre`, false);
+  deps.log?.(`own worktree: session ${session.id} goes on through New Session — ${why}`);
 }
 
 
@@ -227,14 +411,9 @@ export function reportFor(deps: DesktopWorkDeps, session: CcSession): string {
   return ccReportForOwner(session, { hookDecision: id && deps.hookDecision ? deps.hookDecision(id) : null });
 }
 
-const renameKey = (session: CcSession) => `cc-rename:${session.id}`;
-
-/** "Precisa de você" shows one line: the app's title (what the person finds
- * in the app's sidebar) and the new one, short. */
-export function renameAskTitle(appTitle: string, newTitle: string): string {
-  const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
-  return `Renomear no app: "${cut(appTitle, 36)}" → "${cut(newTitle, 44)}"`;
-}
+const RENAME_KEY_PREFIX = "cc-rename:";
+const renameKey = (session: CcSession) => `${RENAME_KEY_PREFIX}${session.id}`;
+const archiveKey = (session: CcSession) => `cc-archive:${session.id}`;
 
 /** A screen action that cannot be done. Only a create that never opened
  * fails the session; a message that could not be typed, or an archive or
@@ -245,7 +424,9 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
   const desktop = session.desktop!;
   const pending = desktop.pending;
   if (!pending || pending.kind === "create") {
-    failDesktopSession(deps, session, reason);
+    // New Session failing after the server's own worktree did: both ways of the app failed
+    if (pending && desktop.own?.state === "abandoned") appWaysFailed(deps, session, `${desktop.own.reason ? `the app did not open the session in the worktree the server made (${desktop.own.reason.slice(0, 200)}), and then ` : ""}New Session failed too: ${reason}`);
+    else failDesktopSession(deps, session, reason);
     return;
   }
   delete desktop.pending;
@@ -261,25 +442,58 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     return;
   }
   // "arquive à mão": when the person does, it is what the server asked for
-  if (pending.kind === "archive") desktop.archiveHandedOver = true;
-  if (pending.kind === "rename") {
-    // The title the person sees in the app (not our ledger's), and the new one, essentials first.
+  if (pending.kind === "archive") {
+    desktop.archiveHandedOver = true;
+    // "arquive à mão" must reach the person as an item in "Precisa de você", not only as a chip and a
+    // report to the bot: otherwise nobody owns it and the Esteira card stays blocked (#9337)
     const appTitle = (desktop.localId ? deps.readRecord(desktop.localId)?.title : undefined) ?? session.title;
-    desktop.renameAsked = true;
+    const open = desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {};
     deps.ownerPending?.(session, {
-      title: renameAskTitle(appTitle, pending.text), ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: renameKey(session),
-      why: "O servidor não consegue renomear esta sessão no app sozinho, e com o título certo você a acha na lista do app Claude.",
+      title: `Arquivar à mão a sessão "${appTitle.slice(0, 60)}" no app Claude`, ...open, key: archiveKey(session),
+      why: "O servidor não conseguiu arquivar esta sessão no app Claude; enquanto ela não for arquivada, o item fica bloqueado na Esteira.",
       steps: [
-        { text: `No app Claude, abra a sessão "${appTitle.slice(0, 60)}".`, ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}) },
-        { text: `Renomeie-a para: ${pending.text.slice(0, 120)}` },
-        { text: "Pronto: o servidor vê o título novo e fecha este item sozinho." },
+        { text: `No app Claude, abra a sessão "${appTitle.slice(0, 60)}" (se o link não abrir, procure-a na lista do app, inclusive fora dos projetos).`, ...open },
+        { text: "Arquive-a pelo menu da sessão." },
+        { text: "Pronto: o servidor vê o arquivamento no registro do app e fecha este item sozinho." },
       ],
     });
   }
+  // a rename is never the person's: the session names itself from its brief, and its
+  // link finds it by id whatever its title; at most a line in the log
+  if (pending.kind === "rename") {
+    deps.ledger.save();
+    deps.log?.(`rename dropped: session ${session.id} keeps the app's title (${reason.slice(0, 200)}); nobody is asked to rename it${link}`);
+    return;
+  }
   deps.ledger.save();
-  const what = pending.kind === "archive" ? "archive" : "rename";
-  deps.chip(session, pending.kind === "archive" ? "não foi possível arquivar no app — arquive à mão" : "não foi possível renomear no app", false);
-  deps.report(session, `Claude Code session "${session.title}" (${session.id}): could not ${what} it in the Claude app — ${reason}. Nothing else changed; ${pending.kind === "archive" ? "ask the person to archive it by hand" : "the person may rename it by hand"}${link}.`);
+  deps.chip(session, "não foi possível arquivar no app — arquive à mão", false);
+  deps.report(session, `Claude Code session "${session.title}" (${session.id}): could not archive it in the Claude app — ${reason}. Nothing else changed; ask the person to archive it by hand${link}.`);
+}
+
+/** No session is renamed by hand any more: the "Renomear no app" items the
+ * server once opened (keys cc-rename:…), and what its sessions kept of a
+ * rename, are settled once at startup through the normal resolution. The
+ * keys settled. */
+export function retireRenameAsks(deps: Pick<DesktopWorkDeps, "ledger" | "resolveOwnerPending" | "log">, openKeys: readonly string[]): string[] {
+  const keys = new Set(openKeys.filter((key) => key.startsWith(RENAME_KEY_PREFIX)));
+  let changed = false;
+  for (const session of deps.ledger.all()) {
+    const desktop = session.desktop;
+    if (!desktop) continue;
+    if (desktop.renameAsked) {
+      delete desktop.renameAsked;
+      keys.add(renameKey(session));
+      changed = true;
+    }
+    if (desktop.pending?.kind === "rename") {
+      delete desktop.pending;
+      changed = true;
+    }
+  }
+  if (changed) deps.ledger.save();
+  for (const key of keys) deps.resolveOwnerPending?.(key);
+  if (keys.size) deps.log?.(`rename items settled at startup (no session is renamed by hand any more): ${[...keys].join(", ")}`);
+  return [...keys];
 }
 
 /** The next queued message still fresh enough to deliver; older ones are
@@ -293,7 +507,7 @@ export function takeFreshQueued(deps: Pick<DesktopWorkDeps, "ledger" | "now" | "
   return next;
 }
 
-export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
+export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, reason: string, then?: (session: CcSession) => string | null): void {
   if (session.desktop) {
     delete session.desktop.pending;
     delete session.desktop.sent;
@@ -301,9 +515,41 @@ export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, re
   session.status = "failed";
   session.lastError = reason;
   session.failedAt = deps.now();
+  // what was done about it once the failure is on record (it frees the cli: R13-1), said in the same report
+  const after = then?.(session);
+  if (after) session.lastError = `${reason}. ${after}`;
   deps.ledger.save();
   deps.chip(session, `parou com um problema — ${sessionErrorPt(reason).slice(0, 120)}`, false);
   deps.report(session, reportFor(deps, session));
+}
+
+/** The app failed for a create — both ways (the server's worktree, then New
+ * Session, or New Session barred: "both"), or its link showed the folder
+ * before / came back after our one click ("own"): the session fails — on
+ * record, which frees the cli — and the same brief is started there at once,
+ * the reason recorded, instead of a bot finding out and asking (R13-dispatch
+ * R13-2, INSP-R13dis 1). The person's chip says the cli took over. */
+function appWaysFailed(deps: DesktopWorkDeps, session: CcSession, reason: string, how: "both" | "own" = "both"): void {
+  const said = how === "both" ? "Both ways of the Claude app failed" : "The Claude app did not open the session in the right folder";
+  let started: ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>> | null = null;
+  failDesktopSession(deps, session, reason, (failed) => {
+    if (!deps.own?.toCli) return null;
+    try {
+      started = deps.own.toCli(failed, reason);
+    } catch (error) {
+      started = { refusal: error instanceof Error ? error.message.slice(0, 200) : String(error) };
+    }
+    const got: ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>> = started;
+    failed.desktop!.cliFallback = { at: deps.now(), ...got };
+    deps.log?.(`create: session ${failed.id} ${how === "both" ? "failed both ways of the app" : "did not open in its folder in the app"} — ${"sessionId" in got ? `started in the cli as ${got.sessionId}` : "queueId" in got ? `queued for the cli (${got.queueId})` : `the cli refused: ${got.refusal}`}`);
+    if ("sessionId" in got) return `${said}, so the server started the same brief in the CLI as session ${got.sessionId}; its report comes here. Do not start it again`;
+    if ("queueId" in got) return `${said}, so the server put the same brief in the session queue for the CLI (${got.queueId}); it opens by itself. Do not start it again`;
+    return `${said}, and the server could not start the same brief in the CLI: ${got.refusal}`;
+  });
+  const got = started as ReturnType<NonNullable<OwnWorktreeDeps["toCli"]>> | null;
+  if (!got) return;
+  const why = how === "both" ? "os dois caminhos do app falharam" : "o app não abriu na pasta certa";
+  deps.chip(session, "sessionId" in got ? `${why}; segui pela linha de comando (sessão ${got.sessionId.slice(0, 8)})` : "queueId" in got ? `${why}; a mesma tarefa entrou na fila da linha de comando` : `${why}, e a linha de comando recusou: ${got.refusal.slice(0, 100)}`, !("refusal" in got));
 }
 
 const actionLabel = (kind: CcDesktopPending["kind"]) =>
@@ -324,9 +570,31 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
   // case; the session stays failed for good (wrongFolder), and the next
   // creates meet the 409 (lastAppWorktreeFolder / lastServerSessionInRoot)
   const guarded = desktop.folderGuarded ? ` — its brief told it to check its folder first and stop, answering "${WRONG_FOLDER_ANSWER}", without touching anything; confirm in the Claude app that it did.` : " — stop it in the Claude app now if it is still working.";
+  // opened in the worktree the server made for it: that very folder, nobody else in it
+  const own = desktop.own?.state === "ready" ? desktop.own : null;
+  if (own) {
+    const folder = record.cwd ?? record.worktreePath;
+    const others = [
+      ...deps.ledger.all().filter((other) => other.id !== session.id && other.cwd === own.path).map((other) => `"${other.title}"`),
+      ...(deps.folderUsers?.(own.path, record.sessionId) ?? []).map((title) => `"${title}" (app)`),
+    ];
+    if (folder === own.path && (!record.worktreePath || record.worktreePath === own.path) && !others.length) {
+      session.worktree = basename(own.path);
+      deps.ledger.save();
+      deps.chip(session, `aberta no app Claude, na worktree que o OMB criou (${basename(own.path)})`);
+      deps.own?.adopted?.(session);
+      return true;
+    }
+    desktop.wrongFolder = record.worktreePath ?? folder ?? "?";
+    const where = folder === own.path ? `in it together with ${[...new Set(others)].join(", ")}` : `in ${desktop.wrongFolder} instead`;
+    failDesktopSession(deps, session, `the session should have opened in the worktree the server made for it (${own.path}) and opened ${where}${guarded} The worktree the server made stays as it is (the server never removes one); start the work again`);
+    // the breaker counts it: two in a row and this path is set aside (R11-dispatch R11-1)
+    deps.own?.wrongFolder?.(session, desktop.wrongFolder);
+    return false;
+  }
   if (!recordInWorktree(record)) {
     desktop.wrongFolder = record.cwd ?? "?";
-    failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), on the main checkout: the app opened it with the worktree option off${guarded} New sessions wait until the owner turns the worktree back on (the 409 says how); start the work again then`);
+    failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), on the main checkout: the app opened it with the worktree option off${guarded} New sessions wait until the owner unblocks the app (the 409 says how — where the server makes the sessions' worktrees, the option stays off); start the work again then`);
     return false;
   }
   const reused = reusedWorktree(deps, session, record);
@@ -336,6 +604,8 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
     return false;
   }
   deps.chip(session, "aberta no app Claude");
+  // a create that worked, the old way: the breaker of the server's worktrees rearms
+  deps.own?.adopted?.(session);
   return true;
 }
 
@@ -408,6 +678,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       const ordered = desktop.pending?.kind === "archive" || Boolean(desktop.archiveWhenResolved) || Boolean(desktop.archiveHandedOver) || failed;
       delete desktop.pending;
       deps.ledger.setStatus(session, "archived");
+      if (desktop.archiveHandedOver) deps.resolveOwnerPending?.(archiveKey(session));
       if (ordered) {
         if (failed && !desktop.archiveHandedOver) {
           session.archivedOutsideAt = now;
@@ -436,26 +707,19 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
       deps.chip(session, "o app não confirmou o arquivamento; tentando de novo", false);
     }
-    // A rename counts only once the app's record shows the new title.
-    const renaming = desktop.pending?.kind === "rename" && desktop.pending.verifyUntil ? desktop.pending : null;
-    if (renaming) {
-      if (record.title?.trim() === renaming.text.trim()) {
-        delete desktop.pending;
-        deps.ledger.save();
-        deps.chip(session, `renomeada no app: ${renaming.text.slice(0, 80)}`);
-      } else if (now > renaming.verifyUntil!) {
-        delete desktop.pending;
-        deps.ledger.save();
-        deps.chip(session, "o app não mostra o novo título — renomear não foi confirmado", false);
-        deps.report(session, `Claude Code session "${session.title}" (${session.id}): the rename to "${renaming.text}" was tried in the Claude app, but the app's record still says "${record.title ?? "(no title)"}". It is not tried again; the person may rename it by hand (claude://code/continue?session=${desktop.localId}).`);
-      }
-    }
-    // The owner wants every session named "NNNN …" in the app (no "#"), and
-    // the app titles them itself: rename it once, the way a person would.
-    if (desktop.issue && !desktop.renameTried && !desktop.pending && record.title && !record.title.includes(desktop.issue)) {
-      desktop.renameTried = true;
-      desktop.pending = { kind: "rename", text: `${desktop.issue} ${record.title}`, since: now, attempts: 0 };
+    // A rename the server queued before sessions named themselves: never on the screen any more.
+    if (desktop.pending?.kind === "rename") {
+      delete desktop.pending;
       deps.ledger.save();
+      deps.log?.(`rename dropped: session ${session.id} — the session names itself from its brief, never the screen nor the person`);
+    }
+    // The owner wants every session named "NNNN …" in the app (no "#"): the
+    // session does it itself (sessionTitleStep). One that did not keeps the
+    // app's title — its link finds it by id — and the log says so, once.
+    if (desktop.issue && !desktop.renameTried && record.title && (record.completedTurns ?? 0) > 0 && !record.title.includes(desktop.issue)) {
+      desktop.renameTried = true;
+      deps.ledger.save();
+      deps.log?.(`title: session ${session.id} is "${record.title.slice(0, 80)}" in the app, without its issue ${desktop.issue}; not renamed — claude://code/continue?session=${desktop.localId} finds it`);
     }
     const transcript = deps.transcriptOf(record.cliSessionId);
     // Its worktree is gone (removed by hand, or reused and cleaned up): the
@@ -546,6 +810,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         if (!desktop.wrongFolder) {
           desktop.wrongFolder = record.worktreePath ?? record.cwd ?? "?";
           failDesktopSession(deps, session, `the session stopped at its folder check: it opened in ${desktop.wrongFolder}, a folder that existed before its brief (a reused worktree or the root), and touched nothing. New sessions wait until the owner unblocks the app (the 409 says how); start the work again then`);
+          if (desktop.own?.state === "ready") deps.own?.wrongFolder?.(session, desktop.wrongFolder);
         } else deps.ledger.save();
         continue;
       }
@@ -593,12 +858,37 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
   }
 }
 
+/** What the app shows of a session that no other one shares, read by its id
+ * from the app's record: its worktree's branch and name (the chips under its
+ * field). Never its title, which the app renames as it likes. */
+export function sessionMarks(record: Pick<DesktopRecord, "worktreePath" | "worktreeName" | "cwd"> | null | undefined, branchOf: (path: string | undefined) => string | null = worktreeBranch): string[] {
+  if (!record) return [];
+  const branch = branchOf(record.worktreePath ?? record.cwd);
+  // A session OMB started in its own worktree folder (often through a link, with no worktreeName in the app's
+  // record) shows that folder in its chip, and the branch may have moved since ("lote/e-bi", 20/10 9bdc955d):
+  // the folder's name is a mark too — only for a worktree folder, never a shared repo folder.
+  const folder = [record.worktreePath, record.cwd]
+    .filter((path): path is string => typeof path === "string" && /\/(?:\.claude\/worktrees|\.worktrees|worktrees|\.omb-worktree-links\/[^/]+)\/[^/]+\/?$/.test(path))
+    .map((path) => basename(path.replace(/\/+$/, "")));
+  return [...new Set([branch, record.worktreeName, ...folder].filter((mark): mark is string => typeof mark === "string" && mark.length >= 6 && mark !== "main" && mark !== "master"))];
+}
+
 /** One screen action, if one is due. `state.busy` keeps them one at a time. */
 export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boolean }): Promise<void> {
   followDesktopSessions(deps);
   if (state.busy) return;
   const now = deps.now();
-  const next = pickDesktopPending(deps.ledger.all(), now);
+  for (const session of deps.ledger.all()) {
+    const desktop = session.desktop;
+    const pending = desktop?.pending;
+    if (session.status !== "running" || pending?.kind !== "create" || deps.canRunSession?.(session) !== false
+      || pending.attempts !== 0 || pending.triedAt !== undefined || desktop?.sentAt !== undefined || desktop?.localId || desktop?.sent) continue;
+    session.status = "stopped";
+    session.blockedOn = "Acesso total usa somente o terminal; este início no app não chegou a ser tentado.";
+    deps.ledger.save();
+    deps.chip(session, session.blockedOn, false);
+  }
+  const next = pickDesktopPending(deps.ledger.all().filter((session) => deps.canRunSession?.(session) !== false), now);
   if (!next) return;
   const desktop = next.desktop!;
   const pending = desktop.pending!;
@@ -651,13 +941,25 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       return;
     }
     const steps = deps.steps ?? {};
+    if (deps.canRunSession?.(next) === false) return;
     let userFrameAt = 0;
     let step: DesktopStep;
     deps.log?.(`${pending.kind} start: session ${next.id} "${next.title.slice(0, 60)}" (try ${pending.attempts + 1}${pending.misses ? `, misses ${pending.misses}` : ""})`);
+    const own = pending.kind === "create" && desktop.own?.state === "ready" ? desktop.own : null;
     if (pending.kind === "create") {
       pending.triedAt = deps.now();
       deps.ledger.save();
-      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null });
+      // the app applies the link's folder only when it already trusts it
+      // (2.31226.0, 08/10): our own worktree, git listing it, is trusted first
+      // — the alias the link names and the real path (INSP o92)
+      if (own && deps.trustFolders && ownWorktreeFolder(own.link ?? own.path, own.path, deps.registeredWorktrees?.(next) ?? [])) {
+        const failed = deps.trustFolders([...new Set([own.link ?? own.path, own.path])]);
+        if (failed) deps.log?.(`create: could not trust ${basename(own.path)} in the Claude app's config before the link (${failed.slice(0, 160)})`);
+      }
+      step = own
+        // the app's link opens New Session in the server's own worktree (its alias)
+        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}), trustClicks: pending.trustClicks ?? 0, branch: own.branch, dialogTie: true })
+        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), repoPath: next.repo, ...(deps.worktreeWanted?.(next) === "on" ? { worktree: "on" as const } : {}), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
@@ -667,7 +969,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         ? await (steps.archive ?? archiveDesktopSession)(driver, target)
         : pending.kind === "rename"
           ? await (steps.rename ?? renameDesktopSession)(driver, { ...target, newTitle: pending.text, repoName })
-          : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text, repoName });
+          : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text, repoName, marks: sessionMarks(record) });
     }
     const at = deps.now();
     // a create is "sent" here (the brief left the field); "adopted" comes when the app's record shows up
@@ -691,7 +993,11 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       delete desktop.pending;
       // the app's suggested reply gave way to the message (a draft never does)
       if (pending.kind === "send" && "suggestion" in step && step.suggestion) deps.chip(next, `a sugestão do app no campo (“${step.suggestion.slice(0, 80)}”) foi substituída pela mensagem`, true);
-      if (pending.kind === "create") desktop.sentAt = at;
+      if (pending.kind === "create") {
+        desktop.sentAt = at;
+        // a "trust this workspace" the person was asked about is settled
+        deps.resolveOwnerPending?.(trustKey(next));
+      }
       else {
         desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };
         desktop.lastSend = { at, confirmed: false };
@@ -703,6 +1009,10 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       deps.chip(next, pending.kind === "create" ? "brief enviado no app Claude" : "mensagem digitada no app Claude (conferindo se chegou)");
       return;
     }
+    if (step.trustNeeded !== undefined) {
+      askToTrust(deps, next, step.trustNeeded, at);
+      return;
+    }
     if (step.draft !== undefined) {
       holdForDraft(deps, next, step.draft, at, step.leftProbe === true);
       return;
@@ -711,7 +1021,56 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       giveUpPending(deps, next, step.reason);
       return;
     }
-    if (step.miss) {
+    // after a "trust" click the link is opened again (R13-3); openIn clicks once per create, and a prompt or a scratch after it is the cli
+    if (step.trusted && own) {
+      pending.trustClicks = (pending.trustClicks ?? 0) + 1;
+      deps.chip(next, `confiei no workspace ${basename(own.path)} no app Claude; reabrindo o link e conferindo a pasta antes de colar`, false);
+    }
+    // The chips on the folder before (no click fixes that), or the app again
+    // after our one click: no more tries of the app for this create — the
+    // breaker counts it, and the same brief goes to the cli at once, the
+    // reason on record (INSP-R13dis 1, 5, 7).
+    if ((step.previousFolder || step.cliNow) && own) {
+      own.state = "abandoned";
+      own.reason = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`.slice(0, 600);
+      deps.own?.abandoned?.(next, step.reason, step.seen);
+      appWaysFailed(deps, next, `the app did not open the session in the worktree the server made: ${step.reason}`, "own");
+      return;
+    }
+    if (step.miss && own) {
+      pending.misses = (pending.misses ?? 0) + 1;
+      // the last miss says why: a chip reading from an earlier miss never sticks to one of another cause (INSP-R12a X3-5)
+      if (step.worktreeOption) {
+        pending.worktreeOption = step.worktreeOption;
+        if (step.seen) pending.worktreeSeen = step.seen.slice(0, 300);
+      } else {
+        delete pending.worktreeOption;
+        delete pending.worktreeSeen;
+      }
+      // the app would not open its link there: New Session, as before (the worktree stays)
+      if (pending.misses >= OWN_OPEN_MAX_MISSES) {
+        own.state = "abandoned";
+        own.reason = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`.slice(0, 600);
+        // the worktree option ON (or unreadable) counts in the breaker like a wrong folder, with its own diagnosis (R12-1);
+        // so does any other give-up: no new session from the link, another folder's chips (R13-2)
+        if (pending.worktreeOption) deps.own?.chipRefused?.(next, pending.worktreeOption, pending.worktreeSeen);
+        else deps.own?.abandoned?.(next, step.reason, step.seen);
+        fallBackToNewSession(deps, next, `o app não abriu a sessão na worktree criada pelo OMB em ${pending.misses} tentativas (${step.reason.slice(0, 160)})`);
+        return;
+      }
+    } else if (step.miss && pending.kind === "send") {
+      pending.misses = (pending.misses ?? 0) + 1;
+      if (pending.misses >= DESKTOP_SEND_PARK_MISSES) {
+        const why = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`;
+        pending.parks = (pending.parks ?? 0) + 1;
+        if (pending.parks >= DESKTOP_SEND_MAX_PARKS) {
+          giveUpPending(deps, next, `could not send the message after ${pending.parks} parks of ${DESKTOP_SEND_PARK_MISSES} misses each with the screen unlocked and the Claude app in front: ${why}`);
+          return;
+        }
+        parkSend(deps, next, why, at);
+        return;
+      }
+    } else if (step.miss) {
       pending.misses = (pending.misses ?? 0) + 1;
       // a rename is cosmetic: three misses and the person is asked instead (01/10: 29 silent tries)
       if (pending.misses >= (pending.kind === "rename" ? DESKTOP_RENAME_MAX_MISSES : DESKTOP_MAX_MISSES)) {
@@ -738,6 +1097,72 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
   } finally {
     state.busy = false;
   }
+}
+
+/** A send that missed its session DESKTOP_SEND_PARK_MISSES times in a row:
+ * parked with a clear error and a longer wait each time (desktopParkMs). It
+ * lets go of what it held — the session goes idle, so its owner's
+ * conversation (and the bot's intake lock, the Chief of Staff's routines
+ * behind it) is free, and the Mac is no longer kept awake for it. */
+export function parkSend(deps: DesktopWorkDeps, session: CcSession, why: string, at: number): void {
+  const desktop = session.desktop!;
+  const pending = desktop.pending!;
+  const parks = pending.parks ?? 1;
+  const wait = desktopParkMs(parks);
+  const minutes = Math.round(wait / 60_000);
+  const misses = pending.misses ?? DESKTOP_SEND_PARK_MISSES;
+  pending.misses = 0;
+  pending.parkedAt = at;
+  pending.nextAttemptAt = at + wait;
+  pending.lastReason = `parked after ${misses} misses in a row (${parks} of ${DESKTOP_SEND_MAX_PARKS}); next try in ${minutes} min: ${why}`.slice(0, 1_000);
+  session.lastError = `message parked: the session was not on screen ${misses} times in a row (${why})`.slice(0, 1_000);
+  if (session.status === "running" && !desktop.sent) session.status = "idle";
+  deps.ledger.save();
+  deps.log?.(`send parked: session ${session.id} — ${misses} misses in a row, park ${parks} of ${DESKTOP_SEND_MAX_PARKS}, next try in ${minutes} min — ${why}`);
+  deps.chip(session, `a mensagem ficou estacionada: a sessão não apareceu na tela ${misses} vezes seguidas; nova tentativa em ${minutes} min`, false);
+  deps.onParked?.(session);
+  deps.report(session, `Claude Code session "${session.title}" (${session.id}): your message is PARKED, not delivered — the Claude app did not show this session on screen ${misses} times in a row (${why.slice(0, 300)}). It is tried again by itself in ${minutes} min (park ${parks} of ${DESKTOP_SEND_MAX_PARKS}); meanwhile nothing waits on it, so go on with other work.`);
+}
+
+const trustKey = (session: CcSession) => `cc-trust:${session.id}`;
+
+/** How long a create waits for the person to answer the app's "trust this workspace" before it gives up. */
+export const DESKTOP_TRUST_MAX_MS = 2 * 3_600_000;
+
+/** The app asks to trust a folder that is not a worktree the server made:
+ * only the person decides. Asked once in "Precisa de você"; the create
+ * waits (it is no miss) and looks again every DESKTOP_DRAFT_RECHECK_MS —
+ * for DESKTOP_TRUST_MAX_MS at most: then it gives up, and the item says so
+ * (INSP-R12a X3-3). */
+function askToTrust(deps: DesktopWorkDeps, session: CcSession, folder: string, at: number): void {
+  const pending = session.desktop!.pending!;
+  pending.trustSince ??= at;
+  if (at - pending.trustSince >= DESKTOP_TRUST_MAX_MS) {
+    const hours = Math.round(DESKTOP_TRUST_MAX_MS / 3_600_000);
+    deps.ownerPending?.(session, {
+      title: `A sessão "${session.title.slice(0, 50)}" desistiu de abrir no app Claude: ninguém respondeu ao pedido de confiar no workspace ${folder} em ${hours} h`,
+      key: trustKey(session),
+      why: `O app Claude pediu para confiar no workspace ${folder}, e o servidor não confia sozinho numa pasta que não é uma worktree dele. Depois de ${hours} h sem resposta, a criação desistiu; o bot foi avisado e pode abrir de novo.`,
+      steps: [{ text: "Se a pasta for sua, confie nela no app Claude e peça ao bot para abrir a sessão de novo; senão, resolva este item." }],
+    });
+    giveUpPending(deps, session, `the Claude app asked to trust the workspace ${folder} and nobody answered in ${hours} h (the server trusts only a worktree it made)`);
+    return;
+  }
+  const first = pending.lastReason?.startsWith("o app pede para confiar") !== true;
+  pending.lastReason = `o app pede para confiar no workspace ${folder}; esperando a pessoa`;
+  pending.nextAttemptAt = at + DESKTOP_DRAFT_RECHECK_MS;
+  deps.ledger.save();
+  if (!first) return;
+  deps.chip(session, `o app Claude pede para confiar no workspace ${folder}: só você decide — o pedido está em "Precisa de você"`, false);
+  deps.ownerPending?.(session, {
+    title: `Confiar no workspace ${folder} no app Claude (a sessão "${session.title.slice(0, 50)}" espera por isso)`,
+    key: trustKey(session),
+    why: `O app Claude pediu para confiar no workspace ${folder} ao abrir a sessão nova. O servidor só confirma isso sozinho numa worktree que ele mesmo criou; nesta pasta, quem decide é você. A sessão espera e o servidor tenta de novo a cada ${DESKTOP_DRAFT_RECHECK_MS / 60_000} min.`,
+    steps: [
+      { text: `No app Claude, abra uma sessão nova em ${folder} e responda ao pedido "Confiar no workspace" (confie só se a pasta for sua).` },
+      { text: "Pronto: na próxima tentativa o servidor abre a sessão e fecha este item sozinho." },
+    ],
+  });
 }
 
 /** How long a message waits before the field is looked at again, while the person's draft is in it. */

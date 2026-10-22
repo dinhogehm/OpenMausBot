@@ -15,19 +15,21 @@ import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { createApprovalModeSupport } from "./harness-capabilities.ts";
 
 describe("approval modes", () => {
-  it("carries Full silently to any engine that runs it; Custom never crosses engines", () => {
+  // fork: Full, like Custom, belongs to the engine it was granted on, so it
+  // goes back to Ask when the engine changes (upstream carries it, Oct 12).
+  it("resets only grants that cannot safely carry to the selected provider: Full and Custom never cross engines", () => {
     for (const driver of ["codex", "claudeAgent", "grokAgent", "antigravityAgent", "piAgent", "customAcp"]) {
       expect(modelSwitchNeedsAsk("ask", "codex", driver)).toBe(false);
       expect(modelSwitchNeedsAsk("auto", "codex", driver)).toBe(false);
-      expect(modelSwitchNeedsAsk("full", "codex", driver)).toBe(false);
+      expect(modelSwitchNeedsAsk("full", "codex", driver)).toBe(driver !== "codex");
       expect(modelSwitchNeedsAsk("custom", "codex", driver)).toBe(driver !== "codex");
     }
-    expect(modelSwitchNeedsAsk("full", "codex", "claudeAgent")).toBe(false);
-    expect(modelSwitchNeedsAsk("full", "claudeAgent", "openai-compat")).toBe(false);
+    expect(modelSwitchNeedsAsk("full", "codex", "claudeAgent")).toBe(true);
+    expect(modelSwitchNeedsAsk("full", "claudeAgent", "openai-compat")).toBe(true);
     expect(modelSwitchNeedsAsk("edits", "claudeAgent", "codex")).toBe(true);
     expect(modelSwitchNeedsAsk("edits", "claudeAgent", "grokAgent")).toBe(false);
     expect(modelSwitchNeedsAsk("full", "claudeAgent", "claudeAgent")).toBe(false);
-    expect(modelSwitchNeedsAsk("full", "codex", undefined)).toBe(false);
+    expect(modelSwitchNeedsAsk("full", "codex", undefined)).toBe(true);
   });
   it("only exposes implemented provider capabilities", () => {
     for (const driver of ["codex", "claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo", "qwenAgent", "geminiAgent"]) {
@@ -41,7 +43,7 @@ describe("approval modes", () => {
     expect(supportsApprovalMode(undefined, "edits")).toBe(false);
   });
 
-  it("runs Full access, the default level, on every engine", () => {
+  it("runs Full access (a stored level, not the default) on every engine", () => {
     for (const { driverKind } of BUILT_IN_DRIVERS) expect(supportsApprovalMode(driverKind, "full"), driverKind).toBe(true);
   });
 
@@ -81,12 +83,16 @@ describe("approval modes", () => {
     expect(approvalModeFor({ autoApprove: true })).toBe("auto");
   });
 
-  it("starts a bot or conversation nobody has set a level on at Full access", () => {
-    expect(DEFAULT_APPROVAL_MODE).toBe("full");
-    expect(approvalModeFor({})).toBe("full");
+  // fork: Ask até a pessoa escolher. Upstream's v0.1.109 default is Full.
+  it("starts a bot or conversation nobody has set a level on at Ask, never Full", () => {
+    expect(DEFAULT_APPROVAL_MODE).toBe("ask");
+    expect(approvalModeFor({})).toBe("ask");
     // Every bot made over HTTP stores the legacy bit off beside no level.
-    expect(approvalModeFor({ autoApprove: false })).toBe("full");
-    expect(approvalModeFor({ approvalMode: "ask", autoApprove: false })).toBe("ask");
+    expect(approvalModeFor({ autoApprove: false })).toBe("ask");
+    expect(approvalModeFor({ approvalMode: undefined, autoApprove: false, threadId: "t" })).toBe("ask");
+    // A level a person picked stays, Full included.
+    expect(approvalModeFor({ approvalMode: "full", autoApprove: false })).toBe("full");
+    expect(approvalModeFor({ approvalMode: "auto" })).toBe("auto");
   });
 
   it("keeps Ask as the default where the server says so (a shared company workspace)", () => {
@@ -98,7 +104,22 @@ describe("approval modes", () => {
     } finally {
       setDefaultApprovalMode(DEFAULT_APPROVAL_MODE);
     }
-    expect(approvalModeFor({})).toBe("full");
+    expect(approvalModeFor({})).toBe("ask");
+  });
+
+  it("never lets the no-level default become Full or Custom", () => {
+    try {
+      for (const elevated of ["full", "custom"] as const) {
+        setDefaultApprovalMode(elevated);
+        expect(approvalModeFor({}), elevated).toBe("ask");
+        expect(approvalModeFor({ autoApprove: false }), elevated).toBe("ask");
+        // The legacy Auto bit is still safe Auto, never more.
+        expect(approvalModeFor({ autoApprove: true }), elevated).toBe("auto");
+      }
+    } finally {
+      setDefaultApprovalMode(DEFAULT_APPROVAL_MODE);
+    }
+    expect(approvalModeFor({})).toBe("ask");
   });
 
   it("prefers a valid explicit mode and fails closed around corrupt values", () => {

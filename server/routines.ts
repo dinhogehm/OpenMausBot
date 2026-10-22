@@ -1,3 +1,5 @@
+import { loadInstalledPackage, type RoutineRunOn, type RoutineTarget, type RoutineGoalStatus, type Routine, type RoutinePackageStamp, type RoutineRun, type RoutineRequestReceipt, type RoutineRequestCommit, type RoutineRequestCommitFor, type RoutineInput, type RoutineRequestOwner } from "./routine-model.ts";
+export type { RoutineRunOn, RoutineTarget, RoutineGoalStatus, Routine, RoutinePackageStamp, RoutineRun, RoutineRequestReceipt, RoutineRequestCommit, RoutineInput, RoutineRequestOwner } from "./routine-model.ts";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -5,178 +7,36 @@ import { z } from "zod";
 
 import { DATA_DIR } from "./config.ts";
 import type { RuntimeEvent } from "./contracts.ts";
+import { declaredResult, resultProblem, ROUTINE_RESULT_CONTRACT } from "./result-contract.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { activeRunsOf, nextDueOf, wakeHoldOf } from "./routine-due.ts";
 import type { GroupGoalRunStatus } from "../shared/group-goal-run.ts";
 import type { RoutineRequestOperation } from "../shared/routine-request.ts";
 import { intervalAllowsOccurrence, intervalHasRestrictions, isSameLocalDay, latestIntervalOccurrence, MAX_DATE_MS } from "./routine-intervals.ts";
-import { cleanSchedule, cloneSchedule, limitResetOccurrence, loadSchedule, mergeScheduleUpdate, nextOccurrence, RoutineScheduleError, type RoutineSchedule, type RoutineScheduleInput } from "./routine-schedules.ts";
+import { cleanSchedule, cloneSchedule, limitResetOccurrence, loadSchedule, mergeScheduleUpdate, nextOccurrence, scheduleCadenceMs, RoutineScheduleError, type RoutineSchedule } from "./routine-schedules.ts";
 import { runsOnce } from "../shared/limit-reset.ts";
 import {
-  isRoutineProblemRun, type RoutineContextAttachment, type RoutineIntervalWindow, type RoutineRetryCause, type RoutineRunStatus, type RoutineRunTrigger,
+  isRoutineProblemRun, type RoutineContextAttachment, type RoutineIntervalWindow, type RoutineRunStatus, type RoutineRunTrigger,
 } from "../shared/routines.ts";
-import { ROUTINE_PARTS, type PartPair, type RoutinePart } from "./package-parts.ts";
 import {
   composeExecutionPrompt, continuityCarry, ROUTINE_DEFERRAL_NOTICE_MS, ROUTINE_SKIPPED_WHILE_WAITING, ROUTINE_SUPERSEDED,
-  routineFailure, routineHostWarning, skipNeedsNotice, supersededBy,
+  ROUTINE_HANDOFF_DETACH_CADENCE_MS, ROUTINE_HANDED_OFF_NOTE, routineFailure, routineHostWarning, skipNeedsNotice, staleActiveRun, supersededBy,
 } from "./routine-execution.ts";
 import {
   dispatchRefusal, engineFacts, loadOwnerNotices, recoverRun, requeueOnce, weekRuns, type RoutineAlert, type RoutineFailureFacts, type RoutineOwnerNotice,
 } from "./routine-recovery.ts";
-import { activeMs, askOf, settleAsk, waitingFor, type RoutineRunAsk } from "./routine-waits.ts";
+import { activeMs, askOf, settleAsk, waitingFor } from "./routine-waits.ts";
 import { failsLikeLastOutcome, outcomesNewestFirst } from "./routine-outcomes.ts";
 import { EVENT_RETRY_WINDOW_MS, loadEventReceipts, MAX_EVENT_RECEIPTS, type EventRunReceipt } from "./routine-event-receipts.ts";
 import { cleanAttachments, cleanTimeoutMinutes, loadTimeoutMinutes, loadAttachments, cloneAttachments } from "./routine-fields.ts";
 
 export type { RoutineContextAttachment, RoutineIntervalWindow, RoutineRunStatus, RoutineRunTrigger };
 export { intervalHasRestrictions } from "./routine-intervals.ts";
-export { nextOccurrence, RoutineScheduleError } from "./routine-schedules.ts";
+export { nextOccurrence, scheduleCadenceMs, RoutineScheduleError } from "./routine-schedules.ts";
 export type { RoutineIntervalSchedule, RoutineIntervalScheduleInput, RoutineSchedule, RoutineScheduleInput } from "./routine-schedules.ts";
 
-/** `cloud` runs the agent inside the bot's Boat VM; `maus` runs the bot's own provider and borrows only its computer tools. */
-export type RoutineRunOn = "maus" | "cloud";
-export type RoutineTarget = "bot" | "room-goal";
-export type RoutineGoalStatus = Exclude<GroupGoalRunStatus, "working">;
-
 const persistedSourceThreadId = z.string().trim().min(1).optional().catch(undefined);
-
-export interface Routine {
-  id: string;
-  name: string;
-  prompt: string;
-  target: RoutineTarget;
-  botId: string;
-  groupId?: string;
-  runOn: RoutineRunOn;
-  enabled: boolean;
-  schedule: RoutineSchedule;
-  durationMinutes: number;
-  timeoutMinutes?: number;
-  attachments?: RoutineContextAttachment[];
-  continuity?: boolean;
-  overlap?: "skip" | "queue";
-  runOnStartup?: boolean;
-  skippedRuns?: number;
-  lastSkippedAt?: number;
-  failureStreak?: number;
-  weekRuns?: { ok: number; total: number };
-  warning?: string;
-  sourceThreadId?: string;
-  resultsThreadId?: string;
-  installedPackage?: RoutinePackageStamp;
-  nextRunAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface RoutinePackageStamp {
-  installId: string;
-  key: string;
-  parts: Record<RoutinePart, PartPair>;
-}
-
-const HASH = /^[a-f0-9]{64}$/;
-function loadInstalledPackage(value: unknown): RoutinePackageStamp | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const stamp = value as Partial<RoutinePackageStamp>;
-  if (typeof stamp.installId !== "string" || !/^[a-f0-9]{32}$/.test(stamp.installId) || typeof stamp.key !== "string" || !stamp.key || stamp.key.length > 80) return undefined;
-  const parts = stamp.parts as Record<string, Partial<PartPair>> | undefined;
-  if (!parts || typeof parts !== "object" || !ROUTINE_PARTS.every((part) => HASH.test(String(parts[part]?.r)) && HASH.test(String(parts[part]?.w)))) return undefined;
-  return {
-    installId: stamp.installId,
-    key: stamp.key,
-    parts: Object.fromEntries(ROUTINE_PARTS.map((part) => [part, { r: parts[part]!.r!, w: parts[part]!.w! }])) as Record<RoutinePart, PartPair>,
-  };
-}
-
-export interface RoutineRun {
-  id: string;
-  routineId: string;
-  routineName: string;
-  prompt?: string;
-  durationMinutes?: number;
-  timeoutMinutes?: number;
-  attachments?: RoutineContextAttachment[];
-  target: RoutineTarget;
-  goalStatus?: RoutineGoalStatus;
-  groupId?: string;
-  botId: string;
-  runOn: RoutineRunOn;
-  scheduledFor: number;
-  status: RoutineRunStatus;
-  manual: boolean;
-  deferredAt?: number;
-  deferredNoticeAt?: number;
-  /** A queued run starts no earlier than this. */
-  retryAt?: number;
-  retried?: RoutineRetryCause;
-  /** When its current wait began; read only while the run is waiting. */
-  waitingSince?: number;
-  asked?: RoutineRunAsk;
-  /** Time spent waiting on the person's answers, which the run limit does not count. */
-  waitedMs?: number;
-  triggerSource?: RoutineRunTrigger;
-  /** "app": a connected-app event started it (its triggerSource stays "webhook", an outside event). */
-  eventSource?: "app";
-  webhookId?: string;
-  deliveryId?: string;
-  sourceThreadId?: string;
-  resultsThreadId?: string;
-  threadId?: string;
-  startedAt?: number;
-  finishedAt?: number;
-  output?: string;
-  attention?: string;
-  error?: string;
-  cost?: number | null;
-  denials?: string[];
-  createdAt: number;
-  seenAt?: number;
-}
-
-export interface RoutineRequestReceipt {
-  requestId: string;
-  messageId: string;
-  botId: string;
-  threadId: string;
-  action: RoutineRequestOperation["action"];
-  fingerprintVersion: 1;
-  fingerprint: string;
-  resultId: string;
-  appliedAt: number;
-}
-
-export interface RoutineRequestCommit {
-  requestId: string;
-  messageId: string;
-  botId: string;
-  threadId: string;
-  action: RoutineRequestOperation["action"];
-  fingerprintVersion: 1;
-  fingerprint: string;
-}
-
-type RoutineRequestCommitFor<Action extends RoutineRequestOperation["action"]> =
-  Omit<RoutineRequestCommit, "action"> & { action: Action };
-
-export interface RoutineInput {
-  name: string;
-  prompt: string;
-  target?: RoutineTarget;
-  botId: string;
-  groupId?: string | null;
-  runOn?: RoutineRunOn;
-  enabled?: boolean;
-  schedule: RoutineScheduleInput;
-  durationMinutes?: number;
-  timeoutMinutes?: number | null;
-  attachments?: RoutineContextAttachment[];
-  continuity?: boolean;
-  overlap?: "skip" | "queue";
-  runOnStartup?: boolean;
-  resultsThreadId?: string | null;
-}
 
 interface RoutineFile {
   version: 1;
@@ -188,9 +48,6 @@ interface RoutineFile {
   startupLaunchId?: string;
   ownerNotices?: RoutineOwnerNotice[];
 }
-
-
-export type RoutineRequestOwner = Pick<RoutineRequestReceipt, "requestId" | "messageId" | "botId" | "threadId">;
 
 type ResultsThreadAllocation = { botId: string; threadId: string };
 
@@ -246,14 +103,24 @@ export interface RoutineManagerOptions {
   limitResetAt?: (engine: string) => number | null;
   /** The bot has a backup engine to continue on when its own engine's usage limit refuses a run. */
   limitBackup?: (botId: string) => boolean;
+  /** Ask every bot run for a RESULTADO line and close it as completed only on
+   * "feito" with a checkable proof (result-contract.ts). */
+  resultContract?: boolean;
   /** Work this thread handed to another bot is still open, so its wait is not only on the person. */
   handedOffWorkLive?: (threadId: string) => boolean;
+  /** A turn is live for this run's thread right now (false: none is). Absent: never judged. */
+  runTurnLive?: (run: RoutineRun) => boolean;
+  /** The desktop app launch this server belongs to. The desktop restarts its
+   * server within one launch (crash recovery, switching back to a workspace),
+   * and that is not the app starting, so startup runs happen once per launch.
+   * Without one, as on a standalone server, every process start counts. */
   launchId?: string;
   /** A Cloud home woken from a sleep it was stopped for (server/cloud-power.ts): not a startup, so no "run on startup". */
   skipStartupRuns?: boolean;
 }
 
 const CATCH_UP_MS = 12 * 60 * 60_000;
+export const ROUTINE_STALE_PENDING = "Skipped: this run waited more than 12 hours to start; the next scheduled run does the work";
 const WAKE_HORIZON_MS = 60 * 60_000;
 
 export const ROUTINE_RESTARTED = "OpenMausBot restarted while this routine was running";
@@ -340,6 +207,8 @@ function sanitizeInput(input: RoutineInput, after: number): Omit<Routine, "id" |
   if (input.overlap !== undefined && input.overlap !== "skip" && input.overlap !== "queue") {
     throw new Error("Choose skip or queue for overlapping runs");
   }
+  if (input.lane != null && input.lane !== "own") throw new Error('lane must be "own" or absent');
+  if (input.lane === "own" && target === "room-goal") throw new Error("Room goals do not run in a lane of their own");
   if (continuity && target === "room-goal") {
     throw new Error("Room goals do not carry continuity yet");
   }
@@ -357,7 +226,9 @@ function sanitizeInput(input: RoutineInput, after: number): Omit<Routine, "id" |
     ...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
     attachments,
     ...(continuity ? { continuity: true } : {}),
-    ...(input.overlap === "queue" ? { overlap: "queue" as const } : {}),
+    // Kept as chosen (absent and "queue" behave alike) so installed-package part hashes stay as written.
+    ...(input.overlap === "skip" || input.overlap === "queue" ? { overlap: input.overlap } : {}),
+    ...(input.lane === "own" ? { lane: "own" as const } : {}),
     ...(input.runOnStartup === true && !runsOnce(schedule) ? { runOnStartup: true } : {}),
   };
 }
@@ -412,7 +283,9 @@ export class RoutineManager {
               attachments: loadAttachments(routine.attachments),
               sourceThreadId: persistedSourceThreadId.parse(routine.sourceThreadId),
               resultsThreadId: persistedSourceThreadId.parse(routine.resultsThreadId),
-              overlap: routine.overlap === "queue" ? "queue" : undefined,
+              // Absent and "queue" both coalesce; only an explicit "skip" drops overlapping occurrences.
+              overlap: routine.overlap === "skip" || routine.overlap === "queue" ? routine.overlap : undefined,
+              lane: routine.lane === "own" ? "own" : undefined,
               runOnStartup: routine.runOnStartup === true ? true : undefined,
               skippedRuns: Number.isSafeInteger(routine.skippedRuns) && routine.skippedRuns! > 0 ? routine.skippedRuns : undefined,
               lastSkippedAt: Number.isSafeInteger(routine.lastSkippedAt) && routine.lastSkippedAt! >= 0 && routine.lastSkippedAt! <= MAX_DATE_MS ? routine.lastSkippedAt : undefined,
@@ -686,6 +559,7 @@ export class RoutineManager {
       attachments: patch.attachments ?? routine.attachments,
       continuity: patch.continuity ?? routine.continuity,
       overlap: Object.hasOwn(patch, "overlap") ? patch.overlap : routine.overlap,
+      lane: Object.hasOwn(patch, "lane") ? patch.lane : routine.lane,
       runOnStartup: patch.runOnStartup ?? routine.runOnStartup,
     }, now);
     clean.schedule = this.timedSchedule(clean.schedule, routine.id);
@@ -711,7 +585,8 @@ export class RoutineManager {
         updatedAt: Math.max(now, routine.updatedAt + 1),
       });
       if (!clean.continuity) delete routine.continuity;
-      if (clean.overlap !== "queue") delete routine.overlap;
+      if (clean.overlap === undefined) delete routine.overlap;
+      if (clean.lane === undefined) delete routine.lane;
       if (!clean.runOnStartup) delete routine.runOnStartup;
       if (Object.hasOwn(patch, "timeoutMinutes") && patch.timeoutMinutes == null) {
         delete routine.timeoutMinutes;
@@ -923,6 +798,43 @@ export class RoutineManager {
     if (changed) this.save();
   }
 
+  /** A scheduled bot run of a routine with continuity, due every ROUTINE_HANDOFF_DETACH_CADENCE_MS or more often. */
+  private handsOffLongWork(run: RoutineRun): boolean {
+    if (run.target !== "bot" || (run.triggerSource ?? (run.manual ? "manual" : "schedule")) !== "schedule") return false;
+    const routine = this.routines.find((candidate) => candidate.id === run.routineId);
+    // Continuity carries this run's report into the next pass, which picks the handed-off work up from there;
+    // without it the run still waits for its hand-offs as before.
+    if (!routine || routine.continuity !== true) return false;
+    const cadence = scheduleCadenceMs(routine.schedule, run.scheduledFor);
+    return cadence !== null && cadence <= ROUTINE_HANDOFF_DETACH_CADENCE_MS;
+  }
+
+  private readonly noTurnSince = new Map<string, number>();
+
+  /** At startup (the first tick) and on every tick: a run still marked active with no live turn, or past its maximum
+   * duration, is released so the pending run of its routine fires. A waiting run's hand-off keeps going on its own. */
+  private releaseStaleRuns(now: number): RoutineRun[] {
+    const interrupt: RoutineRun[] = [];
+    for (const run of this.runs) {
+      if (run.status !== "running" && run.status !== "waiting") { this.noTurnSince.delete(run.id); continue; }
+      if (run.status === "running" && run.threadId && this.options.runTurnLive?.(run) === false &&
+          !this.options.handedOffWorkLive?.(run.threadId)) {
+        if (!this.noTurnSince.has(run.id)) this.noTurnSince.set(run.id, now);
+      } else {
+        this.noTurnSince.delete(run.id);
+      }
+      const heldByHandOff = run.status === "waiting" && Boolean(run.threadId && this.options.handedOffWorkLive?.(run.threadId));
+      const reason = staleActiveRun(run, now, { heldByHandOff, noTurnSince: this.noTurnSince.get(run.id) });
+      if (!reason) continue;
+      this.noTurnSince.delete(run.id);
+      const wasRunning = run.status === "running";
+      console.log(`routines: "${run.routineName}" (${run.routineId.slice(0, 8)}) run ${run.id.slice(0, 8)} released after ${Math.round((now - run.startedAt!) / 60_000)} min ${run.status}: ${reason}`);
+      this.failRun(run, reason);
+      if (wasRunning && run.threadId) interrupt.push(run);
+    }
+    return interrupt;
+  }
+
   async cancelRun(id: string, reason?: string): Promise<RoutineRun | null> {
     const run = this.runs.find((r) => r.id === id);
     if (!run || !["queued", "running", "waiting"].includes(run.status)) return null;
@@ -1085,6 +997,8 @@ export class RoutineManager {
     this.ticking = true;
     try {
       const now = this.now();
+      // Synchronous unless a run is released: an await here would yield to a concurrent tick() before dispatch.
+      for (const run of this.releaseStaleRuns(now)) await this.options.interruptTurn?.(run.botId, run.threadId!).catch(() => {});
       for (const run of this.runs) {
         if (!["running", "waiting"].includes(run.status) || run.startedAt == null || run.timeoutMinutes == null ||
           activeMs(run, now) < run.timeoutMinutes * 60_000) continue;
@@ -1114,7 +1028,10 @@ export class RoutineManager {
             );
             const scheduledQueued = this.runs.some(run => run.routineId === routine.id && run.status === "queued" &&
               (run.triggerSource ?? (run.manual ? "manual" : "schedule")) === "schedule");
-            if (!overlapping || (routine.overlap === "queue" && !scheduledQueued)) {
+            // Overlap coalesces by default: one pending scheduled run per routine, started once the
+            // target is free. Only an explicit "skip" drops the occurrence.
+            const coalesces = routine.overlap !== "skip";
+            if (!overlapping || (coalesces && !scheduledQueued)) {
               const run = this.newRun(routine, scheduledFor, false, allocations);
               // A reset is a state, not a moment: it still holds however late the computer wakes.
               if (late > CATCH_UP_MS && routine.schedule.type !== "limit_reset") {
@@ -1122,8 +1039,22 @@ export class RoutineManager {
                 run.finishedAt = now;
                 run.error = "This computer was offline for more than 12 hours after the scheduled time";
               }
+              if (overlapping && run.status === "queued") {
+                console.log(`routines: "${routine.name}" (${routine.id.slice(0, 8)}) deferred: busy (its previous run is still active), run ${run.id.slice(0, 8)} pending for ${new Date(scheduledFor).toISOString()}`);
+              }
               scheduledRuns.push(run);
+            } else if (coalesces) {
+              // Already one pending scheduled run: fold this occurrence into it, never a second one.
+              const pending = this.runs.find(run => run.routineId === routine.id && run.status === "queued" &&
+                (run.triggerSource ?? (run.manual ? "manual" : "schedule")) === "schedule");
+              if (pending) {
+                pending.coalescedRuns = Math.min(Number.MAX_SAFE_INTEGER, (pending.coalescedRuns ?? 0) + 1);
+                console.log(`routines: "${routine.name}" (${routine.id.slice(0, 8)}) deferred: busy, coalesced ${pending.coalescedRuns} into pending run ${pending.id.slice(0, 8)} (occurrence ${new Date(scheduledFor).toISOString()})`);
+              }
+              routine.skippedRuns = Math.min(Number.MAX_SAFE_INTEGER, (routine.skippedRuns ?? 0) + 1);
+              routine.lastSkippedAt = scheduledFor;
             } else {
+              console.log(`routines: "${routine.name}" (${routine.id.slice(0, 8)}) skipped occurrence ${new Date(scheduledFor).toISOString()}: its previous run is still active (overlap: skip)`);
               const waiting = this.runs.find((run) => run.routineId === routine.id && run.status === "waiting" && run.waitingSince !== undefined);
               // Once per wait, an occurrence skipped behind it leaves a missed receipt, so the owner is told.
               if (waiting && skipNeedsNotice(scheduledFor, waiting.waitingSince!, routine.lastSkippedAt)) {
@@ -1173,12 +1104,20 @@ export class RoutineManager {
             continue;
           }
         }
+        // A scheduled run that has waited past the catch-up window is not run at all (e.g. one that sat a day behind
+        // a busy bot): its next occurrence does the work, and a boot does not start a day-old backlog.
+        if (triggerSource === "schedule" && definition?.schedule.type !== "limit_reset" && now - run.scheduledFor > CATCH_UP_MS) {
+          console.log(`routines: "${run.routineName}" (${run.routineId.slice(0, 8)}) pending run ${run.id.slice(0, 8)} dropped, ${Math.round((now - run.scheduledFor) / 60_000)} min late${run.coalescedRuns ? `, coalesced ${run.coalescedRuns}` : ""}`);
+          this.failRun(run, ROUTINE_STALE_PENDING, "missed");
+          continue;
+        }
         const sameRoutineWorking = triggerSource === "schedule" && this.runs.some(other =>
           other.id !== run.id && other.routineId === run.routineId && ["running", "waiting"].includes(other.status));
         const state = sameRoutineWorking ? "busy" : this.targetState(run);
         if (state === "busy") {
           if (run.deferredAt == null) {
             run.deferredAt = now;
+            if (!sameRoutineWorking) console.log(`routines: "${run.routineName}" (${run.routineId.slice(0, 8)}) deferred: target busy, run ${run.id.slice(0, 8)} waits and starts when it is free`);
             this.save();
             this.emitRun(run);
           }
@@ -1194,17 +1133,28 @@ export class RoutineManager {
           this.failRun(run, this.missingTargetMessage(run.target));
           continue;
         }
+        if (run.deferredAt != null || run.coalescedRuns) {
+          console.log(`routines: "${run.routineName}" (${run.routineId.slice(0, 8)}) pending run ${run.id.slice(0, 8)} starts now, ${Math.max(0, Math.round((now - run.scheduledFor) / 60_000))} min after it was due${run.coalescedRuns ? `, coalesced ${run.coalescedRuns}` : ""}`);
+        }
         const startedAt = this.now();
         const suffix = ` · ${new Date(startedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
         const title = `${run.routineName.slice(0, 80 - suffix.length).trimEnd()}${suffix}`;
-        const joined = run.target === "room-goal" ? null : run.threadId || this.options.joinConversation?.(run) || null;
-        const task = joined
-          ? { threadId: joined }
-          : run.target === "room-goal"
-          ? run.groupId
-            ? this.options.createGoalTask?.(run.groupId, title) ?? null
-            : null
-          : this.options.createTask(run.botId, title, run.triggerSource === "webhook", run);
+        let task: { threadId: string } | null;
+        try {
+          const joined = run.target === "room-goal" ? null : run.threadId || this.options.joinConversation?.(run) || null;
+          task = joined
+            ? { threadId: joined }
+            : run.target === "room-goal"
+            ? run.groupId
+              ? this.options.createGoalTask?.(run.groupId, title) ?? null
+              : null
+            : this.options.createTask(run.botId, title, run.triggerSource === "webhook", run);
+        } catch (error) {
+          // An unavailable task must fail its own receipt, not strand every
+          // later run. Persistence failures still propagate from failRun.
+          this.failRun(run, error instanceof Error ? error.message : String(error));
+          continue;
+        }
         if (!task) {
           this.failRun(run, run.target === "room-goal"
             ? "Could not create a room task for this goal"
@@ -1237,10 +1187,15 @@ export class RoutineManager {
               (message) => this.failThread(task.threadId, message),
             );
           } else {
+            const composed = composeExecutionPrompt({ name: run.routineName, trigger: triggerSource, runOn: run.runOn ?? "maus" }, prompt, run.attachments, continuityCarry(run, this.routines, this.runs), run.retried);
+            if (this.options.resultContract) {
+              run.resultContract = true;
+              this.save();
+            }
             await this.options.startTurn(
               run.botId,
               task.threadId,
-              composeExecutionPrompt({ name: run.routineName, trigger: triggerSource, runOn: run.runOn ?? "maus" }, prompt, run.attachments, continuityCarry(run, this.routines, this.runs), run.retried),
+              this.options.resultContract ? `${composed}\n\n${ROUTINE_RESULT_CONTRACT}` : composed,
               run.runOn ?? "maus",
               triggerSource,
               (message) => this.failThread(task.threadId, message),
@@ -1271,6 +1226,8 @@ export class RoutineManager {
     if (event.type === "turn.started") {
       run.status = "running";
       run.attention = undefined;
+      // each turn declares its own RESULTADO: the one that settles the run is the last turn's
+      run.declared = undefined;
     } else if (event.type === "request.opened") {
       run.asked ??= askOf(event, this.now());
       this.wait(run, waitingFor(run.asked));
@@ -1283,6 +1240,8 @@ export class RoutineManager {
       run.status = "running";
       run.attention = undefined;
     } else if (event.type === "item.completed" && event.itemType === "assistant_text") {
+      // the RESULTADO line ends the answer: read it before the output is clipped
+      run.declared = declaredResult(redactSecretsInText(event.text));
       run.output = redactSecretsInText(event.text).trim().slice(0, 2_000);
     } else if (event.type === "runtime.error") {
       run.error = redactSecretsInText(event.message).slice(0, 500);
@@ -1296,10 +1255,23 @@ export class RoutineManager {
         return cloneRun(run);
       }
       this.failureFacts.delete(run.id);
-      if (this.options.hasPendingDelegations?.(event.threadId) === true) this.wait(run, "Waiting for delegated work to finish");
+      const delegated = this.options.hasPendingDelegations?.(event.threadId) === true;
+      // Frequent routines finish after handing off long work so their next pass can start.
+      const detached = delegated && this.handsOffLongWork(run);
+      const pending = delegated && !detached;
+      if (detached) console.log(`routines: "${run.routineName}" (${run.routineId.slice(0, 8)}) run ${run.id.slice(0, 8)} handed its long work off and ends with its turn`);
+      const problem = !pending && run.resultContract ? resultProblem(run.declared ?? { kind: "missing" }) : null;
+      if (problem) {
+        run.resultFailed = true;
+        this.failRun(run, problem);
+        queueMicrotask(() => void this.tick());
+        return cloneRun(run);
+      }
+      if (pending) this.wait(run, "Waiting for delegated work to finish");
       else {
         Object.assign(run, { status: "completed", attention: undefined, finishedAt: this.now() } satisfies Partial<RoutineRun>);
         this.ownerNotices = this.ownerNotices.filter((notice) => notice.botId !== run.botId);
+        if (detached && !run.output) run.output = ROUTINE_HANDED_OFF_NOTE;
       }
       run.error = undefined;
     } else {

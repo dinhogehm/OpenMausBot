@@ -5,7 +5,8 @@ import { peerLine } from "@/lib/peer-message";
 import { isReceipt } from "@/lib/receipts";
 import { activityPreview, botEngine } from "@/lib/failed-turn";
 import { t } from "@/lib/i18n";
-import { sidebarConnectorPreview, sidebarGoalRunPreview } from "@/lib/sidebar-layout";
+import { sidebarConnectorPreview, sidebarGoalRunPreview, sidebarRoutineRunPreview } from "@/lib/sidebar-layout";
+import { needsYouLabel } from "@/lib/message-stamp";
 import { citationPreviewText } from "@/lib/citations";
 import { plainPreviewText } from "@/lib/plain-preview";
 import { isClientCancellation } from "../../shared/client-cancel";
@@ -18,6 +19,8 @@ export function lastPreviewable<T extends { kind: string }>(messages: readonly T
 
 export function botPreview(bot: Bot, visible: Message[], instances: InstanceInfo[], advanced: boolean): string {
   if (bot.activity === "waiting-on-you") return t("sidebar.preview.waiting");
+  // This fork: a goal that stopped to ask the person outranks any teammate wait
+  if (bot.goalNeedsInput) return needsYouLabel(bot.goalNeedsInputSince);
   if (bot.waitingForTeammates) return t("sidebar.preview.waitingOnTeammate");
   if (bot.busy) return t("sidebar.preview.working");
   const last = lastPreviewable(visible);
@@ -60,7 +63,9 @@ export function groupPreview(group: Group, bots: Bot[], instances: InstanceInfo[
       ? sidebarGoalRunPreview(last.goalRun)
       : last.kind === "connector" && last.connector
         ? sidebarConnectorPreview(last.connector, t)
-        : (last.text ?? "");
+        : last.kind === "routine.run" && last.routineRun
+          ? sidebarRoutineRunPreview(last.routineRun, t)
+          : (last.text ?? "");
   const readable = plainPreviewText(citationPreviewText(text));
   if (last.role === "user") return t("sidebar.preview.you", { text: readable });
   return last.from ? `${last.from.name}: ${readable}` : readable;

@@ -433,3 +433,53 @@ test("boot reads the environment decision before the boot lease and never create
   assert.match(boot, /activeId: LOCAL_ID/);
   assert.match(boot, /showErrorBox\(\s*"[^"]*missing[^"]*"/i);
 });
+
+for (const slowRetryDelaysMs of [[], [300, 900]]) {
+  test(`exhausted quick budget reports ${slowRetryDelaysMs.length ? "continuing" : "stopped"} recovery`, async (t) => {
+    const notices = [];
+    let restarts = 0;
+    const f = fixture(t, {
+      slowRetryDelaysMs,
+      onExhausted: (status) => notices.push(status),
+      restart: async () => { restarts += 1; return { proc: null }; },
+    });
+    const first = f.spawn();
+    f.supervisor.ready(first);
+    first.emit("exit", 1);
+    await f.tick(10); await f.tick(20); await f.tick(40);
+    assert.equal(restarts, 3);
+    await f.tick(300);
+    assert.equal(restarts, slowRetryDelaysMs.length ? 4 : 3);
+    await f.supervisor.shutdown();
+    assert.deepEqual(notices, [{ retrying: slowRetryDelaysMs.length > 0, reason: "budget" }]);
+  });
+}
+
+test("an unreaped child reports stopped recovery and never gets a sibling even with slow retries", async (t) => {
+  const notices = [];
+  let blocked;
+  let restarts = 0;
+  const f = fixture(t, {
+    slowRetryDelaysMs: [300, 900],
+    onExhausted: (status) => notices.push(status),
+    restart: async () => {
+      restarts += 1;
+      blocked = f.spawn();
+      return { proc: null, abort: true };
+    },
+  });
+  const first = f.spawn();
+  f.supervisor.ready(first);
+  first.emit("exit", 1);
+  await f.tick(10);
+  assert.equal(f.supervisor.isCurrent(blocked), true);
+  await f.tick(10_000);
+  assert.equal(restarts, 1);
+  assert.equal(f.children.length, 2);
+  blocked.emit("exit", 1);
+  await f.tick(10_000);
+  assert.equal(restarts, 1, "late exit does not turn an aborted recovery into a retry");
+  assert.equal(f.children.length, 2);
+  await f.supervisor.shutdown();
+  assert.deepEqual(notices, [{ retrying: false, reason: "stuck-child" }]);
+});

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import englishCatalog from "../src/locales/en.json" with { type: "json" };
 
 import {
+  implicitReadOnlyFor,
   HELD_NOTE,
   approvalHeldNote,
   approvalHeldReason,
@@ -206,5 +207,16 @@ describe("delegatedApprovalMode", () => {
     // Codex has no Auto-accept edits (its Ask already writes the workspace).
     expect(delegatedApprovalMode({ ...base, senderMode: "edits", recipientDriverKind: "codex" })).toBeNull();
     expect(delegatedApprovalMode({ ...base, senderMode: "auto", recipientDriverKind: "codex" })).toBe("auto");
+  });
+});
+
+describe("implicitReadOnlyFor (the owner, 20/10)", () => {
+  it("lets the read-only set answer only on attended edits; Ask, Auto, Custom and unattended runs keep the card", () => {
+    expect(implicitReadOnlyFor("edits", false)).toBe(true);
+    expect(implicitReadOnlyFor("edits", true)).toBe(false);
+    for (const mode of ["ask", "auto", "custom"] as const) {
+      expect(implicitReadOnlyFor(mode, false)).toBe(false);
+      expect(implicitReadOnlyFor(mode, true)).toBe(false);
+    }
   });
 });

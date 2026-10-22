@@ -6,6 +6,8 @@ import {
   BOOT_PROBE_FAST_WINDOW_MS,
   BOOT_PROBE_INTERVAL_MS,
   bootFailureMessage,
+  portAfterFailure,
+  SERVER_BOOT_TIMEOUT_MS,
   listeningSignal,
   pollServerIdentity,
 } from "./server-boot-probe.mjs";
@@ -312,4 +314,12 @@ test("an answer in flight when the child starts listening gets the grace", async
     now: (() => { const t0 = Date.now(); return () => t0 + (Date.now() - t0) * 5; })(),
   });
   assert.equal(outcome.outcome, "ready");
+});
+
+test("a slow boot stays on its port; only a taken port or a dead child moves to the next one", () => {
+  assert.equal(portAfterFailure("timeout"), "same");
+  assert.equal(portAfterFailure("stuck-child"), "same");
+  assert.equal(portAfterFailure("foreign-owner"), "next");
+  assert.equal(portAfterFailure("exited"), "next");
+  assert.ok(SERVER_BOOT_TIMEOUT_MS >= 180_000, "a loaded Mac gets minutes, not 60 s");
 });

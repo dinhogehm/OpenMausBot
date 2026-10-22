@@ -44,6 +44,7 @@ import { cloudFirstRun, cloudWelcomeVisible, useCloudWelcome } from "@/lib/cloud
 import { engineReady } from "@/components/EngineLibrary";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ReportPage } from "@/components/ReportPage";
+import { PipelineBoardPage } from "@/components/PipelineBoardPage";
 import { setLocale, t } from "@/lib/i18n";
 import { shouldOpenKeyboardShortcuts } from "@/lib/keyboard-shortcuts";
 import { effectiveLanguage, useLanguageChoice } from "@/lib/language-preference";
@@ -53,7 +54,10 @@ import { useExternalChatLinks } from "@/hooks/use-external-chat-links";
 import { useUsageSnapshot } from "@/hooks/use-usage-snapshot";
 import { ChatNotice } from "@/components/ChatErrorBanner";
 
-/** This build does not float the Pro introduction over the app. */
+/** This build does not float the Pro introduction over the app. Upstream
+ * v0.1.109 replaced the Pro card with AppNotices (Cloud offer, trial, My
+ * Cloud, star, launch), which sits in the same bottom-left corner, so the same
+ * switch keeps it quiet. */
 const SHOW_PRO_INTRODUCTION = false;
 
 function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
@@ -114,7 +118,7 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
   const [localVmWorkspaceBotId, setLocalVmWorkspaceBotId] = useState<string | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const previousViewRef = useRef(state.activeView);
-  const calendarOriginRef = useRef<"chat" | "team-map" | "report">("chat");
+  const calendarOriginRef = useRef<"chat" | "team-map" | "report" | "pipeline">("chat");
   const group = state.groups.find((g) => g.id === state.selectedId);
   const bot = group ? undefined : (state.bots.find((b) => b.id === state.selectedId) ?? state.bots[0]);
   const notificationFeed = useNotificationFeed() && !remoteClient;
@@ -224,6 +228,10 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
       dispatch({ type: "showReport" });
       return;
     }
+    if (calendarOriginRef.current === "pipeline") {
+      dispatch({ type: "showPipeline" });
+      return;
+    }
     dispatch({ type: "select", id: state.selectedId });
   }, [dispatch, state.selectedId]);
   const openCalendarRoom = useCallback((id: string) => {
@@ -310,6 +318,8 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
         <TeamMapPage />
       ) : state.activeView === "report" ? (
         <ReportPage />
+      ) : state.activeView === "pipeline" ? (
+        <PipelineBoardPage />
       ) : state.activeView === "files" ? (
         <FilesView />
       ) : state.activeView === "routines" ? (

@@ -103,11 +103,16 @@ export function withoutLeadingMentions(text: string): string {
     let names = 0;
     while (names < 3 && at < words.length) {
       const word = words[at]!;
+      // a last name word with its comma, right before the next @mention ("@A Tal, @B …")
+      if (/^\p{Lu}[\p{L}'-]*,$/u.test(word) && words[at + 1]?.startsWith("@")) { at += 1; break; }
       const connector = NAME_CONNECTORS.has(word) && /^\p{Lu}[\p{L}'-]*$/u.test(words[at + 1] ?? "");
       if (!connector && !/^\p{Lu}[\p{L}'-]*$/u.test(word)) break;
       at += 1;
       if (!connector) names += 1;
     }
+    // "@A e @B", "@A , @B": the link to the next mention is the mentions' too (R11-intake 4:
+    // the post of 04/10 20:16 began "@… de Carvalho  e @…" and woke the bot's own watch)
+    if ((words[at] === "e" || words[at] === ",") && words[at + 1]?.startsWith("@")) at += 1;
   }
   return words.slice(at).join(" ");
 }

@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { t } from "@/lib/i18n";
+import { shownTaskTitle } from "@/lib/thread-title";
 import type { Bot } from "@/state/store";
 import { Select } from "../Select";
 
@@ -23,7 +24,7 @@ export function ResultsDestination({ bot, value, allowCurrent = false, onChange 
       {groups.map((group) => {
         const members = tasks.filter((task) => group.id ? task.projectId === group.id : !bot?.projects?.some((project) => project.id === task.projectId));
         return members.length ? <optgroup key={group.id} label={group.name}>
-          {members.map((task) => <option key={task.threadId} value={task.threadId}>{task.title}</option>)}
+          {members.map((task) => <option key={task.threadId} value={task.threadId}>{shownTaskTitle(task)}</option>)}
         </optgroup> : null;
       })}
     </Select>

@@ -181,11 +181,13 @@ never kill processes by name or delete a broad temporary root.
 
 ## Automated regressions
 
-In the editor's Advanced section, recurring routines offer **Skip this
-occurrence** (the default) or **Queue one run**. The queued scheduled run waits
+In the editor's Advanced section, recurring routines offer **Queue one run**
+(the default) or **Skip this occurrence**. The queued scheduled run waits
 for the same routine to finish, including the assignments its run still has
-outstanding on the job runtime; extra occurrences are skipped, not
-accumulated. Manual runs and webhook deliveries remain independent. Pausing
+outstanding on the job runtime, and starts as soon as the bot is free; extra
+occurrences are coalesced into it (`coalescedRuns`, logged as
+`deferred: busy, coalesced N`), not accumulated. Only an explicit skip drops
+them, with a `skipped occurrence … (overlap: skip)` log line. Manual runs and webhook deliveries remain independent. Pausing
 still cancels queued work. The cron renderer test changes this option, saves
 it, opens the editor again and switches it back.
 

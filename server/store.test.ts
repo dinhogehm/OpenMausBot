@@ -505,13 +505,16 @@ describe("Store", () => {
     expect(sibling.modelSelection).toBeUndefined();
     store.switchTaskModel(bot.id, first.threadId, next, true, true);
     expect(bot).toMatchObject({ modelSelection: next, approvalMode: "ask", alwaysAllow: [] });
+    // The thread it was changed from now follows the bot; a sibling that
+    // follows moves to the new engine and, its Full access belonging to the
+    // old one, back to Ask; a thread's own model and level stay.
     expect(first.modelSelection).toBeUndefined();
-    expect(sibling).toMatchObject({ approvalMode: "full", alwaysAllow: ["old-tool"] });
+    expect(sibling).toMatchObject({ approvalMode: "ask", autoApprove: false, alwaysAllow: [] });
     expect(store.projectBotForTask(bot.id, sibling.threadId)?.modelSelection).toEqual(next);
     expect(picked).toMatchObject({ modelSelection: opus, approvalMode: "full", alwaysAllow: ["old-tool"] });
     const reloaded = new Store(selection);
     expect(reloaded.bot(bot.id)).toMatchObject({ modelSelection: next, approvalMode: "ask" });
-    expect(reloaded.taskByThread(bot.id, sibling.threadId)).toMatchObject({ approvalMode: "full" });
+    expect(reloaded.taskByThread(bot.id, sibling.threadId)).toMatchObject({ approvalMode: "ask" });
     expect(reloaded.taskByThread(bot.id, picked.threadId)).toMatchObject({ modelSelection: opus, approvalMode: "full" });
   });
 
@@ -1610,6 +1613,34 @@ describe("Store", () => {
     expect(store.setActiveLeaf(bot.threadId, "nope")).toBeNull();
   });
 
+  it("activePath is memoised until the tree changes and never hands out its cached array", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const first = store.appendMessage(bot.threadId, { role: "user", kind: "text", text: "one" });
+    const a = store.activePath(bot.threadId);
+    a.length = 0;
+    expect(store.activePath(bot.threadId).at(-1)?.id).toBe(first.id);
+    const second = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: "two" });
+    expect(store.activePath(bot.threadId).map((m) => m.id).slice(-2)).toEqual([first.id, second.id]);
+    store.patchMessage(bot.threadId, second.id, { text: "two, edited" });
+    expect(store.activePath(bot.threadId).at(-1)?.text).toBe("two, edited");
+    const v2 = store.branchMessage(bot.threadId, first.id, "v2")!;
+    expect(store.activePath(bot.threadId).at(-1)?.id).toBe(v2.id);
+    store.setActiveLeaf(bot.threadId, first.id);
+    expect(store.activePath(bot.threadId).map((m) => m.id)).not.toContain(second.id === v2.id ? "" : v2.id);
+  });
+
+  it("setActiveLeaf descends a long thread in one pass", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const root = store.appendMessage(bot.threadId, { role: "user", kind: "text", text: "root" });
+    let last = root;
+    for (let i = 0; i < 6000; i++) last = store.appendMessage(bot.threadId, { role: i % 2 ? "user" : "bot", kind: "text", text: `m${i}` });
+    const started = performance.now();
+    expect(store.setActiveLeaf(bot.threadId, root.id)).toBe(last.id);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("persists the branch tree and active leaf across a restart", () => {
     const store = new Store(selection);
     const bot = store.createBot();
@@ -2439,6 +2470,28 @@ describe("soul", () => {
       { action: "create", botId: "created-open", threadId: "created-open-thread", fields: { name: "Helper", section: "Ops", modelSelection: selection() } },
     ] });
     expect(open.bot("created-open")?.visibility).toBeUndefined();
+  });
+
+  // fork: Ask até a pessoa escolher. Upstream 593fd1c5a let these records
+  // follow its Full default; here a Chief's Full never reaches them either.
+  it("saves Ask on a Chief's new teammate and its first thread, and on a later thread of a bot with no level", () => {
+    const store = new Store(selection);
+    const chief = store.createBot({ name: "Lead", section: "Ops" });
+    store.patchBot(chief.id, { chiefOfStaff: true, approvalMode: "full", autoApprove: false });
+    store.applyTeamSetup({ version: 1, requestId: "setup-ask", botId: chief.id, threadId: chief.threadId,
+      reason: "Requested", createdAt: 1, requesterRevision: "fixture", newTeams: [], operations: [
+        { action: "create", botId: "teammate-ask", threadId: "teammate-ask-thread", fields: { name: "Helper", section: "Ops", modelSelection: selection() } },
+      ] });
+    for (const view of [store, new Store(selection)]) {
+      expect(view.bot("teammate-ask")).toMatchObject({ approvalMode: "ask", autoApprove: false });
+      expect(view.taskByThread("teammate-ask", "teammate-ask-thread")).toMatchObject({ approvalMode: "ask", autoApprove: false });
+      expect(view.projectBotForTask("teammate-ask", "teammate-ask-thread")?.approvalMode).toBe("ask");
+    }
+    const plain = store.createBot();
+    expect(plain.approvalMode).toBeUndefined();
+    const later = store.createTask(plain.id, "Later work")!;
+    expect(later).toMatchObject({ approvalMode: "ask", autoApprove: false });
+    expect(new Store(selection).taskByThread(plain.id, later.threadId)?.approvalMode).toBe("ask");
   });
 
   it("deleteBot removes the bot folder with the workspace", () => {

@@ -10,6 +10,7 @@ import { StoreProvider } from "@/state/store";
 const fixture = vi.hoisted(() => ({
   density: "comfortable" as SidebarDensity,
   advanced: true,
+  resolverMounts: 0,
   windowChrome: undefined as "mac-inset" | "win-caption" | "native" | undefined,
   hostLabel: undefined as string | undefined,
 }));
@@ -28,6 +29,17 @@ vi.mock("./DesktopCapabilities", async (importOriginal) => ({
   },
 }));
 
+vi.mock("./NeedsYouResolver", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./NeedsYouResolver")>();
+  return {
+    ...original,
+    NeedsYouResolver: (props: Parameters<typeof original.NeedsYouResolver>[0]) => {
+      fixture.resolverMounts += 1;
+      return createElement(original.NeedsYouResolver, props);
+    },
+  };
+});
+
 import { MAC_TRAFFIC_LIGHT_CENTER_Y, Sidebar } from "./Sidebar";
 
 const render = () => renderToStaticMarkup(
@@ -37,6 +49,7 @@ const render = () => renderToStaticMarkup(
 beforeEach(() => {
   fixture.density = "comfortable";
   fixture.advanced = true;
+  fixture.resolverMounts = 0;
   fixture.windowChrome = undefined;
   fixture.hostLabel = undefined;
   vi.stubGlobal("window", { innerWidth: 1280, location: { protocol: "http:", search: "" } });
@@ -49,6 +62,13 @@ afterEach(() => {
 });
 
 describe("sidebar header", () => {
+  it.each([false, true])("mounts one needs-you resolver for the sidebar (advanced: %s)", (advanced) => {
+    fixture.advanced = advanced;
+    render();
+    // Two instances share the same open state and would both create a dialog on the next render.
+    expect(fixture.resolverMounts).toBe(1);
+  });
+
   it.each(["comfortable", "compact", "icons"] as const)(
     "keeps collapse, activity and add but no density menu at %s density in Advanced mode",
     (density) => {
@@ -119,7 +139,7 @@ describe("sidebar top row", () => {
     expect(spacer).toBeGreaterThan(slot);
     expect(switcher).toBeGreaterThan(spacer);
     expect(buttons).toBeGreaterThan(switcher);
-    expect(row.slice(buttons).match(/<button/g)).toHaveLength(3);
+    expect(row.slice(buttons).match(/<button/g)).toHaveLength(4);
     const rowClasses = classesOf(row, "data-sidebar-top-row");
     expect(rowClasses).toEqual(expect.arrayContaining(["relative", "pl-4", "pr-2"]));
     expect(rowClasses).not.toContain("px-4");
@@ -140,7 +160,7 @@ describe("sidebar top row", () => {
     expect(html.match(/Switch server:/g)).toHaveLength(1);
   });
 
-  it("in Simple mode keeps the server pill, a round search and a round + together on the right of one macOS row, with the collapse bump on the edge", () => {
+  it("in Simple mode keeps the server pill, search, Now and + together on the right of one macOS row, with the collapse bump on the edge", () => {
     fixture.advanced = false;
     fixture.windowChrome = "mac-inset";
     desktop();
@@ -156,7 +176,9 @@ describe("sidebar top row", () => {
     expect(buttons).toBeGreaterThan(switcher);
     expect(search).toBeGreaterThan(buttons);
     expect(row).not.toContain("data-sidebar-collapse-toggle");
-    expect(row.slice(buttons).match(/<button/g)).toHaveLength(2);
+    expect(row.slice(buttons).match(/<button/g)).toHaveLength(3);
+    expect(row.match(/data-now-button=/g)).toHaveLength(1);
+    expect(row.indexOf("data-now-button")).toBeGreaterThan(search);
     expect(classesOf(row, "data-sidebar-top-slot")).toEqual(["@container/sidebar-top", "flex", "min-w-0", "flex-1", "items-center", "justify-end"]);
     expect(classesOf(row, "data-sidebar-top-switcher")).not.toContain("max-w-[140px]");
     expect(classesOf(row, "data-sidebar-top-buttons")).toEqual(expect.arrayContaining(["shrink-0", "gap-1", "pl-0.5"]));

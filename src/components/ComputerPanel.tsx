@@ -30,6 +30,7 @@ import { ApiKeyRow } from "./ApiKeys";
 import { cn } from "@/lib/cn";
 import { useCaptionChrome } from "@/components/DesktopCapabilities";
 import { usePageVisible } from "@/lib/page-visible";
+import { previewCaptureMs, useWindowFocusedRef } from "@/lib/capture-pace";
 import { listenLiveFrames } from "@/lib/live-events";
 import { CloudScreenPreview } from "./CloudScreenPreview";
 import { isActiveTurnRefusal, isRemoteScreenshotContention } from "@/lib/remote-desktop";
@@ -59,6 +60,7 @@ import {
 } from "@/lib/local-computer";
 import { moveBetweenTabs, PANEL_TABS, panelTabProps, TAB_PANEL_FOCUS, tabPanelProps, useAndroidTabFallback } from "./computer-panel-tabs";
 import {
+  PANEL_WIDTH_KEY, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, PANEL_RESIZE_STEP, readPanelWidth,
   computerPanelTabs,
   readComputerPanelView,
   resolveComputerPanelView,
@@ -128,21 +130,6 @@ const computerControlSnapshotSchema = z.object({
   helpReason: z.string().nullable().optional().default(null),
   help: z.unknown().optional().transform(parseComputerHelp),
 }).passthrough();
-
-const PANEL_WIDTH_KEY = "omb-computer-panel-width";
-const PANEL_MIN_WIDTH = 360;
-const PANEL_MAX_WIDTH = 960;
-const PANEL_DEFAULT_WIDTH = 400;
-const PANEL_RESIZE_STEP = 40;
-
-function readPanelWidth(): number {
-  try {
-    const stored = Number(localStorage.getItem(PANEL_WIDTH_KEY));
-    if (Number.isFinite(stored) && stored >= PANEL_MIN_WIDTH && stored <= PANEL_MAX_WIDTH) return stored;
-  } catch {
-  }
-  return PANEL_DEFAULT_WIDTH;
-}
 
 export function ComputerPanel({
   bot: profileBot,
@@ -704,6 +691,7 @@ export function ComputerPanel({
   }, [phase, threadPath, profileBot.busy, livePlace]);
 
   const pageVisible = usePageVisible();
+  const windowFocused = useWindowFocusedRef();
   const lastLiveAt = useRef(0);
   const previewBusy = useRef(bot.busy);
   useEffect(() => { previewBusy.current = bot.busy; }, [bot.busy]);
@@ -732,7 +720,7 @@ export function ComputerPanel({
     setPreviewRefreshing(true);
     const shoot = async () => {
       if (inFlight || controller.signal.aborted) return;
-      if (Date.now() - lastAttemptAt < (retryDelay ?? (previewBusy.current ? 4000 : 30_000))) return;
+      if (Date.now() - lastAttemptAt < previewCaptureMs({ busy: previewBusy.current === true, focused: windowFocused.current, retryDelay })) return;
       if (previewBusy.current && Date.now() - lastLiveAt.current < 10_000) return;
       inFlight = true;
       retryDelay = null;

@@ -4,7 +4,9 @@ import { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { DATA_DIR } from "./config.ts";
+import { NARRATION_NOTE } from "./turn-narration.ts";
 import { closeMessageDb,
+  botTextsWithRefsSince,
   deleteThread,
   deleteThreads,
   indexMemoryFile,
@@ -63,6 +65,16 @@ describe("message-db", () => {
     expect(userTextMessagesWith([], ["comigo"], 10)).toEqual([]);
   });
 
+  // INSP-R12F r2 R2-4: "The QA finished #9282…" turned into a work note still names #9282
+  it("reads back the bots' texts with a #N since a time, work notes included, other activity not", () => {
+    insertMessage("t", msg("b1", "Osvaldo, a #9058 segue parada.", { role: "bot", at: 100 }));
+    insertMessage("t", msg("b2", "The QA finished #9282 and the row is updated.", { role: "bot", kind: "activity", at: 110, tool: { name: NARRATION_NOTE, ok: true, output: "The QA finished #9282 and the row is updated." } } as Partial<Message>));
+    insertMessage("t", msg("b3", "#9999 num chip qualquer", { role: "bot", kind: "activity", at: 120, tool: { name: "Esteira parada: #9999" } } as Partial<Message>));
+    insertMessage("t", msg("u1", "e a #8675?", { at: 130 }));
+    insertMessage("t", msg("b0", "a #8204 de ontem", { role: "bot", at: 10 }));
+    expect(botTextsWithRefsSince(50).sort()).toEqual(["Osvaldo, a #9058 segue parada.", "The QA finished #9282 and the row is updated."]);
+  });
+
   it("reads back the bots' tool calls by tool name, oldest first", () => {
     const call = (id: string, name: string, input: string, at: number) => msg(id, "", { role: "bot", kind: "activity", at, tool: { name, input } } as Partial<Message>);
     insertMessage("t", call("c2", "mcp__agents__cc_session_send", "{\"session_id\":\"s\",\"message\":\"assuma a PR #1\"}", 20));
@@ -80,6 +92,21 @@ describe("message-db", () => {
     expect(calls).toHaveLength(2_000);
     expect(JSON.parse(calls.at(-1)!.input).message).toBe("assuma a PR #9328");
     expect(JSON.parse(calls[0]!.input).message).toBe("passo 1");
+  });
+
+  it("cross-conversation reads by kind or time use an index, not a scan of every message", () => {
+    insertMessage("t-idx", msg("m1", "hello #12", { role: "bot" }));
+    closeMessageDb();
+    botTextsWithRefsSince(0);
+    const raw = new DatabaseSync(join(DATA_DIR, "messages.db"));
+    try {
+      const plan = (sql: string) => (raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>).map((row) => row.detail).join(" | ");
+      expect(plan("SELECT MIN(at) FROM messages WHERE kind = 'digest'")).toMatch(/USING (COVERING )?INDEX messages_kind_at/);
+      expect(plan("SELECT thread_id FROM messages WHERE kind = 'goal.run' AND json_extract(json, '$.goalRun.status') = 'working'")).toMatch(/INDEX messages_kind_at/);
+      expect(plan("SELECT text FROM messages WHERE role = 'bot' AND (kind = 'text' OR kind = 'activity') AND at >= 1 ORDER BY at DESC LIMIT 5")).toMatch(/INDEX messages_(kind_)?at/);
+    } finally {
+      raw.close();
+    }
   });
 
   it("persists inserts, updates, and the active leaf across a reopen", () => {
@@ -465,7 +492,7 @@ describe("messages_thread_at", () => {
           "SELECT m.thread_id, m.id, m.at, substr(m.text, 1, 400) AS head, " +
           "ROW_NUMBER() OVER (PARTITION BY m.thread_id ORDER BY m.at DESC) AS rn " +
           "FROM messages m " +
-          "WHERE m.kind = 'text' AND m.role = 'bot' AND m.text IS NOT NULL AND m.at >= ? AND m.thread_id IN (?, ?) " +
+          "WHERE +m.kind = 'text' AND m.role = 'bot' AND m.text IS NOT NULL AND m.at >= ? AND m.thread_id IN (?, ?) " +
           "AND (json_extract(m.json, '$.from.botId') IS NULL OR json_extract(m.json, '$.from.botId') = ?)" +
           ") WHERE rn = 1 ORDER BY at DESC LIMIT ?",
       );

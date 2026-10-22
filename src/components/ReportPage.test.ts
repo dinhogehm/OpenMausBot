@@ -12,9 +12,9 @@ import { setLocale } from "@/lib/i18n";
 import { formatSpan, formatTrend, reportPath } from "@/lib/productivity";
 import { buildProductivityReport } from "../../server/productivity-report";
 import { executiveSummary } from "../../server/productivity-export";
-import { brt, CLIENT_NAME, scenario } from "../../server/testing/productivity-fixture";
+import { brt, CLIENT_NAME, run, scenario } from "../../server/testing/productivity-fixture";
 import { compareKpi, type ProductivityReport, type ReportGoals } from "../../shared/productivity";
-import { DeltaLine, ExportMenu, KpiCard, ReleasesTable, ReportView } from "./ReportPage";
+import { customStart, DeltaLine, ExportMenu, KpiCard, PeriodBar, ReleasesTable, ReportView, sanitizeQuery } from "./ReportPage";
 import { niceScale } from "./ReportCharts";
 
 function report(period = { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") }, goals: ReportGoals = {}): ProductivityReport {
@@ -37,16 +37,25 @@ describe("report screen (pt-BR)", () => {
   const html = render(report());
   const plain = text(html);
 
-  it("names the period in the title and opens with the five-line summary", () => {
+  it("names the period in the title and opens with the six-line summary", () => {
     expect(plain).toContain("Produtividade de engenharia — 28/09 a 02/10/2026");
     expect(plain).toContain("Resumo executivo");
-    expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(5);
-    expect(plain).toContain("Produção: ≥3 entregas (sem base comparável), 0,9 por dia útil com dados (3,5 dias úteis), com ≥4 PRs e ≥2 issues concluídas no ar");
+    expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(6);
+    expect(plain).toContain("Produção: ≥3 entregas (sem base comparável), 0,8 por dia útil com dados (4 dias úteis), com ≥4 PRs e ≥2 issues concluídas no ar");
   });
 
   it("says where no release source exists, as unknown — not zero", () => {
     expect(html).toContain('role="note"');
-    expect(plain).toContain("Sem base comparável: a fonte de releases não cobre os dois períodos");
+    // said once, above the cards; each production card only points at it (R13-visual N17)
+    expect(plain.split("a fonte de releases não cobre os dois períodos")).toHaveLength(2);
+    expect(plain).toContain("Os cartões de produção não trazem comparação com o período anterior: a fonte de releases não cobre os dois períodos.");
+    expect(plain).toContain("Sem comparação (veja o aviso acima)");
+  });
+
+  it("speaks to the board: no release carriers nor label names (R13-visual N17)", () => {
+    // the definitions keep the labels they define (chore/release-carrier-*, priority:p0…p3); the numbers never show them
+    expect(plain).not.toMatch(/carriers? de release|carrier #|priority:p1 \+|\(escala antiga\) ·|P1 = p1/);
+    expect(plain).toContain("PRs de publicação, à parte: 1");
   });
 
   it("shows the board's eight KPIs, each with its definition beside it and behind its button", () => {
@@ -67,13 +76,14 @@ describe("report screen (pt-BR)", () => {
   it("marks lower bounds and counts success over runs that ran, superseded and aborted apart (INSP-V r1 #1, #4)", () => {
     // labels before numbers: no "1 releases" whatever the count (INSP-V r2 #4)
     expect(plain).toContain("no ar: PRs ≥4, issues concluídas ≥2 · releases sem conteúdo lido: 1");
-    expect(plain).toContain("60%");
-    expect(plain).toContain("3 de 5 que rodaram · fora da taxa: substituídos 1, abortados 1, recusados 1");
+    // per commit: a, b and c reached production, x failed (twice) — 3 of 4 commits that ran
+    expect(plain).toContain("75%");
+    expect(plain).toContain("3 de 4 commits que rodaram · não contam como falha: trocados por um commit mais novo 1, abortados sem veredito 1, recusados 1");
     expect(plain).toContain("produção no ar · 0 min em fim de semana");
   });
 
-  it("shows P1 as p1 + high with the split (INSP-V r1 #5)", () => {
-    expect(plain).toContain("P1 1 = 1 priority:p1 + 0 priority:high (escala antiga) · P0 1");
+  it("shows P1 as p1 + high with the split, in words (INSP-V r1 #5, R13-visual N17)", () => {
+    expect(plain).toContain("P1 1 (0 ainda com o rótulo antigo, 1 com o novo) · P0 1");
   });
 
   it("compares by one rule: no trend on a small base, the previous value instead (INSP-V r1 #7)", () => {
@@ -94,10 +104,11 @@ describe("report screen (pt-BR)", () => {
 
   it("counts deliveries and their frequency only where a release source exists, with one decimal like the exports (INSP-V r2 #1, #6)", () => {
     expect(plain).toContain("≥3");
-    expect(plain).toContain("0,9/dia útil");
-    expect(plain).toContain("3 em 3,5 dias úteis com dados (de 4,5)");
-    expect(plain).toContain("fonte de releases em 3,5 de 4,5 dias úteis");
-    expect(plain).toContain("0,9 por dia útil (3 em 3,5 dias úteis com dados, de 4,5)");
+    // whole business days: 29/09–02/10 touched (4) of 28/09–02/10 (5) — never 3,5 of 4,5
+    expect(plain).toContain("0,8/dia útil");
+    expect(plain).toContain("3 em 4 dias úteis com dados (de 5)");
+    expect(plain).toContain("fonte de releases em 4 de 5 dias úteis");
+    expect(plain).toContain("0,8 por dia útil (3 em 4 dias úteis com dados, de 5)");
   });
 
   it("draws four charts, each with a description and its numbers as a table", () => {
@@ -113,9 +124,11 @@ describe("report screen (pt-BR)", () => {
   it("lists the releases with what they carried; superseded and aborted runs are not failures (INSP-V r1 #1, #4, #8)", () => {
     expect(plain).toContain("Releases do período");
     // the same counts as the exports: commits for failures, runs for what never ran (INSP-V r2 #6)
-    expect(plain).toContain("em produção: 3 · commits que falharam: 1 (tentativas que rodaram: 2) · runs substituídos: 1 · runs abortados: 1 · recusados: 1");
-    expect(plain).toContain("Substituído");
-    expect(plain).toContain("Abortado");
+    expect(plain).toContain("em produção: 3 · commits que falharam: 1 (tentativas que rodaram: 2) · trocados por um commit mais novo: 1 · abortados sem veredito: 1 · recusados: 1");
+    expect(plain).toContain("Trocado por um commit mais novo");
+    expect(plain).toContain("Abortado sem veredito");
+    // the words the cards use, nowhere "run" nor "watcher" (INSP-R13VIS A5)
+    expect(plain).not.toMatch(/\bruns?\b|watcher|ubstituíd/i);
     expect(plain).toContain("2 tentativas");
     expect(plain).toContain("Recusado");
     // the head PR of a failed run is a PR, called carrier only when it is one
@@ -153,9 +166,10 @@ describe("report screen (pt-BR)", () => {
 
 describe("targets", () => {
   it("light a card with its word and its target, only where a target is set", () => {
-    const plain = text(render(report(undefined, { deploysPerBusinessDay: 1, releaseSuccessRate: 70, leadTimeHours: 48, changeFailureRate: 20 })));
-    expect(plain).toContain("perto da meta · ≥ 1/dia útil");
-    expect(plain).toContain("perto da meta · ≥ 70%");
+    // 0,75 a day against ≥ 0,9 and 75% against ≥ 80%: within 20% of the target
+    const plain = text(render(report(undefined, { deploysPerBusinessDay: 0.9, releaseSuccessRate: 80, leadTimeHours: 48, changeFailureRate: 20 })));
+    expect(plain).toContain("perto da meta · ≥ 0,9/dia útil");
+    expect(plain).toContain("perto da meta · ≥ 80%");
     expect(plain).toContain("na meta · ≤ 48 h");
     expect(plain).toContain("fora da meta · ≤ 20%");
   });
@@ -167,7 +181,7 @@ describe("a closed month and the time before the bots' ledger", () => {
     const plain = text(render(september));
     expect(plain).toContain("Produtividade de engenharia — setembro/2026");
     // P0/P1 at the end of September against the end of August; today apart, labelled (INSP-V r2 #2)
-    expect(plain).toContain("ao fim do período · agora 2: P1 1 = 1 priority:p1 + 0 priority:high (escala antiga) · P0 1");
+    expect(plain).toContain("ao fim do período · agora 2: P1 1 (0 ainda com o rótulo antigo, 1 com o novo) · P0 1");
     // the backlog of the closed month, then today's (INSP-V r2 #7)
     expect(plain).toContain("Backlog ao fim do período (30/09/2026)");
     expect(plain).toContain("P0/P1 abertas (rótulos de hoje)");
@@ -206,7 +220,8 @@ describe("pieces", () => {
     const line = (comparison: ReturnType<typeof compareKpi>) => text(renderToStaticMarkup(createElement(DeltaLine, { comparison, polarity: "up" })));
     expect(line(compareKpi(2868, 2))).toContain("Previous period: 2");
     expect(line(compareKpi(2868, 0, { beforeRepo: true }))).toContain("before the repository existed");
-    expect(line(compareKpi(27, 2, { comparable: false }))).toContain("No comparable base");
+    // why is said once above the cards (R13-visual N17)
+    expect(line(compareKpi(27, 2, { comparable: false }))).toContain("Not compared (see the note above)");
   });
 
   it("will not hand a stale report to the board: the menu says why and offers \"Atualizar e exportar\" (INSP-V r2 #3)", () => {
@@ -257,5 +272,89 @@ describe("pieces", () => {
     expect(niceScale(223)).toEqual({ ceiling: 250, step: 50 });
     expect(niceScale(5)).toEqual({ ceiling: 5, step: 1 });
     expect(niceScale(13)).toEqual({ ceiling: 15, step: 5 });
+  });
+});
+
+describe("the period bar", () => {
+  const options = (html: string) => [...html.matchAll(/<option[^>]*value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map((match) => `${match[1]}:${match[2]}`);
+
+  it("offers the last day, week and fortnight next to the longer windows, shortest first", () => {
+    const day = renderToStaticMarkup(createElement(PeriodBar, { query: { granularity: "day", count: 15 }, onChange: () => undefined, report: null }));
+    // where the screen opens (grouped by day) the last day is offered too, switching the grouping to hours
+    expect(options(day)).toEqual(["hour:24:Last day (24 hours)", "7:Last week (7 days)", "15:Last fortnight (15 days)", "30:Last 30 days", "90:Last 90 days", "closed:Last closed month", "custom:Custom period…"]);
+    expect(day).toMatch(/<option[^>]*value="15"[^>]*selected=""/);
+    const hour = renderToStaticMarkup(createElement(PeriodBar, { query: { granularity: "hour", count: 24 }, onChange: () => undefined, report: null }));
+    expect(options(hour).slice(0, 2)).toEqual(["24:Last day (24 hours)", "48:Last 48 hours"]);
+  });
+
+  it("says them in pt-BR", () => {
+    setLocale("pt-BR");
+    const day = text(renderToStaticMarkup(createElement(PeriodBar, { query: { granularity: "day", count: 7 }, onChange: () => undefined, report: null })));
+    expect(day).toContain("Último dia (24 horas)");
+    expect(day).toContain("Última semana (7 dias)");
+    expect(day).toContain("Última quinzena (15 dias)");
+  });
+
+  it("keeps each grouping's default window: 48 hours, 30 days, 12 months", () => {
+    const changes: unknown[] = [];
+    const bar = renderToStaticMarkup(createElement(PeriodBar, { query: { granularity: "day" }, onChange: (query) => changes.push(query), report: null }));
+    expect(bar).toMatch(/<option[^>]*value="30"[^>]*selected=""/);
+  });
+});
+
+describe("period filters (report-fixes)", () => {
+  it("drops a saved window this screen no longer offers, so the select and the data agree", () => {
+    expect(sanitizeQuery({ granularity: "day", count: 60 })).toEqual({ granularity: "day", count: 30 });
+    expect(sanitizeQuery({ granularity: "day", count: 24 })).toEqual({ granularity: "day", count: 30 }); // 24 is the hour grouping's
+    expect(sanitizeQuery({ granularity: "hour", count: 24 })).toEqual({ granularity: "hour", count: 24 });
+    expect(sanitizeQuery({ granularity: "day", count: 15 })).toEqual({ granularity: "day", count: 15 });
+    expect(sanitizeQuery({ granularity: "month" })).toEqual({ granularity: "month", count: 12 });
+    expect(sanitizeQuery({ granularity: "week", count: 4 })).toEqual({ granularity: "day", count: 30 });
+    expect(sanitizeQuery(null)).toEqual({ granularity: "day", count: 30 });
+  });
+
+  it("keeps a saved range only with both ends as dates of its grouping, in order", () => {
+    expect(sanitizeQuery({ granularity: "day", from: "2026-10-01", to: "2026-10-10" })).toEqual({ granularity: "day", from: "2026-10-01", to: "2026-10-10" });
+    expect(sanitizeQuery({ granularity: "month", from: "2026-07", to: "2026-09" })).toEqual({ granularity: "month", from: "2026-07", to: "2026-09" });
+    expect(sanitizeQuery({ granularity: "day", from: "2026-10-10", to: "2026-10-01", count: 7 })).toEqual({ granularity: "day", count: 7 });
+    expect(sanitizeQuery({ granularity: "day", from: "ontem", to: "2026-10-01" })).toEqual({ granularity: "day", count: 30 });
+  });
+
+  it("opens \"Personalizado\" on the São Paulo day the period starts, not the UTC one", () => {
+    // the last 48 hours starting 13/10 21:00 in São Paulo is 14/10 00:00 UTC
+    expect(customStart(brt("2026-10-13T21:00:00"))).toBe("2026-10-13");
+    expect(customStart(brt("2026-09-16T00:00:00"))).toBe("2026-09-16");
+  });
+});
+
+describe("deploy frequency over whole business days (17/10: \"5,3/dia útil\" for 2 deliveries in 24 h)", () => {
+  const october = (granularity: "hour" | "day", from: string, to: string): ProductivityReport => {
+    const built = buildProductivityReport({
+      ...scenario(),
+      now: brt("2026-10-17T15:00:00"),
+      runs: [run("p1", "released", "2026-10-16T01:16:00"), run("q1", "released", "2026-10-16T06:37:00"), run("e1", "released", "2026-10-17T01:23:24"), run("n1", "released", "2026-10-17T10:11:08")],
+      declines: [],
+      logCoverage: { from: brt("2026-10-14T00:00:00"), to: brt("2026-10-17T15:00:00") },
+      goals: { deploysPerBusinessDay: 8 },
+      granularity,
+      period: { from: brt(from), to: brt(to) },
+    });
+    return { ...built, enabled: true, summary: { "pt-BR": executiveSummary(built, "pt-BR"), en: executiveSummary(built, "en") } };
+  };
+
+  it("the last 24 h from Friday 16/10 15:00: 2,0 a day over 1 business day, on the card and in the summary", () => {
+    const plain = text(render(october("hour", "2026-10-16T15:00:00", "2026-10-17T15:00:00")));
+    expect(plain).toContain("2,0/dia útil");
+    expect(plain).toContain("2 em 1 dia útil com dados");
+    expect(plain).toContain("fora da meta · ≥ 8/dia útil");
+    expect(plain).toContain("Produção: 2 entregas (anterior: 2), 2,0 por dia útil com dados (1 dia útil)");
+    expect(plain).not.toContain("5,3");
+  });
+
+  it("a window shorter than a day shows the count, no rate and no light", () => {
+    const plain = text(render(october("hour", "2026-10-17T09:00:00", "2026-10-17T15:00:00")));
+    expect(plain).toContain("1 no período");
+    expect(plain).toContain("janela menor que 1 dia: a contagem, sem taxa por dia útil");
+    expect(plain).not.toContain("≥ 8/dia útil");
   });
 });

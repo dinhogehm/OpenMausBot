@@ -1,6 +1,7 @@
 // Every model- or person-written field passes quoteInNote or escapeEnvelope; the result is also
 // JSON-encoded, so it cannot start a line that reads as the harness or the user.
 import { CONSENT_RULE, escapeNotes, quoteInNote } from "../peer-provenance.ts";
+import { HANDOFF_RESULT_CONTRACT, judgedByResult } from "../result-contract.ts";
 import type { Assignment, EnvelopeNames, Level, OriginSource, TurnEvidence } from "./types.ts";
 
 /** Every envelope opens with this; model text that imitates it is escaped. */
@@ -159,7 +160,25 @@ export function composeResume(a: Assignment, names: EnvelopeNames, reports: read
   return body.join("\n");
 }
 
-/** Defuses every imitation of an envelope opening in model-written text, so only the harness opens one. */
+/** The turn text of an assignment with the result contract at its end
+ * (server/result-contract.ts), when the contract judges its answer: a
+ * teammate's work or consultation outside a room, in its first turn, a
+ * rerun, the turn after an answer, a continuation, and the resume of a
+ * teammate who handed part of it on. A root, a one-way notice and a room
+ * member get the text as it is. The envelope itself (composeEnvelope, and
+ * envelopeNote over it) never carries the contract, so a replayed request
+ * line does not either; the caller appends it to the turn it runs. */
+export function withResultContract(text: string, a: Assignment): string {
+  return judgedByResult({ parentId: a.parentId, groupId: a.assignee.destination.groupId, mode: a.mode })
+    ? `${text}\n\n${HANDOFF_RESULT_CONTRACT}` : text;
+}
+
+/** Model-written text with every imitation of an envelope opening defused:
+ * the bracket becomes a parenthesis, so only the harness opens one. The
+ * work is escapeNotes (peer-provenance.ts), which reads "[OpenMausBot <word>" (and "[OMB <word>") in
+ * any case, bracket form (fullwidth and the rest), spacing, look-alike
+ * letters or invisible characters, and leaves tickets like "[OMB-2470]"
+ * and ordinary brackets alone. */
 export function escapeEnvelope(text: string): string {
   return escapeNotes(text);
 }

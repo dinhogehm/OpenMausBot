@@ -143,7 +143,7 @@ describe("RoutineRequestService", () => {
 
     it.each<Partial<RoutineInput>>([
       { enabled: false }, { botId: "bot-b" }, { target: "room-goal", groupId: "room-a" },
-      { runOn: "cloud" }, { continuity: true }, { timeoutMinutes: 10 }, { durationMinutes: 60 }, { overlap: "queue" },
+      { runOn: "cloud" }, { continuity: true }, { timeoutMinutes: 10 }, { durationMinutes: 60 }, { overlap: "skip" },
       { runOnStartup: true },
       { schedule: { type: "daily", time: "10:00", weekdays: [1, 3] } },
       { attachments: [{ id: "context", name: "Context", path: "/fixture/context.txt", kind: "file", size: 20 }] },
@@ -447,14 +447,22 @@ describe("RoutineRequestService", () => {
 
   it("reviews and persists queue policy changes without losing them in tool normalization", async () => {
     const { service, routines } = harness();
-    const created = await service.propose({ botId: "bot-a", threadId: "thread-a", proposal: createProposal({ overlap: "queue" }) });
-    expect(created.detail).toContain("Queue one scheduled run; skip further occurrences");
+    const created = await service.propose({ botId: "bot-a", threadId: "thread-a", proposal: createProposal({ overlap: "skip" }) });
+    expect(created.detail).toContain("Skip overlapping scheduled occurrences");
     service.resolve({ botId: "bot-a", threadId: "thread-a", requestId: created.requestId, behavior: "allow" });
     const routine = routines.listRoutines()[0];
-    expect(routine.overlap).toBe("queue");
-    const update = await service.propose({ botId: "bot-a", threadId: "thread-a", proposal: { action: "update", routineId: routine.id, changes: { overlap: "skip" } } });
-    expect(update.detail).toContain("Skip overlapping scheduled occurrences");
+    expect(routine.overlap).toBe("skip");
+    const update = await service.propose({ botId: "bot-a", threadId: "thread-a", proposal: { action: "update", routineId: routine.id, changes: { overlap: "queue" } } });
+    expect(update.detail).toContain("Keep one scheduled run pending and start it once free");
     service.resolve({ botId: "bot-a", threadId: "thread-a", requestId: update.requestId, behavior: "allow" });
+    expect(routines.listRoutines()[0].overlap).toBe("queue");
+  });
+
+  it("proposes the coalescing overlap by default", async () => {
+    const { service, routines } = harness();
+    const created = await service.propose({ botId: "bot-a", threadId: "thread-a", proposal: createProposal() });
+    expect(created.detail).toContain("While busy: Keep one scheduled run pending and start it once free; later occurrences fold into it");
+    service.resolve({ botId: "bot-a", threadId: "thread-a", requestId: created.requestId, behavior: "allow" });
     expect(routines.listRoutines()[0].overlap).toBeUndefined();
   });
 

@@ -1,3 +1,4 @@
+import { activeRoomMembers, roomCanRunGoal, preferredRoomLead } from "@/lib/room-setup";
 import { boatCapableEngine } from "@/lib/remote-desktop";
 import {
   useEffect,
@@ -121,34 +122,6 @@ export type EventSeed = {
   routine?: Routine;
   call?: CalendarCall;
 };
-
-function activeRoomMembers(group: Group | undefined, bots: Bot[]): Bot[] {
-  if (!group) return [];
-  return group.memberIds.flatMap((id) => {
-    const bot = bots.find((candidate) => candidate.id === id);
-    return bot && !bot.hidden ? [bot] : [];
-  });
-}
-
-function roomCanRunGoal(group: Group): boolean {
-  if (group.dm) return false;
-  const hasSetupMarker =
-    Object.prototype.hasOwnProperty.call(group, "setupCompletedAt") ||
-    Object.prototype.hasOwnProperty.call(group, "setupSkippedAt");
-  return !hasSetupMarker ||
-    group.setupCompletedAt != null ||
-    group.setupSkippedAt != null ||
-    (group.messages?.length ?? 0) > 0;
-}
-
-function preferredRoomLead(group: Group | undefined, bots: Bot[], preferredId?: string): Bot | undefined {
-  const members = activeRoomMembers(group, bots);
-  const explicitLeadId = group?.defaultResponder.kind === "member" ? group.defaultResponder.botId : undefined;
-  return members.find((bot) => bot.id === preferredId)
-    ?? members.find((bot) => bot.id === explicitLeadId)
-    ?? members.find((bot) => bot.chiefOfStaff)
-    ?? members[0];
-}
 
 export function nextHour(): number {
   const date = new Date(Date.now() + 60 * 60_000);
@@ -338,7 +311,8 @@ export function EventEditor({
     existingRoutine?.timeoutMinutes ?? null,
   );
   const [intervalTimeoutDefaultApplied, setIntervalTimeoutDefaultApplied] = useState(Boolean(existingRoutine));
-  const [overlap, setOverlap] = useState<"skip" | "queue">(existingRoutine?.overlap ?? "skip");
+  const [overlap, setOverlap] = useState<"skip" | "queue">(existingRoutine?.overlap ?? "queue");
+  const [ownLane, setOwnLane] = useState(existingRoutine?.lane === "own");
   const [continuity, setContinuity] = useState(Boolean(existingRoutine?.continuity));
   const [runOnStartup, setRunOnStartup] = useState(Boolean(existingRoutine?.runOnStartup));
   const [recurrence, setRecurrence] = useState<RecurrenceChoice>(seed.limitReset ? "limit_reset" : recurrenceFor(schedule, initialAt));
@@ -512,8 +486,11 @@ export function EventEditor({
           schedule: nextSchedule,
           durationMinutes,
           timeoutMinutes,
-          overlap,
+          // The default (absent) already queues one run: leave it absent unless the person chose otherwise.
+          overlap: existingRoutine && existingRoutine.overlap === undefined && overlap === "queue" ? undefined : overlap,
           continuity: routineTarget === "bot" && recurrence !== "none" && continuity,
+          // Only ever set by the person here; leave it absent unless it is on or being turned off.
+          ...(routineTarget === "bot" && ownLane ? { lane: "own" as const } : existingRoutine?.lane === "own" ? { lane: null } : {}),
           runOnStartup: recurrence !== "none" && runOnStartup,
           attachments: routineTarget === "room-goal" ? [] : attachments as RoutineContextAttachment[],
           ...(routineTarget === "bot" ? { resultsThreadId } : {}),
@@ -568,7 +545,8 @@ export function EventEditor({
     || runOn === "cloud"
     || timeoutMinutes != null
     || runOnStartup
-    || overlap === "queue");
+    || overlap === "skip"
+    || ownLane);
 
   useModalDialog(dialogRef, onClose);
 
@@ -801,6 +779,13 @@ export function EventEditor({
                       </label>
                       <p className="mt-1.5 text-[10.5px] leading-relaxed text-ink-secondary">{t(overlap === "queue" ? "routines.overlapQueueHelp" : "routines.overlapSkipHelp")}</p>
                     </div>}
+                    {routineTarget === "bot" && <label className="mt-3 flex items-start gap-2 text-[12px] text-ink">
+                      <input type="checkbox" aria-label="Run in its own lane" checked={ownLane} onChange={(event) => setOwnLane(event.target.checked)} className="mt-0.5 accent-accent" />
+                      <span>
+                        <span className="block">Run in its own lane</span>
+                        <span className="mt-1 block text-[10.5px] leading-relaxed text-ink-secondary">Starts on time even while another routine of this bot is still running, instead of waiting behind it.</span>
+                      </span>
+                    </label>}
                     {recurrence !== "none" && <label className="mt-3 flex items-start gap-2 text-[12px] text-ink">
                       <input type="checkbox" aria-label={t("routines.runOnStartupLabel")} checked={runOnStartup} onChange={(event) => setRunOnStartup(event.target.checked)} className="mt-0.5 accent-accent" />
                       <span>

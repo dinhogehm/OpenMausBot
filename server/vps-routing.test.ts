@@ -657,8 +657,9 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
         expect(checkMount.args).toContain("production-vps");
         expect(checkMount.token).not.toBe(refillMount.token);
         expect(await taskBusy(refill.threadId)).toBe(true);
-        expect((await activities(check.threadId)).join("|")).not.toContain("Waiting for its turn");
-        expect((await activities(refill.threadId)).join("|")).not.toContain("Waiting for its turn");
+        expect((await activities(check.threadId)).join("|")).not.toContain("Aguardando a vez");
+        expect((await activities(refill.threadId)).join("|")).not.toContain("Aguardando a vez");
+        // the alias is pinned while ANY of the bot's threads runs on the VPS
         expect((await api("PUT", "/api/config", { vps: { sshAlias: "other-vps" } })).status).toBe(409);
 
         expect(await gate(checkMount)).toEqual({ held: false, helpOpen: false });
@@ -667,16 +668,19 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
         expect(contended).toEqual({ held: true, helpOpen: false, blockedReason: CONTROL_BUSY });
         expect(controlRefusal(contended)).not.toBe(CONTROL_REFUSAL_PLAIN);
         expect(Date.now() - started).toBeGreaterThanOrEqual(CALL_WAIT_MS - 200);
-        // The chip may add a queue position and an estimate; the holder it names is what is under test.
-        const waitChip = /^Waiting for its turn on this computer(?: — \d+(?:st|nd|rd|th) in queue)? — TCPR operator is running Queue check\. Starts automatically when that finishes(?:; recent waits here have taken [^.]+)?\.$/;
+        // The chip may carry its queue position and, once the resource has
+        // wait history, an estimate suffix (#1652). The holder it names is
+        // the fact under test here, so the shape stays pinned around it.
+        const waitChip = /^Aguardando a vez neste computador(?: — \d+º na fila)? — TCPR operator está rodando «Queue check»\. Começa sozinho quando isso terminar(?:; as esperas recentes aqui levaram [^.]+)?\.$/;
         await until(async () => (await activities(refill.threadId)).some((name) => waitChip.test(name)), "the wait chip naming the holder");
 
         writeFileSync(gateFile, "open");
         await until(async () => (await botById(bot.id))?.busy === false, "both turns settling");
         const settled = await activities(refill.threadId);
         expect(settled.some((name) =>
-          name.startsWith("Computer free — continuing after ") || name.startsWith("Stopped waiting for the computer after "))).toBe(true);
-        expect(settled.join("|")).not.toMatch(/still busy|error/i);
+          name.startsWith("Computador livre — seguindo depois de ") || name.startsWith("Parou de esperar pelo computador depois de "))).toBe(true);
+        expect(settled.join("|")).not.toMatch(/still busy|continua ocupado|error/i);
+        // the last thread out clears the claim: the alias can move again
         expect((await api("PUT", "/api/config", { vps: { sshAlias: "production-vps" } })).status).toBe(200);
       } finally {
         writeFileSync(gateFile, "open");

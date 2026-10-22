@@ -69,7 +69,8 @@ describe("additive portable team backups", () => {
     expect(backup.bots.find((bot) => bot.key === chief.id)).toHaveProperty("toolScope", scope);
     const restored = importTeamBackup(store, routines, backup, selection());
     expect(restored.bots.find((bot) => bot.name === "Mira 2")).toMatchObject({ toolScope: scope, computer: "off", composio: false, connectorTools: {} });
-    expect(approvalModeFor(restored.bots.find((bot) => bot.name === "Mira 2")!)).toBe("full");
+    // fork: an imported bot never starts above Ask (the no-level default is Ask).
+    expect(approvalModeFor(restored.bots.find((bot) => bot.name === "Mira 2")!)).toBe("ask");
     expect(restored.bots.find((bot) => bot.name === "Scout 2")).toHaveProperty("toolScope", { allow: [] });
     const invalid = structuredClone(backup) as unknown as { bots: Array<{ toolScope: unknown }> };
     invalid.bots[0].toolScope = { allow: null };
@@ -169,7 +170,7 @@ describe("additive portable team backups", () => {
     expect(importedChief.soulHash).toBe(soulHash(chief.soul!));
     expect(readFileSync(soulFile(importedChief.id), "utf8")).toBe(chief.soul);
     expect(importedChief).toMatchObject({ section: "Engineering 2", chiefOfStaff: true, description: chief.description, computer: "off", composio: false, browser: false, resumeCursors: {}, playbooks: chief.playbooks });
-    expect(approvalModeFor(importedChief)).toBe("full");
+    expect(approvalModeFor(importedChief)).toBe("ask");
     expect(result.bots.find((bot) => bot.name === "Ava 2")).toMatchObject({ section: "Operations 2", chiefOfStaff: true });
     expect(result.bots.find((bot) => bot.name === "Archived 2")).toMatchObject({ hidden: true });
     expect(importedChief).not.toHaveProperty("cwd");
@@ -311,8 +312,10 @@ describe("additive portable team backups", () => {
     const imported = importTeamBackup(store, routines, backup, selection()).bots.find((bot) => bot.name === "Mira 2")!;
     expect(imported.id).not.toBe(chief.id);
     expect(imported.threadId).not.toBe(chief.threadId);
-    expect(imported.approvalMode).toBeUndefined();
-    expect(approvalModeFor(imported)).toBe("full");
+    // The file's level and legacy Auto bit are dropped. fork: it runs at Ask,
+    // whether the import saves Ask or leaves the no-level default, never Full.
+    expect([undefined, "ask"]).toContain(imported.approvalMode);
+    expect(approvalModeFor(imported)).toBe("ask");
     expect(JSON.stringify(parseTeamBackup(backup))).not.toMatch(/live-approval|secret-session|\/etc\/passwd|approvalMode/);
   });
 

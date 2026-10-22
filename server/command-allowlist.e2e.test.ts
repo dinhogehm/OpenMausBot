@@ -84,7 +84,8 @@ it("remembers real permission requests, scopes and revokes grants, and preserves
     expect((await api("POST", `/api/threads/${bot.threadId}/respond`, { requestId: first.id, behavior: "allow", rememberCommand: true })).outcome).toBe("allowed-once");
     expect(await first.reply).toMatchObject({ id: first.id, behavior: "allow" });
     const saved = (await api("GET", rulesPath)).rules[0];
-    expect(saved).toMatchObject(candidate);
+    // "Always allow this type of command" saves the kind of command, not the exact string (the owner, 20/10)
+    expect(saved).toMatchObject({ ...candidate, command: "printf *" });
     for (const profile of (await api("GET", "/api/bots")).bots) expect(profile).not.toHaveProperty("commandAllowlist");
 
     const repeated = await ask(socket, command);

@@ -11,6 +11,7 @@
 // next sync. Nothing here blocks the server: every call is an async child.
 import { execFile } from "node:child_process";
 import { PRODUCTION_REPO, type IssuePriority, type IssueType } from "../shared/productivity.ts";
+import { augmentedPath } from "./env-path.ts";
 import { PRODUCTION_TAG } from "./prod-delivery.ts";
 
 export type GhRunner = (args: string[]) => Promise<string>;
@@ -42,6 +43,15 @@ export interface GhPr {
   /** Issues the PR body or its merge commit names explicitly
    * (Closes/Fixes/Resolves/Refs #N) — read at sync, the text is not kept. */
   refs?: number[];
+  /** Of those, the ones it says it closes (Closes/Fixes/Resolves/Fecha/Corrige/Encerra #N),
+   * not only cites (Refs #N): a "Refs" PR delivers part of an issue (lot Z). */
+  fixes?: number[];
+  /** Its title or text says it ships a part ("Fase 0 do #9071", "parte 2", "entrega parcial"). */
+  partial?: true;
+  /** A batch ("lote") PR only: the PRs it says it took (batchMembers). The lote merges the
+   * work of other PRs, which are then closed WITHOUT merge: their code reaches production
+   * through the lote (lot AA — #9604 took 12 such PRs to production on 16/10). */
+  batch?: number[];
   labels: string[];
 }
 
@@ -75,7 +85,7 @@ export interface WalkState { watermark: number | null; cursor: string | null; co
 
 /** Bumped whenever what a sync stores changes: an older cache is migrated
  * (see migrateGhCache) so a parser or filter fix reaches data already saved. */
-export const GH_CACHE_VERSION = 2;
+export const GH_CACHE_VERSION = 4;
 
 export interface GhCache {
   version: number;
@@ -104,7 +114,7 @@ export function emptyGhCache(repo = PRODUCTION_REPO): GhCache {
 /** Bring a cache saved by an older version up to date, keeping what is still
  * valid: compares are immutable facts (kept); PRs and issues are kept but the
  * walks start over so every item is read again with the current fields
- * (v2: explicit issue references); deployments whose final state was saved
+ * (v2: explicit issue references; v3: the Portuguese ones, "Fecha #N"; v4: the PRs a lote cites); deployments whose final state was saved
  * without the fields the current filter needs (failedAt, creator) are read again. */
 export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: boolean } {
   if (cache.version === GH_CACHE_VERSION) return { cache, migrated: false };
@@ -127,21 +137,46 @@ export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: bool
   };
 }
 
-const REFERENCE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?)\b[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)/gi;
+// English and the repository's Portuguese (lot Z: #9190's "Fecha #9185" was no reference)
+const CLOSING = String.raw`close[sd]?|fix(?:e[sd])?|resolve[sd]?|fecha[rm]?|fechou|corrige[m]?|corrigir|corrigiu|resolvido|resolvida|resolveu|encerra[rm]?|encerrou`;
+const referenceOf = (words: string) => new RegExp(String.raw`(?<![\p{L}])(?:${words})(?![\p{L}])[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)`, "giu");
+const REFERENCE = referenceOf(`${CLOSING}|refs?|references?`);
+const CLOSING_REFERENCE = referenceOf(CLOSING);
 
-/** Issue numbers a text names explicitly: "Closes #12", "Fixes: #3, #4", "Refs #9".
+/** A PR that says it ships a part of its issue: "Fase 0 do #9071", "parte 2", "etapa 1 de 3",
+ * "degrau 2", "entrega parcial", "primeira parte". Not "parcialmente aplicadas" (a bug's
+ * description) nor "fila e etapa" (a ticket's stage): a number or the phrase itself. */
+export function partialDelivery(text: string | null | undefined): boolean {
+  return Boolean(text && /(?<![\p{L}])(?:(?:fase|phase|parte|part|etapa|degrau|step)\s+\d+(?![\p{L}\d])|entrega\s+parcial|partial\s+delivery|(?:primeira|segunda|terceira|first|second|third)\s+(?:parte|fase|etapa|part|phase))/iu.test(text));
+}
+
+/** Issue numbers a text names explicitly: "Closes #12", "Fixes: #3, #4", "Refs #9",
+ * "Fecha #9185", "Corrige #3" — or, `closing`, only those it says it closes (not "Refs").
  * A bare "#12" is not a reference (it may be a PR, a table row, a sentence). */
-export function explicitReferences(text: string | null | undefined): number[] {
+export function explicitReferences(text: string | null | undefined, options: { closing?: boolean } = {}): number[] {
   if (!text) return [];
   const found = new Set<number>();
-  for (const match of text.matchAll(REFERENCE)) for (const number of match[1]!.matchAll(/#(\d+)/g)) found.add(Number(number[1]));
+  for (const match of text.matchAll(options.closing ? CLOSING_REFERENCE : REFERENCE)) for (const number of match[1]!.matchAll(/#(\d+)/g)) found.add(Number(number[1]));
   return [...found];
+}
+
+/** The environment `gh` runs in. The PATH is the augmented one (Homebrew, ~/.local/bin, the login
+ * shell's): an app opened from the Finder inherits only /usr/bin:/bin:/usr/sbin:/sbin, where `gh`
+ * is not, and the sync failed with "spawn gh ENOENT" while every other gh call in the server worked. */
+export function ghEnv(base: NodeJS.ProcessEnv = process.env, path: string = augmentedPath()): NodeJS.ProcessEnv {
+  return { ...base, PATH: path, GH_PROMPT_DISABLED: "1", NO_COLOR: "1" };
+}
+
+/** What a failed `gh` call says: gh's own words, or, when gh is not there at all, that in plain words. */
+export function ghErrorMessage(error: { code?: string | number | null; message: string }, stderr: string): string {
+  if (error.code === "ENOENT") return "GitHub CLI (gh) not found on the app's PATH: install it (brew install gh) or add its folder to OMB_EXTRA_PATH";
+  return (String(stderr || "").trim() || error.message).slice(0, 400);
 }
 
 /** Run `gh` without a shell; output capped, a slow call cut at 90 s. */
 export const execGh: GhRunner = (args) => new Promise((resolve, reject) => {
-  execFile("gh", args, { timeout: 90_000, maxBuffer: 96 * 1024 * 1024, env: { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1" } }, (error, stdout, stderr) => {
-    if (error) reject(new Error((String(stderr || "").trim() || error.message).slice(0, 400)));
+  execFile("gh", args, { timeout: 90_000, maxBuffer: 96 * 1024 * 1024, env: ghEnv() }, (error, stdout, stderr) => {
+    if (error) reject(new Error(ghErrorMessage(error, String(stderr))));
     else resolve(String(stdout));
   });
 });
@@ -171,6 +206,29 @@ export function issuePriority(labels: readonly string[]): IssuePriority {
 export const isCarrier = (pr: Pick<GhPr, "head" | "title">): boolean =>
   /(^|\/)release-carrier/i.test(pr.head) || /^chore\(release\):\s*carrier/i.test(pr.title);
 
+/** A batch PR ("lote"): it merges the work of other PRs into main in one gate — "fix(lote): Lote B",
+ * "chore(lote): …", "chore(release): lote 24/09 — 7 PRs", a lote/… branch. Not "ações em lote" (a feature). */
+export const isBatch = (pr: Pick<GhPr, "head" | "title">): boolean =>
+  !isCarrier(pr) && (/^\w+\(lote\)/i.test(pr.title) || /^\w+\(release\):\s*lote\b/i.test(pr.title) || /(^|\/)lote[/-]/i.test(pr.head));
+
+/** Every "#N" a text cites. */
+export function citedNumbers(text: string | null | undefined, self?: number): number[] {
+  if (!text) return [];
+  return [...new Set([...text.matchAll(/#(\d{1,7})\b/g)].map((match) => Number(match[1])))].filter((n) => n !== self);
+}
+
+/** The PRs a lote says it took: those its title names, the first cell of its table
+ * ("| #9570 | e0c5d6094 | …", "| 1 | #9431 | …") and its "**PR #9409 — …**" headings.
+ * Not every number its text mentions: "#9575/#9576 ficam na etapa de scripts" is a PR the
+ * lote left out, and "no formato do Lote Foco (#9506)" another lote. */
+export function batchMembers(title: string | null | undefined, body: string | null | undefined, self?: number): number[] {
+  const found = new Set(citedNumbers(title, self));
+  for (const line of (body ?? "").split("\n")) {
+    const row = /^\s*\|\s*(?:\d+\s*\|\s*)?#(\d+)\b/.exec(line) ?? /^\s*(?:[-*]\s+)?\*\*PR #(\d+)\b/.exec(line);
+    if (row && Number(row[1]) !== self) found.add(Number(row[1]));
+  }
+  return [...found];
+}
 
 // ── GraphQL ─────────────────────────────────────────────────────────────────
 
@@ -223,6 +281,9 @@ export function parsePr(node: Json): GhPr | null {
     mergeSha: typeof node.mergeCommit?.oid === "string" ? node.mergeCommit.oid : null,
     closes: (node.closingIssuesReferences?.nodes ?? []).map((issue: Json) => issue?.number).filter((n: unknown): n is number => typeof n === "number"),
     refs: [...new Set([...explicitReferences(node.body), ...explicitReferences(node.mergeCommit?.message)])].filter((n) => n !== node.number),
+    fixes: [...new Set([...explicitReferences(node.body, { closing: true }), ...explicitReferences(node.mergeCommit?.message, { closing: true })])].filter((n) => n !== node.number),
+    ...(partialDelivery(`${node.title ?? ""}\n${node.body ?? ""}\n${node.mergeCommit?.message ?? ""}`) ? { partial: true as const } : {}),
+    ...(isBatch({ head: String(node.headRefName ?? ""), title: String(node.title ?? "") }) ? { batch: batchMembers(node.title, node.body, node.number) } : {}),
     labels: (node.labels?.nodes ?? []).map((label: Json) => String(label?.name ?? "")).filter(Boolean),
   };
 }

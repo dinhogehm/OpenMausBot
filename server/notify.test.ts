@@ -92,6 +92,8 @@ describe("sign-in requests", () => {
     });
     const direct = buildNotification("sign-in", bot, bot.threadId, "the dashboard is behind a login", { site: "example.com" });
     expect(direct?.title).toBe("Scout precisa que você entre em example.com");
+    // without a site the title still says where, in pt-BR
+    expect(buildNotification("sign-in", bot, bot.threadId, "login")?.title).toBe("Scout precisa que você entre em um site");
     expect(direct?.groupId).toBeUndefined();
   });
 });

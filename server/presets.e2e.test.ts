@@ -81,7 +81,9 @@ it("shares New bot defaults as a preset, imports it, and creates bots from file 
     const bots = (await ok("GET", "/api/bots")).bots as Array<{ id: string; installedPackage?: Record<string, unknown>; approvalMode?: string }>;
     const created = bots.find((bot) => bot.id === fromFile.bot.id)!;
     expect(created.installedPackage).toMatchObject({ id: "support-agent", source: "file", presetKey: "new-bot-defaults" });
-    expect(created.approvalMode).toBe("full");
+    // A preset carries no approval level: fork: the bot starts at Ask, never Full.
+    expect(created.approvalMode).toBe("ask");
+    // With the saved defaults on, the preset's skill and notes win over the defaults' own.
     const withDefaults = await ok("POST", "/api/bots", { name: "Sky 3", preset: fileId });
     expect((await ok("GET", `/api/bots/${withDefaults.bot.id}/skills`)).skills).toEqual([expect.objectContaining({ name: "follow-up", enabled: false })]);
 

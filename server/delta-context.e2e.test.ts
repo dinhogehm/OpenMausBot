@@ -17,6 +17,10 @@ import { openSse } from "./testing/sse.ts";
 import { withoutTurnClock } from "./testing/turn-clock-text.ts";
 
 const count = (text: string, needle: string) => text.split(needle).length - 1;
+// A launch's first message opens with the volatile half of the system prompt
+// (memory, recent work, outstanding teammate work) as a <system-reminder>;
+// what the harness replayed or the person typed is what follows it.
+const withoutContextNote = (text: string) => text.replace(/^<system-reminder>\n[\s\S]*?\n<\/system-reminder>\n\n/, "");
 
 const assignedBy = (requester: string, lineage: "person" | "outside" = "person") =>
   new RegExp(`^\\[OpenMausBot assignment \\S+ from @${requester}${lineage === "person" ? " for the user" : ""}\\]$`, "m");
@@ -1130,7 +1134,7 @@ it("keeps resuming an ordinary turn after a soul change, as before", () => fixtu
   await f.send("Second message.");
   await f.wait();
   expect(f.launches().at(-1).resume).not.toBeNull();
-  expect(withoutTurnClock(f.prompt(f.turns().at(-1)))).toBe("Second message.");
+  expect(withoutContextNote(withoutTurnClock(f.prompt(f.turns().at(-1))))).toBe("Second message.");
 }), hostTimeout(60_000));
 
 it("offers a steer written into a resume the provider then rejected on the next turn", () => fixture(async (f) => {

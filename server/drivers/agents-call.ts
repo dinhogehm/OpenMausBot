@@ -746,7 +746,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   if (name === "goal_end") {
     const r = await api("/api/internal/goal", {
       method: "POST",
-      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: "end", status: args.status, detail: args.detail, ...(typeof args.thread_id === "string" && args.thread_id.trim() ? { targetThreadId: args.thread_id.trim() } : {}) }),
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: "end", status: args.status, detail: args.detail, ...(typeof args.proof === "string" ? { proof: args.proof } : {}), ...(typeof args.thread_id === "string" && args.thread_id.trim() ? { targetThreadId: args.thread_id.trim() } : {}) }),
     });
     if (r.error) return { text: `Couldn't end goal mode: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? "Goal mode ended.") };
@@ -754,7 +754,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   if (name === "owner_pending") {
     const r = await api("/api/internal/owner-pending", {
       method: "POST",
-      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: args.action, title: args.title, due: args.due, link: args.link, id: args.id, why: args.why, steps: args.steps, options: args.options }),
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: args.action, title: args.title, due: args.due, link: args.link, id: args.id, why: args.why, steps: args.steps, options: args.options, replacesAsk: args.replacesAsk }),
     });
     if (r.error) return { text: `owner_pending: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? "ok") };

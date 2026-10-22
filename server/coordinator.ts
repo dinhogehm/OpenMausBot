@@ -179,6 +179,11 @@ export interface CoordinatorOptions {
   runtimeLimits?: Partial<Limits>;
   log?: (line: string) => void;
   legacyThreads?: LegacyThreadResolver;
+  /** The result contract (server/result-contract.ts): a teammate's request
+   * outside a room, work or consultation, ends with HANDOFF_RESULT_CONTRACT,
+   * and its whole answer settles by its RESULTADO line ("não feito" fails
+   * it). Off by default: headless and test servers run without it. */
+  resultContract?: boolean;
 }
 
 export function createCoordinator(options: CoordinatorOptions): Coordinator {

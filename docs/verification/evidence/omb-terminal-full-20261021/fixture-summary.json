@@ -1,0 +1,89 @@
+{
+  "evidence": "/private/var/folders/ns/r2598p2n62x842z7541d9l1c0000gn/T/openmausbot-verification-evidence/server-1792587640797-77204.log.cc-terminal-full.json",
+  "actions": [
+    "FULL_TERMINAL_0",
+    "FULL_TERMINAL_1",
+    "FULL_TERMINAL_2",
+    "FORGED_PERMISSION",
+    "HISTORICAL_DESKTOP",
+    "DUPLICATE_ISSUE",
+    "REFUSE_UNCERTAIN_ARCHIVE",
+    "REFUSE_UNPROVEN_STOP",
+    "ARCHIVE_UNATTEMPTED_START",
+    "ARCHIVE_LOCAL_RECORD",
+    "REPLACE_ARCHIVED_ISSUE",
+    "REVOKED_PERMISSION"
+  ],
+  "modes": [
+    "bypassPermissions",
+    "bypassPermissions",
+    "bypassPermissions",
+    "bypassPermissions",
+    "auto"
+  ],
+  "nativeCalls": [],
+  "nativeStorageUnchanged": true,
+  "fullModeReported": true,
+  "unattemptedStatus": "stopped",
+  "sessions": [
+    {
+      "title": "99101 Historical desktop fixture",
+      "surface": "app",
+      "status": "archived",
+      "turns": 0,
+      "held": []
+    },
+    {
+      "title": "99102 Uncertain desktop fixture",
+      "surface": "app",
+      "status": "idle",
+      "turns": 0,
+      "held": []
+    },
+    {
+      "title": "Unattempted desktop fixture",
+      "surface": "app",
+      "status": "archived",
+      "turns": 0,
+      "held": [
+        "Never sent"
+      ]
+    },
+    {
+      "title": "99103 Unproven stopped desktop fixture",
+      "surface": "app",
+      "status": "stopped",
+      "turns": 0,
+      "held": []
+    },
+    {
+      "title": "FULL_TERMINAL_0",
+      "surface": "cli",
+      "status": "idle",
+      "turns": 2,
+      "held": []
+    },
+    {
+      "title": "FULL_TERMINAL_1",
+      "surface": "cli",
+      "status": "idle",
+      "turns": 1,
+      "held": []
+    },
+    {
+      "title": "FULL_TERMINAL_2",
+      "surface": "cli",
+      "status": "idle",
+      "turns": 1,
+      "held": []
+    },
+    {
+      "title": "99101 Replacement terminal fixture",
+      "surface": "cli",
+      "status": "idle",
+      "turns": 1,
+      "held": []
+    }
+  ],
+  "fixtureRemoved": true
+}

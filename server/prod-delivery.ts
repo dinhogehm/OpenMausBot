@@ -5,12 +5,22 @@
 // archive the session) waits on someone remembering to look. The server
 // looks instead: every DELIVERY_CHECK_MS it reads the PRs a session has
 // reported, asks GitHub for their merge commit, reads the production tag
-// with `git ls-remote` and, when the tag contains the merge (compare API),
-// reports to the owner once: "em produção desde <hora>".
+// with `git ls-remote` and, when the tag contains the merge (compare API)
+// AND the release corridor recorded a healthy release of the tag's commit
+// (releaseRecord), reports to the owner once: "em produção desde <hora>".
+//
+// The tag alone is not proof (09/10: it was moved outside the corridor and
+// #9483 was announced; 12/10: #9528 changed an app the release had no target
+// for and was announced ~8 h before it was published). The time is the
+// receipt's DEPLOYED_AT, never the tag commit's date (wrong in 23 of 23
+// deliveries, by a median of ~4 h); without it the time is said unknown.
+// A tag that moves back past a merge reopens that delivery.
 //
 // State lives on the session (CcSession.delivery); lookups are cached and
 // capped per pass so a ledger full of sessions stays within API limits.
 
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 
 /** The tag the release watcher moves when a release reaches production. */
@@ -19,6 +29,10 @@ export const PRODUCTION_TAG = "nuria-production-deployed";
 export const DELIVERY_CHECK_MS = 10 * 60_000;
 /** GitHub calls one pass may make, across all sessions. */
 export const DELIVERY_MAX_CALLS = 8;
+/** How long after "em produção" the tag is still read for a rollback past
+ * the merge: a day, so a session left unarchived does not keep the server
+ * reading the remote tag every 10 min for good. */
+export const ROLLBACK_WATCH_MS = 24 * 3_600_000;
 
 export interface DeliveryPr {
   url: string;
@@ -26,10 +40,26 @@ export interface DeliveryPr {
   state?: "open" | "merged" | "closed";
   mergeSha?: string;
   checkedAt?: number;
-  /** When the production tag was seen containing it, and the tag's commit time. */
+  /** When the production tag was seen containing it, and when the release
+   * that published it went live (the receipt's DEPLOYED_AT, in pt-BR); unset
+   * when the corridor's record has no time for it. */
   inProductionAt?: number;
   productionSince?: string;
   reportedAt?: number;
+  /** The tag commit it was announced under: a later tag that no longer
+   * contains the merge reopens the delivery. */
+  productionTag?: string;
+  /** Why it is held back (no record, a result the corridor does not certify,
+   * an app with no publish target…), as a key: the bot is told once per
+   * reason, not at every tag that still holds it. */
+  heldAt?: string;
+  /** That reason in pt-BR, for archiving and the owner. */
+  heldWhy?: string;
+  /** What proved it live: the corridor's record, or (where no corridor
+   * runs) only the tag. */
+  proof?: "corridor" | "tag";
+  /** The files the merged PR changed (read once: a merged PR does not change). */
+  paths?: string[];
   /** Why it is this session's: its head branch is the session's ("branch"),
    * or the session was told to take it over ("explicit"). Unset: only named
    * in a report — a candidate, not yet the session's (R9-followup #2).
@@ -279,11 +309,18 @@ export function productionTime(iso: string): string {
   return at.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).replace(",", "");
 }
 
+/** "em produção desde 30/09 16:40", or that the time is unknown. */
+export function productionSinceText(since: string | undefined): string {
+  return since ? `em produção desde ${since}` : "em produção, horário do deploy indisponível";
+}
+
 /** For the owner, once per session and pass: these PRs reached production. */
 export function deliveryReport(session: Pick<DeliverySession, "id" | "title">, prs: DeliveryPr[], tagSha: string): string {
+  const known = prs.map((pr) => pr.productionSince).filter((since): since is string => since !== undefined).sort();
   return [
-    `[Claude Code session ${session.id} ("${session.title}"): delivered in production — em produção desde ${prs.map((pr) => pr.productionSince ?? "?").sort()[0]}.]`,
-    ...prs.map((pr) => `- PR #${pr.number} (${pr.url}): merge ${pr.mergeSha?.slice(0, 8)} is contained in ${PRODUCTION_TAG} (${tagSha.slice(0, 8)}), em produção desde ${pr.productionSince ?? "?"}.`),
+    `[Claude Code session ${session.id} ("${session.title}"): delivered in production — ${productionSinceText(known[0])}.]`,
+    ...prs.map((pr) => `- PR #${pr.number} (${pr.url}): merge ${pr.mergeSha?.slice(0, 8)} is contained in ${PRODUCTION_TAG} (${tagSha.slice(0, 8)}), ${pr.proof === "corridor" ? "and the release corridor recorded that commit as released and healthy" : "seen only by the tag (no release corridor record on this machine)"} — ${productionSinceText(pr.productionSince)}.`),
+    ...(known.length < prs.length ? ["The release time is unknown for some of them: say so to the requester instead of guessing one (never the commit's date)."] : []),
     "Close the cycle now: tell the requester it is live (in their channel), update the spreadsheet row and the issue, then archive the session with cc_session_archive once nothing else is pending in it.",
     "The requester counts as told only with the ID of the message you sent (what the send command returned): write that ID in the issue and the spreadsheet. No ID, no notice — never report it as done without one.",
   ].join("\n");
@@ -298,19 +335,126 @@ export interface DeliveryDeps {
   report(session: DeliverySession, text: string): void;
   chip(session: DeliverySession, text: string): void;
   save(): void;
+  /** What the release corridor recorded for a production commit (where the
+   * Nuria release runs on this Mac): null when it recorded nothing for it,
+   * "unavailable" when its records cannot be read here. Without this dep the
+   * tag is the only proof, the time is unknown, and the report says so. */
+  releaseRecord?(sha: string): Promise<ReleaseRecord | null | "unavailable">;
   /** A line for the server log (what changed and why). */
   log?(line: string): void;
 }
 
-/** Lookups shared across passes: a repository's tag, a compare, a commit time. */
+/** Lookups shared across passes: a repository's tag, a compare, the
+ * corridor's record of a commit (none yet is asked again later). */
 export interface DeliveryCache {
   tags: Map<string, { sha: string | null; at: number }>;
   contains: Map<string, boolean>;
-  commitTimes: Map<string, string>;
+  records: Map<string, { record: ReleaseRecord | null | "unavailable"; at: number }>;
 }
 
 export function newDeliveryCache(): DeliveryCache {
-  return { tags: new Map(), contains: new Map(), commitTimes: new Map() };
+  return { tags: new Map(), contains: new Map(), records: new Map() };
+}
+
+// ── what the release corridor recorded ───────────────────────────────────
+// nuria-platform's release writes, in the clone it runs from
+// (NURIA_PLATFORM_ROOT of its LaunchAgent), .deploy-history/post-release/
+// <sha>/result.env (COMMIT, PREVIOUS_COMMIT, RESULT) for every commit it
+// released, and .deploy-history/deploy-receipt-production.env (COMMIT,
+// DEPLOYED_AT, REMOTE_TARGETS) for the last one; the next release keeps the
+// receipt it replaced as post-release/<next>/previous-receipt.env. The tag
+// only advances after the receipt and a certified post-release result.
+
+/** The post-release results the corridor certifies (post-release-guard.mjs
+ * exits EXIT.HEALTHY with these): the tag advances only after one of them. */
+export const CERTIFIED_RESULTS = new Set(["healthy", "healthy_with_preexisting_failures"]);
+/** A receipt of the commit but no post-release result: published, health not verified. */
+export const NO_POST_RELEASE = "sem-verificacao";
+
+export interface ReleaseRecord {
+  /** The post-release verdict (healthy, rolled_back, …), or NO_POST_RELEASE. */
+  result: string;
+  /** The commit production ran before this release (result.env PREVIOUS_COMMIT). */
+  previousCommit?: string;
+  /** When its post-release check finished (ISO): the release was live by then. */
+  finishedAt?: string;
+  /** When it went live (ISO), when the receipt is this commit's. */
+  deployedAt?: string;
+  /** What it published ("worker:agenda", "pages:nuria-kb-pages"), when the receipt is this commit's. */
+  targets?: string[];
+}
+
+/** KEY=value lines (the corridor's .env records). */
+export function parseEnvRecord(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line.trim());
+    if (match) out[match[1]!] = match[2]!.replace(/^"(.*)"$/, "$1");
+  }
+  return out;
+}
+
+/** The corridor's record of `sha`, from its post-release result and its
+ * receipt (each counts only if it is that very commit's); null when it
+ * recorded neither. */
+export function releaseRecordFrom(resultEnv: string | null, receiptEnv: string | null, sha: string): ReleaseRecord | null {
+  const parsedResult = resultEnv ? parseEnvRecord(resultEnv) : null;
+  const result = parsedResult?.COMMIT === sha && parsedResult.RESULT ? parsedResult : null;
+  const parsedReceipt = receiptEnv ? parseEnvRecord(receiptEnv) : null;
+  const receipt = parsedReceipt?.COMMIT === sha ? parsedReceipt : null;
+  if (!result && !receipt) return null;
+  const deployedAt = receipt?.DEPLOYED_AT && !Number.isNaN(Date.parse(receipt.DEPLOYED_AT)) ? receipt.DEPLOYED_AT : undefined;
+  const targets = receipt?.REMOTE_TARGETS ? [...new Set(receipt.REMOTE_TARGETS.split(",").map((each) => each.trim().split(":").slice(0, 2).join(":")).filter((each) => each.includes(":")))] : undefined;
+  const previous = result?.PREVIOUS_COMMIT && /^[0-9a-f]{40}$/.test(result.PREVIOUS_COMMIT) ? result.PREVIOUS_COMMIT : undefined;
+  const finishedAt = result?.FINISHED_AT && !Number.isNaN(Date.parse(result.FINISHED_AT)) ? result.FINISHED_AT : undefined;
+  return { result: result?.RESULT ?? NO_POST_RELEASE, ...(finishedAt ? { finishedAt } : {}), ...(previous ? { previousCommit: previous } : {}), ...(deployedAt ? { deployedAt } : {}), ...(targets?.length ? { targets } : {}) };
+}
+
+/** The corridor's record of `sha` in its .deploy-history `dir`: the commit's
+ * post-release result, and its receipt — the current one, or the one the
+ * next release kept (post-release/<next>/previous-receipt.env). */
+export async function readReleaseRecord(dir: string, sha: string): Promise<ReleaseRecord | null> {
+  const read = (path: string) => readFile(path, "utf8").catch(() => null);
+  const result = await read(join(dir, "post-release", sha, "result.env"));
+  let receipt = await read(join(dir, "deploy-receipt-production.env"));
+  if (!receipt || parseEnvRecord(receipt).COMMIT !== sha) {
+    receipt = null;
+    const later = await readdir(join(dir, "post-release")).catch(() => [] as string[]);
+    for (const name of later) {
+      if (!/^[0-9a-f]{40}$/.test(name) || name === sha) continue;
+      const kept = await read(join(dir, "post-release", name, "previous-receipt.env"));
+      if (kept && parseEnvRecord(kept).COMMIT === sha) { receipt = kept; break; }
+    }
+  }
+  return releaseRecordFrom(result, receipt, sha);
+}
+
+/** The apps a PR changed: apps/<name>/… and web/… (as "web"). */
+export function runtimeApps(paths: readonly string[]): string[] {
+  const apps = new Set<string>();
+  for (const path of paths) {
+    const app = /^apps\/([^/]+)\//.exec(path)?.[1] ?? (path.startsWith("web/") ? "web" : null);
+    if (app) apps.add(app);
+  }
+  return [...apps];
+}
+
+/** The apps a PR changed (apps/<name>/…, web/… as "web") that the release
+ * published no target for. Scripts, docs and shared packages have none of
+ * their own, so they are never "unpublished". */
+export function unpublishedApps(paths: readonly string[], targets: readonly string[]): string[] {
+  const names = targets.map((target) => target.slice(target.indexOf(":") + 1));
+  const published = (app: string) => names.some((name) => name === app || name === `nuria-${app}` || name.startsWith(`${app}-`) || name.startsWith(`nuria-${app}-`));
+  return runtimeApps(paths).filter((app) => !published(app));
+}
+
+/** For the owner, once per tag: a merged PR the tag contains that is not
+ * announced, and why. */
+export function heldReport(session: Pick<DeliverySession, "id" | "title">, pr: DeliveryPr, tagSha: string, why: string): string {
+  return [
+    `[Claude Code session ${session.id} ("${session.title}"): PR #${pr.number} (${pr.url}) is in ${PRODUCTION_TAG} (${tagSha.slice(0, 8)}) but is NOT announced as in production — ${why}.]`,
+    "Do not tell the requester it is live, nor write it in the issue or the spreadsheet. Find out how the tag got there or how this change gets published; the server announces it once the corridor's record proves it.",
+  ].join("\n");
 }
 
 /** One pass over the sessions. Sessions without PRs, repositories without
@@ -323,11 +467,15 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     calls += 1;
     return deps.gh(args);
   };
+  const recentlyAnnounced = (pr: DeliveryPr) => pr.reportedAt !== undefined && now - pr.reportedAt < ROLLBACK_WATCH_MS && pr.productionTag !== undefined && pr.mergeSha !== undefined;
   for (const session of sessions) {
-    if (session.status === "archived") continue;
+    // archived (as the announcement asks): only a rollback within the day is still followed
+    const archived = session.status === "archived";
+    if (archived && !(session.delivery?.slug && Object.values(session.delivery.prs).some(recentlyAnnounced))) continue;
     if (!session.delivery) {
-      // "PRs #S e #P" too: a plural report used to start no delivery at all
-      if (!/\/pull\/|\b(?:PRs?|pull requests?)\s*#\d/i.test(session.lastReport ?? "")) continue;
+      // "PRs #9329 e #9330" too: a plural report used to start no delivery at all; a PR
+      // handed over to the session (claimedPrs) is followed even when its report names none
+      if (!session.claimedPrs?.length && !/\/pull\/|\b(?:PRs?|pull requests?)\s*#\d/i.test(session.lastReport ?? "")) continue;
       session.delivery = { prs: {} };
     }
     const delivery = session.delivery;
@@ -340,7 +488,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     }
     let added = false;
     // what the report names is a candidate; a PR handed over is the session's
-    for (const link of [...prLinks(session.lastReport ?? "", delivery.slug), ...(session.claimedPrs ?? []).map((number) => ({ number, url: `https://github.com/${delivery.slug}/pull/${number}` }))]) {
+    if (!archived) for (const link of [...prLinks(session.lastReport ?? "", delivery.slug), ...(session.claimedPrs ?? []).map((number) => ({ number, url: `https://github.com/${delivery.slug}/pull/${number}` }))]) {
       const known = delivery.prs[String(link.number)];
       const claimed = session.claimedPrs?.includes(link.number) === true;
       if (known) {
@@ -359,7 +507,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     // #3). Each one is checked once by its head branch against the session's
     // branches, worktrees and reflog; without that proof (or a hand-over) it
     // is not the session's. GitHub unavailable: asked again next time.
-    for (const pr of Object.values(delivery.prs).filter((each) => each.owned === "legacy" || (each.owned === undefined && each.state === "merged"))) {
+    for (const pr of archived ? [] : Object.values(delivery.prs).filter((each) => each.owned === "legacy" || (each.owned === undefined && each.state === "merged"))) {
       if (!budget()) break;
       try {
         const view = JSON.parse(await gh(["pr", "view", String(pr.number), "--repo", delivery.slug, "--json", "headRefName,headRefOid"])) as { headRefName?: string; headRefOid?: string };
@@ -382,8 +530,9 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
         }
       }
     }
-    const waiting = Object.values(delivery.prs).filter((pr) => pr.state !== "closed" && pr.reportedAt === undefined);
-    if (!waiting.length) continue;
+    // announced in the last day: a rollback would show as the tag moving back past it
+    const announced = Object.values(delivery.prs).filter(recentlyAnnounced);
+    if (!announced.length && (archived || !Object.values(delivery.prs).some((pr) => pr.state !== "closed" && pr.reportedAt === undefined))) continue;
     // The production tag, read at most once per DELIVERY_CHECK_MS per repository.
     let tag = cache.tags.get(session.repo);
     if (!tag || now - tag.at >= DELIVERY_CHECK_MS) {
@@ -395,6 +544,56 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
       cache.tags.set(session.repo, tag);
     }
     if (!tag.sha) continue;
+    const tagSha = tag.sha;
+    // whether `sha` contains the PR's merge: null when it cannot be told now (no budget, GitHub down)
+    const containsIn = async (pr: DeliveryPr, sha: string): Promise<boolean | null> => {
+      const key = `${delivery.slug}:${pr.mergeSha}...${sha}`;
+      const known = cache.contains.get(key);
+      if (known !== undefined) return known;
+      if (!budget()) return null;
+      try {
+        const status = (await gh(["api", `repos/${delivery.slug}/compare/${pr.mergeSha}...${sha}`, "--jq", ".status"])).trim();
+        const contained = status === "ahead" || status === "identical";
+        cache.contains.set(key, contained);
+        return contained;
+      } catch { return null; }
+    };
+    const containsMerge = (pr: DeliveryPr) => containsIn(pr, tagSha);
+    // a tag that moved back past a merge already announced: that delivery is reopened
+    for (const pr of announced) {
+      if (pr.productionTag === tagSha) continue;
+      const contained = await containsMerge(pr);
+      if (contained === null) continue;
+      if (contained) { pr.productionTag = tagSha; deps.save(); continue; }
+      const was = pr.productionTag!;
+      delete pr.reportedAt;
+      delete pr.inProductionAt;
+      delete pr.productionSince;
+      delete pr.productionTag;
+      deps.save();
+      deps.chip(session, `saiu de produção: ${PRODUCTION_TAG} recuou para ${tagSha.slice(0, 8)}, sem o merge da PR #${pr.number}`);
+      deps.report(session, `[Claude Code session ${session.id} ("${session.title}"): PR #${pr.number} saiu de produção — ${PRODUCTION_TAG} moved from ${was.slice(0, 8)} back to ${tagSha.slice(0, 8)}, which no longer contains its merge ${pr.mergeSha!.slice(0, 8)} (a rollback?).]\nTell whoever was told it is live, and correct the issue and the spreadsheet row. The server announces it again once a release brings it back.`);
+    }
+    const record = async (): Promise<ReleaseRecord | null | "unavailable" | undefined> => {
+      if (!deps.releaseRecord) return undefined;
+      const cached = cache.records.get(tagSha);
+      // a record found stays found; none (or unreadable) is asked again every DELIVERY_CHECK_MS
+      if (cached && ((cached.record !== null && cached.record !== "unavailable") || now - cached.at < DELIVERY_CHECK_MS)) return cached.record;
+      let found: ReleaseRecord | null | "unavailable" = "unavailable";
+      try { found = await deps.releaseRecord(tagSha); } catch { /* unreadable now: asked again later */ }
+      cache.records.set(tagSha, { record: found, at: now });
+      return found;
+    };
+    // held back: the bot hears it once per reason, a later tag with the same reason only logs
+    const hold = (pr: DeliveryPr, key: string, chip: string, whyPt: string, why: string) => {
+      if (pr.heldAt === key) { deps.log?.(`[delivery] session ${session.id}: PR #${pr.number} still held at ${tagSha.slice(0, 8)} (${key})`); return; }
+      pr.heldAt = key;
+      pr.heldWhy = whyPt;
+      deps.save();
+      deps.chip(session, chip);
+      deps.report(session, heldReport(session, pr, tagSha, why));
+    };
+    const waiting = archived ? [] : Object.values(delivery.prs).filter((pr) => pr.state !== "closed" && pr.reportedAt === undefined);
     const delivered: DeliveryPr[] = [];
     for (const pr of waiting) {
       if (!budget()) break;
@@ -437,33 +636,64 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
         deps.save();
         if (pr.state !== "merged" || pr.owned === undefined) continue;
       }
-      const key = `${delivery.slug}:${pr.mergeSha}...${tag.sha}`;
-      let contained = cache.contains.get(key);
-      if (contained === undefined) {
-        if (!budget()) break;
-        try {
-          const status = (await gh(["api", `repos/${delivery.slug}/compare/${pr.mergeSha}...${tag.sha}`, "--jq", ".status"])).trim();
-          contained = status === "ahead" || status === "identical";
-          cache.contains.set(key, contained);
-        } catch { continue; }
-      }
+      const contained = await containsMerge(pr);
       if (!contained) continue;
-      let since = cache.commitTimes.get(tag.sha);
-      if (since === undefined && budget()) {
-        try {
-          since = productionTime((await gh(["api", `repos/${delivery.slug}/commits/${tag.sha}`, "--jq", ".commit.committer.date"])).trim());
-          cache.commitTimes.set(tag.sha, since);
-        } catch { /* the time is a nicety */ }
+      const proof = await record();
+      const short = tagSha.slice(0, 8);
+      if (proof === "unavailable") {
+        hold(pr, "unavailable", `PR #${pr.number} na tag, mas não anunciada: não consegui ler os registros do corredor de release nesta máquina`, "registros do corredor ilegíveis nesta máquina", "the release corridor's records cannot be read on this machine (its LaunchAgent or .deploy-history), so nothing proves the release; this is the server's problem to fix, not a sign the tag was moved");
+        continue;
+      }
+      if (proof === null) {
+        hold(pr, "no-record", `PR #${pr.number} na tag, mas não anunciada: sem release registrado pelo corredor para ${short}`, `sem release registrado pelo corredor para ${short}`, `sem release registrado pelo corredor para ${short}: neither a receipt nor a post-release result of that commit, so the tag may have been moved outside the release`);
+        continue;
+      }
+      if (proof && !CERTIFIED_RESULTS.has(proof.result)) {
+        const noCheck = proof.result === NO_POST_RELEASE;
+        hold(pr, `result:${proof.result}`, `PR #${pr.number} na tag, mas não anunciada: ${noCheck ? "sem verificação pós-release" : `pós-release ${proof.result}`} para ${short}`, noCheck ? `publicado sem verificação pós-release (${short})` : `pós-release ${proof.result} (${short})`, noCheck ? `the corridor published ${short} (receipt) but recorded no post-release health check of it` : `the corridor recorded the release of ${short} as ${proof.result}, which it does not certify`);
+        continue;
+      }
+      if (proof) {
+        // what the PR changed decides whether it needs a publish target: read before any announcement, never skipped
+        if (pr.paths === undefined) {
+          if (!budget()) break;
+          try {
+            pr.paths = (await gh(["pr", "view", String(pr.number), "--repo", delivery.slug, "--json", "files", "--jq", ".files[].path"])).split("\n").map((path) => path.trim()).filter(Boolean);
+            deps.save();
+          } catch { continue; /* unread now: asked again next pass, never announced unchecked */ }
+        }
+        const apps = runtimeApps(pr.paths);
+        if (apps.length && !proof.targets) {
+          hold(pr, "no-receipt", `PR #${pr.number} na tag, mas não anunciada: sem recibo de ${short} para conferir os alvos de ${apps.join(", ")}`, `sem recibo de ${short} para conferir os alvos de publicação`, `the corridor kept no receipt of ${short}, so the publish targets of ${apps.map((app) => `apps/${app}`).join(", ")} cannot be checked`);
+          continue;
+        }
+        const missing = proof.targets ? unpublishedApps(pr.paths, proof.targets) : [];
+        if (missing.length) {
+          hold(pr, `unpublished:${missing.join(",")}`, `PR #${pr.number} mergeada, mas sem caminho de publicação para ${missing.join(", ")}: não anunciada`, `sem caminho de publicação para ${missing.join(", ")}`, `sem caminho de publicação: the release published no target for ${missing.map((app) => `apps/${app}`).join(", ")}, so the change is merged but not live`);
+          continue;
+        }
+      }
+      // the receipt's time is this release's; a merge production already ran before it went live earlier, at a time not known here
+      let since: string | undefined;
+      if (proof?.deployedAt) {
+        const earlier = proof.previousCommit ? await containsIn(pr, proof.previousCommit) : false;
+        if (earlier === null && !budget()) break;
+        since = earlier === false ? productionTime(proof.deployedAt) : undefined;
       }
       pr.inProductionAt = now;
-      pr.productionSince = since ?? productionTime(new Date(now).toISOString());
+      if (since) pr.productionSince = since;
+      else delete pr.productionSince;
+      pr.productionTag = tagSha;
+      pr.proof = proof ? "corridor" : "tag";
+      delete pr.heldAt;
+      delete pr.heldWhy;
       pr.reportedAt = now;
       delivered.push(pr);
     }
     if (!delivered.length) continue;
     deps.save();
-    deps.chip(session, `em produção desde ${delivered[0]!.productionSince} (${delivered.map((pr) => `PR #${pr.number}`).join(", ")})`);
-    deps.report(session, deliveryReport(session, delivered, tag.sha));
+    deps.chip(session, `${productionSinceText(delivered[0]!.productionSince)} (${delivered.map((pr) => `PR #${pr.number}`).join(", ")})`);
+    deps.report(session, deliveryReport(session, delivered, tagSha));
   }
 }
 
@@ -489,6 +719,11 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
   let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
   for (const [number, known] of [...numbers].slice(0, 6)) {
     if (known?.reportedAt !== undefined || known?.state === "closed") continue;
+    // in the tag but not proved live: archiving would drop its announcement for good
+    if (known?.heldAt !== undefined) {
+      blockers.push(`a PR #${number} está na tag, mas não foi comprovada em produção (${known.heldWhy ?? known.heldAt})`);
+      continue;
+    }
     // "legacy" proves nothing (R10-followup #3): checked by branch like any named PR
     const owned = (known?.owned === "legacy" ? undefined : known?.owned) ?? (session.claimedPrs?.includes(number) ? "explicit" : undefined);
     let state = known?.state === "merged" && owned ? "MERGED" : "";
@@ -526,6 +761,10 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
     try {
       const status = (await deps.gh(["api", `repos/${slug}/compare/${mergeSha}...${tagSha}`, "--jq", ".status"])).trim();
       if (status !== "ahead" && status !== "identical") blockers.push(`a PR #${number} foi mergeada mas ainda não está em ${PRODUCTION_TAG}`);
+      // in the tag but not announced yet (announced ones were skipped above): archived now, the
+      // announcement would never come (14/10: #9555 archived ~5 min after the tag, before the pass).
+      // Only a PR the delivery pass follows is promised one; another keeps the old rule.
+      else if (known) blockers.push(`a PR #${number} está em ${PRODUCTION_TAG}, mas o servidor ainda não a anunciou em produção (o anúncio sai na próxima passada, a cada 10 min)`);
     } catch {
       unknown.push(`PR #${number} (produção)`);
     }

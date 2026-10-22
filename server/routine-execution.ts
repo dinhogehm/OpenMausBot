@@ -46,13 +46,15 @@ export function continuityCarry(run: RoutineRun, routines: readonly Pick<Routine
     // A reassigned routine must not disclose the old bot's report to another bot or destination.
     if (candidate.botId !== run.botId || candidate.target !== run.target || candidate.runOn !== run.runOn) continue;
     if (candidate.id === run.id) continue;
-    if (candidate.status !== "completed") continue;
+    // a run failed only by its declared result still did its turn: its report carries, marked
+    if (candidate.status !== "completed" && !(candidate.status === "failed" && candidate.resultFailed)) continue;
     if (!candidate.output?.trim()) continue;
     if (!Number.isFinite(finishedOrder(candidate))) continue;
     if (!latest || finishedOrder(candidate) > finishedOrder(latest)) latest = candidate;
   }
   if (!latest) return null;
-  const redacted = redactSecretsInText(latest.output ?? "").trim();
+  const report = latest.status === "failed" && latest.error ? `[${latest.error}]\n${latest.output ?? ""}` : latest.output ?? "";
+  const redacted = redactSecretsInText(report).trim();
   if (!redacted) return null;
   const truncated = redacted.length > CONTINUITY_CHARS;
   return {
@@ -141,6 +143,42 @@ export function supersededBy(dueAt: number, run: Pick<RoutineRun, "status" | "wa
   return run.status === "waiting" && run.waitingSince !== undefined && run.waitingSince <= dueAt - ROUTINE_DEFERRAL_NOTICE_MS &&
     !(run.threadId && handedOffWorkLive?.(run.threadId));
 }
+
+/** A run left "active" this long holds every later occurrence behind it; past it the run is released. */
+export const ROUTINE_ACTIVE_MAX_MS = 6 * 60 * 60_000;
+/** A "running" run whose turn is gone for this long is released: nothing will ever settle it. */
+export const ROUTINE_NO_TURN_GRACE_MS = 10 * 60_000;
+export const ROUTINE_RELEASED_MAX = "Released: this run stayed active past its maximum duration, so the routine's pending run starts instead";
+export const ROUTINE_RELEASED_NO_TURN = "Released: this run was marked running but no turn was live for it, so the routine's pending run starts instead";
+
+/** The longest a run without its own run limit may stay running or waiting. */
+export function routineActiveMaxMs(run: Pick<RoutineRun, "durationMinutes">): number {
+  return Math.max(ROUTINE_ACTIVE_MAX_MS, (run.durationMinutes ?? 0) * 4 * 60_000);
+}
+
+/** Why an active run is stale and must be released, or null.
+ * - `heldByHandOff`: a waiting run whose hand-off is still open. The next occurrence never supersedes such a run
+ *   (supersededBy), so without a cap one hand-off nobody finishes holds the routine forever, across restarts.
+ *   A wait on the person alone is left to supersededBy, as before.
+ * - `noTurnSince`: when the scheduler first saw it "running" with no live turn (undefined while one is live or unknown).
+ * A run with its own timeoutMinutes keeps that limit; room goals settle through the goal machinery. */
+export function staleActiveRun(
+  run: Pick<RoutineRun, "status" | "target" | "startedAt" | "timeoutMinutes" | "durationMinutes">,
+  now: number,
+  state: { heldByHandOff?: boolean; noTurnSince?: number },
+): string | null {
+  if (run.target === "room-goal" || run.startedAt == null || run.timeoutMinutes != null) return null;
+  if (run.status === "waiting") return state.heldByHandOff && now - run.startedAt >= routineActiveMaxMs(run) ? ROUTINE_RELEASED_MAX : null;
+  if (run.status !== "running" || state.noTurnSince === undefined) return null;
+  if (now - state.noTurnSince >= ROUTINE_NO_TURN_GRACE_MS) return ROUTINE_RELEASED_NO_TURN;
+  return null;
+}
+
+/** A routine with continuity due at least this often hands its long work off and ends its run at the end of its turn: waiting on
+ * that work would hold every later occurrence (they only merge into one pending run) and keep the bot's own queue
+ * busy with the hand-off's round trips. The next pass picks the results up from the hand-off and its continuity. */
+export const ROUTINE_HANDOFF_DETACH_CADENCE_MS = 30 * 60_000;
+export const ROUTINE_HANDED_OFF_NOTE = "Long work handed off; this run ended its turn so the next one is not held behind it";
 
 /** Once per wait: the first occurrence skipped after the waiting run blocking it passed the notice window. */
 export function skipNeedsNotice(dueAt: number, waitingSince: number, previousSkipAt: number | undefined): boolean {

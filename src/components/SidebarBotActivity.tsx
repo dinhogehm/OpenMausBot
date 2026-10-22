@@ -4,9 +4,9 @@ import type { Action, AppState, Bot, Group, Task } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { roomThreadSpeakerId, roomThreadWorking } from "@/lib/room-threads";
 import { t } from "@/lib/i18n";
+import { shownTaskTitle } from "@/lib/thread-title";
 import { isArchived, orderedSidebarThreads, orderedThreadList, threadRecency, threadUpdatedLabel } from "./SidebarThreadRow";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
-import { displayThreadTitle } from "@/lib/thread-title";
 import { needsYouLabel } from "@/lib/message-stamp";
 import { ccAlertSummary, ccSessionsSummary, needsSignalLook, watchSummary } from "@/lib/thread-signals";
 import { SignalIcons } from "./SignalIcons";
@@ -144,13 +144,13 @@ export function AttentionThreadRows({ entries, onJump }: { entries: AttentionThr
     {entries.map((entry) => {
       const { Icon, colorClass, label: status } = attentionRowStatus(entry.task);
       const name = attentionOwnerName(entry);
-      const label = t("attention.item", { title: entry.task.title, name, status });
+      const label = t("attention.item", { title: shownTaskTitle(entry.task), name, status });
       return <button key={`${entry.kind}-${entry.kind === "bot" ? entry.botId : entry.groupId}-${entry.task.threadId}`} type="button" aria-label={label} title={label}
         onClick={() => onJump(entry)}
         className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-[13px] text-ink hover:bg-raised/70">
         <Icon size={15} aria-hidden="true" className={cn("shrink-0", colorClass)} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate">{displayThreadTitle(entry.task.title)}</span>
+          <span className="block truncate">{shownTaskTitle(entry.task)}</span>
           <span className="block truncate text-[11px] text-ink-secondary">{name} · {status}</span>
         </span>
       </button>;
@@ -165,7 +165,7 @@ export function PinnedThreadRows({ entries, now, onJump, onUnpin }: { entries: A
       const status = attentionRowStatus(entry.task);
       const updated = threadUpdatedLabel(threadRecency(entry.task), now);
       const byline = status.active ? `${name} · ${status.label}` : updated ? `${name} · ${updated}` : name;
-      const label = t("sidebar.pinnedThreads.item", { title: entry.task.title, name: byline });
+      const label = t("sidebar.pinnedThreads.item", { title: shownTaskTitle(entry.task), name: byline });
       const unpinLabel = t("sidebar.bot.unpin");
       const key = `${entry.kind}-${entry.kind === "bot" ? entry.botId : entry.groupId}-${entry.task.threadId}`;
       const Icon = status.active ? status.Icon : Pin;
@@ -175,7 +175,7 @@ export function PinnedThreadRows({ entries, now, onJump, onUnpin }: { entries: A
           className="flex min-w-0 flex-1 items-center gap-2.5 px-3.5 py-2 text-left text-[13px] text-ink hover:bg-raised/70">
           <Icon size={15} aria-hidden="true" className={cn("shrink-0", status.active ? status.colorClass : "text-ink-secondary")} />
           <span className="min-w-0 flex-1">
-            <span className="block truncate">{entry.task.title}</span>
+            <span className="block truncate">{shownTaskTitle(entry.task)}</span>
             <span className="block truncate text-[11px] text-ink-secondary">{byline}</span>
           </span>
         </button>
@@ -215,13 +215,13 @@ export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick
   // a row that is here only for its signals says nothing more than they do
   // the button's label replaces its children's: every signal it shows is said here (INSP-S r1 S-6)
   const said = [watch?.text, sessions?.text, sessions?.waiting?.text, sessions?.resume?.text, cc?.text].filter((text): text is string => Boolean(text)).map((text) => ` · ${text.replace(/\n\s*/g, " · ")}`).join("");
-  const label = `${bot.name}: ${task.title}${attention ? ` · ${status}` : ""}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}${said}`;
+  const label = `${bot.name}: ${shownTaskTitle(task)}${attention ? ` · ${status}` : ""}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}${said}`;
   const Icon = waiting ? CircleAlert : working ? Loader2 : teammateWait || task.queued ? Clock3 : BellDot;
   return <button type="button" data-sidebar-activity-row={task.threadId} aria-label={label} title={label}
     onClick={onJump}
     className={cn("flex min-h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] outline-none hover:bg-raised/50 focus-visible:ring-1 focus-visible:ring-accent/60", iconOnly && "flex-wrap justify-center gap-y-0.5", waiting ? "text-warning" : "text-ink-secondary")}>
     {attention && <Icon size={12} aria-hidden="true" className={cn("shrink-0", working && "animate-spin text-success", teammateWait && "text-warning", task.unread && !waiting && !working && !teammateWait && "text-accent")} />}
-    {!iconOnly && <><span data-activity-title className="min-w-0 flex-1 truncate">{displayThreadTitle(task.title)}</span>
+    {!iconOnly && <><span data-activity-title className="min-w-0 flex-1 truncate">{shownTaskTitle(task)}</span>
       {!unreadOnly && <span data-activity-status className="min-w-0 max-w-[55%] shrink truncate text-[10px]">{waiting && !needsYou ? t("task.waiting") : status}</span>}
       <SignalIcons watch={watch} cc={cc} sessions={sessions} />
       {task.unread && (waiting || working || teammateWait || task.queued) && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden="true" />}</>}

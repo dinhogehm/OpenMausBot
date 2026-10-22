@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BeginTurnRequest, ComposedTurn, CoordinatorHost, HandoffOpener, HandoffOptions, HandoffView, HostTurnResult } from "./coordinator.ts";
 import type { RoomAddress } from "./coordinator.ts";
+import { HANDOFF_RESULT_CONTRACT } from "./result-contract.ts";
 import { needsInputQuestion, RuntimeCoordinator, view } from "./runtime-coordinator.ts";
 import { ENVELOPE_MARK } from "./runtime/envelope.ts";
 import type { Assignment, Level, Limits } from "./runtime/types.ts";
@@ -180,6 +181,24 @@ describe("needsInputQuestion", () => {
     expect(needsInputQuestion("NEEDS INPUT:")).toBeUndefined();
     expect(needsInputQuestion("")).toBeUndefined();
     expect(needsInputQuestion("Done.")).toBeUndefined();
+  });
+
+  it("steps over a RESULTADO line after the question (the result contract puts it right before), and over nothing else", () => {
+    expect(needsInputQuestion("Fiz a metade.\nRESULTADO: parcial — falta a conta\nNEEDS INPUT: Qual conta?")).toBe("Qual conta?");
+    expect(needsInputQuestion("Fiz a metade.\nNEEDS INPUT: Qual conta?\nRESULTADO: parcial — falta a conta\n")).toBe("Qual conta?");
+    expect(needsInputQuestion("NEEDS INPUT: Qual conta?\n**RESULTADO:** não feito\n\n")).toBe("Qual conta?");
+    expect(needsInputQuestion("RESULTADO: feito — PR #9528")).toBeUndefined();
+    expect(needsInputQuestion("NEEDS INPUT: Qual conta?\nObrigado.\nRESULTADO: parcial — x")).toBeUndefined();
+  });
+
+  it("reads a NEEDS INPUT line that says there is nothing to ask as no question, before or after the RESULTADO line", () => {
+    for (const none of ["nenhum", "Nenhuma.", "nada", "none", "None.", "N/A", "n/a", "-", "—", "(nenhum)", "**nenhum**", "Não.", "nada a perguntar", "Nothing to ask."]) {
+      expect(needsInputQuestion(`Abri a PR.\nNEEDS INPUT: ${none}\nRESULTADO: feito — PR #9528`), none).toBeUndefined();
+      expect(needsInputQuestion(`Abri a PR.\nRESULTADO: feito — PR #9528\nNEEDS INPUT: ${none}\n`), none).toBeUndefined();
+    }
+    // a real question that merely opens with one of those words still parks
+    expect(needsInputQuestion("Fiz a metade.\nNEEDS INPUT: Não sei qual conta usar: a de staging?\nRESULTADO: parcial — falta a conta")).toBe("Não sei qual conta usar: a de staging?");
+    expect(needsInputQuestion("NEEDS INPUT: Nenhum dos dois tokens funciona; qual uso?")).toBe("Nenhum dos dois tokens funciona; qual uso?");
   });
 });
 
@@ -1272,5 +1291,239 @@ describe("RuntimeCoordinator: outward restart policy, answerNode, continuation o
     w.coordinator.tick();
     expect("continuation" in w.coordinator.node("gen-1")!).toBe(false);
     expect(w.host.runs[0]!.composed.turn).toBe("continued");
+  });
+});
+
+describe("RuntimeCoordinator: the result contract (server/result-contract.ts)", () => {
+  /** A coordinator with the contract on, as the desktop app runs it. */
+  const contractWorld = (script?: Script): World => {
+    const host = fakeHost(script);
+    const logs: string[] = [];
+    const coordinator = new RuntimeCoordinator({ dataDir: ":memory:", host, resultContract: true, log: line => logs.push(line) });
+    return { host, coordinator, logs };
+  };
+  const contracted = `\n\n${HANDOFF_RESULT_CONTRACT}`;
+
+  it("fails a request that ended without error on \"não feito\", read in the whole answer, with the reason as the result's first line", async () => {
+    const long = `${"x".repeat(13_000)}\nRESULTADO: não feito — o Jev barrou a escrita`;
+    const w = contractWorld((node) => node.botId === "builder" ? { ok: true, text: long } : undefined);
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick();
+    // the request ends with the contract, after its brief
+    expect(w.host.runs[0]!.text.endsWith(`Brief from @chief:\nBuild it${contracted}`)).toBe(true);
+    await flush();
+    // the line sits past the 12 000 characters the runtime keeps: the whole answer was read
+    const failed = w.coordinator.node(node.id)!;
+    expect(failed).toMatchObject({ status: "failed", outcome: "provider_error", reported: true });
+    expect(failed.result.startsWith("Resultado não feito: o Jev barrou a escrita\n\nxxx")).toBe(true);
+    expect(failed.result).toHaveLength(12_000);
+    expect(w.host.reports[0]).toMatchObject({ child: { id: node.id, status: "failed" }, parent: { id: "gen-1" } });
+    // the requester reads it as a failure, reason first; its own resume is never judged
+    ended(w, "gen-1");
+    w.coordinator.tick();
+    const resume = w.host.runs.at(-1)!;
+    expect(resume.node.id).toBe("gen-1");
+    expect(resume.text).toContain(`[OpenMausBot report from @builder on assignment ${node.id}: failed (provider_error)]`);
+    expect(resume.text).toContain('What @builder said: "Resultado não feito: o Jev barrou a escrita');
+    expect(resume.text).not.toContain(HANDOFF_RESULT_CONTRACT);
+    await flush();
+    expect(w.coordinator.node("gen-1")).toMatchObject({ status: "completed", outcome: "done", result: "chief done" });
+  });
+
+  it.each<[string, string, string]>([
+    ["a partial completes with the server note in front", "Fiz metade.\nRESULTADO: parcial — faltou o aviso",
+      "[Servidor: Resultado parcial: faltou o aviso]\nFiz metade.\nRESULTADO: parcial — faltou o aviso"],
+    ["in progress that says where it goes on completes with that note", "RESULTADO: em andamento — gate da #9534 rodando",
+      "[Servidor: Em andamento: gate da #9534 rodando]\nRESULTADO: em andamento — gate da #9534 rodando"],
+    ["an answer without the line completes as not verified", "Feito, tudo certo.",
+      "[Servidor: Resultado não verificado: a resposta não terminou com a linha RESULTADO]\nFeito, tudo certo."],
+    ["done with a proof completes as it is", "Abri a PR.\nRESULTADO: feito — PR #9528", "Abri a PR.\nRESULTADO: feito — PR #9528"],
+  ])("%s", async (_name, text, result) => {
+    const w = contractWorld((node) => node.botId === "builder" ? { ok: true, text } : undefined);
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick(); await flush();
+    expect(w.coordinator.node(node.id)).toMatchObject({ status: "completed", outcome: "done", result });
+  });
+
+  it("judges a consultation too: its request carries the contract and a consulta line completes it as it is", async () => {
+    const w = contractWorld((node) => node.botId === "tester" ? { ok: true, text: "Prefiro B.\nRESULTADO: consulta — B" } : undefined);
+    begun(w, chief, "gen-1");
+    const { node } = w.coordinator.enqueue(chief, "gen-1", undefined, tester, "A ou B?", { mode: "consult" });
+    w.coordinator.tick();
+    expect(w.host.runs[0]!.text.endsWith(contracted)).toBe(true);
+    await flush();
+    expect(w.coordinator.node(node.id)).toMatchObject({ status: "completed", result: "Prefiro B.\nRESULTADO: consulta — B" });
+  });
+
+  it("parks on NEEDS INPUT whatever the RESULTADO line says, in either order, and judges the turn that ends without a question", async () => {
+    let turns = 0;
+    const w = contractWorld((node) => {
+      if (node.botId !== "builder") return undefined;
+      turns += 1;
+      if (turns === 1) return { ok: true, text: "Fiz a metade.\nRESULTADO: não feito — falta a conta\nNEEDS INPUT: Qual conta devo usar?" };
+      if (turns === 2) return { ok: true, text: "Feito na staging.\nNEEDS INPUT: Posso publicar?\nRESULTADO: parcial — falta publicar" };
+      return { ok: true, text: "Publicado.\nRESULTADO: feito — PR #9600" };
+    });
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick(); await flush();
+    expect(w.host.parks.map(p => p.question)).toEqual(["Qual conta devo usar?"]);
+    expect(w.coordinator.node(node.id)?.status).toBe("waiting");
+    expect(w.host.reports).toHaveLength(0);
+    expect(w.coordinator.answer("builder-work", "A de staging")).toBe(true);
+    w.coordinator.tick();
+    // the turn after the answer carries the answer, then the contract again
+    const answered = w.host.runs.at(-1)!.text;
+    expect(answered).toContain('The person answered: "A de staging".');
+    expect(answered.endsWith(contracted)).toBe(true);
+    await flush();
+    expect(w.host.parks.map(p => p.question)).toEqual(["Qual conta devo usar?", "Posso publicar?"]);
+    expect(w.coordinator.answer("builder-work", "Pode")).toBe(true);
+    w.coordinator.tick(); await flush();
+    expect(w.coordinator.node(node.id)).toMatchObject({ status: "completed", outcome: "done", result: "Publicado.\nRESULTADO: feito — PR #9600" });
+  });
+
+  it("does not judge a turn that handed out work still owed: the teammate waits, and its resume carries the contract and is judged", async () => {
+    const w = contractWorld((node, text) => {
+      if (node.botId === "tester") return { ok: true, text: "Testes verdes.\nRESULTADO: feito — `pnpm test` saiu 0" };
+      if (node.botId === "builder" && text.startsWith("Your downstream room requests have settled.")) {
+        return { ok: true, text: "Revisei.\nRESULTADO: não feito — os testes não cobrem o CSV" };
+      }
+      return undefined;
+    });
+    send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick();
+    const builderNode = w.host.runs[0]!.node;
+    // the builder's turn hands work on before it ends with no RESULTADO line
+    const { node: testerNode } = send(w, builder, "gen-1", builderNode.id, tester, "Test it");
+    await flush();
+    expect(w.coordinator.node(builderNode.id)).toMatchObject({ status: "waiting", result: "builder done" });
+    w.coordinator.tick(); await flush();
+    expect(w.coordinator.node(testerNode.id)).toMatchObject({ status: "completed", result: "Testes verdes.\nRESULTADO: feito — `pnpm test` saiu 0" });
+    w.coordinator.tick();
+    const resume = w.host.runs.at(-1)!;
+    expect(resume.node.id).toBe(builderNode.id);
+    expect(resume.resumed).toBe(true);
+    expect(resume.text.endsWith(contracted)).toBe(true);
+    await flush();
+    expect(w.coordinator.node(builderNode.id)).toMatchObject({ status: "failed", outcome: "provider_error" });
+    expect(w.coordinator.node(builderNode.id)!.result.startsWith("Resultado não feito: os testes não cobrem o CSV\n\nRevisei.")).toBe(true);
+  });
+
+  it("leaves a room member's reply and a one-way notice unjudged and without the contract", async () => {
+    const w = contractWorld();
+    const { node: member } = send(w, chief, "gen-1", undefined, inRoom("builder"), "Build it");
+    const { node: notice } = w.coordinator.enqueue(chief, "gen-1", undefined, tester, "Heads up: release at six", { mode: "notify" });
+    expect(member.groupId).toBe("g1");
+    w.coordinator.tick(); await flush();
+    expect(w.host.runs.map(run => run.node.id).sort()).toEqual([member.id, notice.id].sort());
+    for (const run of w.host.runs) expect(run.text).not.toContain(HANDOFF_RESULT_CONTRACT);
+    expect(w.coordinator.node(member.id)).toMatchObject({ status: "completed", result: "builder done" });
+    expect(w.coordinator.node(notice.id)).toMatchObject({ status: "completed", result: "tester done" });
+  });
+
+  it("is off by default: no contract on the request, and \"não feito\" completes as it is", async () => {
+    const w = world((node) => node.botId === "builder" ? { ok: true, text: "RESULTADO: não feito — x" } : undefined);
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick();
+    expect(w.host.runs[0]!.text).not.toContain(HANDOFF_RESULT_CONTRACT);
+    await flush();
+    expect(w.coordinator.node(node.id)).toMatchObject({ status: "completed", result: "RESULTADO: não feito — x" });
+  });
+
+  it("judges a teammate whose NEEDS INPUT line says there is nothing to ask, instead of parking it for a day", async () => {
+    const text = "Abri a PR.\nNEEDS INPUT: nenhum\nRESULTADO: feito — PR #9528";
+    const w = contractWorld((node) => node.botId === "builder" ? { ok: true, text } : undefined);
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick(); await flush();
+    expect(w.host.parks).toEqual([]);
+    expect(w.coordinator.node(node.id)).toMatchObject({ status: "completed", outcome: "done", result: text, reported: true });
+    expect("question" in w.coordinator.node(node.id)!).toBe(false);
+  });
+
+  it("completes the turn as it is when the RESULTADO reader throws, and logs why", async () => {
+    // A String whose replace() throws: the reader (declaredResult) is the
+    // first to call it, after the NEEDS INPUT check has read the lines.
+    class Unreadable extends String {
+      override replace(): never { throw new Error("unreadable answer"); }
+    }
+    const long = `${"x".repeat(13_000)}\nRESULTADO: não feito — x`;
+    const w = contractWorld((node) => node.botId === "builder" ? { ok: true, text: new Unreadable(long) as unknown as string } : undefined);
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    w.coordinator.tick(); await flush();
+    // not failed on the line it could not read: completed with the answer as it came
+    const settled = w.coordinator.node(node.id)!;
+    expect(settled).toMatchObject({ status: "completed", outcome: "done", reported: true });
+    expect(settled.result).toBe("x".repeat(12_000));
+    expect(w.logs).toContain(`result contract of ${node.id} not read: Error: unreadable answer`);
+  });
+
+  it("keeps a \"não feito\" a teammate declares while the server shuts down; only a turn the shutdown fails is left cut", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "runtime-coordinator-"));
+    try {
+      const host = fakeHost((node) => node.botId === "builder" || node.botId === "tester" ? "hold" : undefined);
+      const coordinator = new RuntimeCoordinator({ dataDir: dir, host, resultContract: true, log: () => {} });
+      const before: World = { host, coordinator, logs: [] };
+      const { node: declared } = send(before, chief, "gen-1", undefined, builder, "Build it");
+      const { node: cut } = send(before, chief, "gen-1", undefined, tester, "Test it");
+      ended(before, "gen-1");
+      coordinator.tick();
+      expect([...host.held.keys()].sort()).toEqual([declared.id, cut.id].sort());
+      // The shutdown begins: index.ts gracefulShutdown closes the coordinator
+      // first, then the engines; turns still finish in that window.
+      coordinator.close();
+      await host.release(declared.id, { ok: true, text: "Tentei.\nRESULTADO: não feito — o Jev barrou a escrita" });
+      await host.release(cut.id, { ok: false, text: "The engine stopped" });
+      // the declared result is the work's result: settled and reported now
+      expect(coordinator.node(declared.id)).toMatchObject({ status: "failed", outcome: "provider_error", reported: true });
+      expect(coordinator.node(declared.id)!.result.startsWith("Resultado não feito: o Jev barrou a escrita\n\nTentei.")).toBe(true);
+      expect(host.reports.map(r => r.child.id)).toEqual([declared.id]);
+      // the engine the shutdown stopped is a cut turn, left for the next start
+      expect(coordinator.node(cut.id)?.status).toBe("running");
+
+      const after = world(undefined, {}, dir);
+      // the declared failure stands, with its reason, and never runs again
+      expect(after.coordinator.node(declared.id)).toMatchObject({ status: "failed", outcome: "provider_error", executions: 1, restarts: 0 });
+      expect(after.coordinator.node(declared.id)!.result.startsWith("Resultado não feito: o Jev barrou a escrita")).toBe(true);
+      expect(after.coordinator.node(cut.id)).toMatchObject({ status: "queued", restart: "rerun", restarts: 1 });
+      after.coordinator.tick();
+      expect(after.host.runs.map(run => run.node.id)).toEqual([cut.id]);
+      await flush();
+      after.coordinator.close();
+    } finally {
+      await removeTempDir(dir);
+    }
+  });
+});
+
+describe("RuntimeCoordinator: a teammate parked on its NEEDS INPUT question", () => {
+  it("waits 24 hours for the person (not the runtime's 30 minutes), then expires", async () => {
+    let now = 1_000_000;
+    const host = fakeHost((node) => node.botId === "builder" ? { ok: true, text: "Fiz a metade.\nNEEDS INPUT: Qual conta devo usar?" } : undefined);
+    const coordinator = new RuntimeCoordinator({ dataDir: ":memory:", host, now: () => now, log: () => {} });
+    const w: World = { host, coordinator, logs: [] };
+    const { node } = send(w, chief, "gen-1", undefined, builder, "Build it");
+    ended(w, "gen-1");
+    coordinator.tick(); await flush();
+    expect(host.parks.map(p => p.question)).toEqual(["Qual conta devo usar?"]);
+    const parked = () => expect(coordinator.node(node.id)).toMatchObject({ status: "waiting", question: "Qual conta devo usar?" });
+    parked();
+    // past the runtime's own 30-minute default: still waiting on the person
+    now += 31 * 60_000;
+    coordinator.tick(); await flush();
+    parked();
+    // 23 h 31 min after the question: still waiting, and the tree is not stalled
+    now += 23 * 60 * 60_000;
+    coordinator.tick(); await flush();
+    parked();
+    expect(coordinator.node("gen-1")?.status).toBe("waiting");
+    // an answer inside the day still lands (the person answers in "Precisa de você")
+    expect(coordinator.awaitingAnswer("builder-work")).toBe(true);
+    // past 24 h: the wait runs out
+    now += 60 * 60_000;
+    coordinator.tick(); await flush();
+    expect(coordinator.node(node.id)).toMatchObject({ status: "failed", outcome: "expired" });
+    expect(coordinator.awaitingAnswer("builder-work")).toBe(false);
+    expect(host.runs.filter(run => run.node.id === node.id)).toHaveLength(1);
+    coordinator.close();
   });
 });

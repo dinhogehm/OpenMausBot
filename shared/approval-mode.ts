@@ -10,28 +10,33 @@ export type ApprovalMode = (typeof APPROVAL_MODES)[number];
  * `edits` (auto-accept edits) exists where the engine has such a mode:
  * Claude and Grok `acceptEdits`, Antigravity `auto_edit`, Qwen `auto-edit`,
  * Gemini `auto_edit`. Codex's Ask already runs `workspace-write`, so an edits
- * level would change nothing there. Full access, the default level, runs on
- * every engine: in the engine's own most permissive mode, or, where it has
- * none, with the harness answering the permission requests it leaves (the
- * chat-completions family, ACP agents such as Kimi or Hermes, Pi's computer
- * confirms). */
+ * level would change nothing there. Full access (a stored level, never the
+ * default in this fork) runs on every engine: in the engine's own most
+ * permissive mode, or, where it has none, with the harness answering the
+ * permission requests it leaves (the chat-completions family, ACP agents
+ * such as Kimi or Hermes, Pi's computer confirms). */
 export function supportsApprovalMode(driverKind: string | undefined, mode: ApprovalMode): boolean {
   if (mode === "custom") return driverKind === "codex";
   if (mode === "edits") return ["claudeAgent", "grokAgent", "antigravityAgent", "qwenAgent", "geminiAgent"].includes(driverKind ?? "");
   return true;
 }
 
-/** Whether switching engines must first drop this level to Ask. A Custom
- * grant's rules belong to one provider's tool semantics, so it never crosses
- * engines; Full carries silently to any engine; Auto-accept edits stops at an
- * engine without it.
- * Adapted from tahodev's provider-switch guard. */
+/** Whether switching engines must first drop this level to Ask. A Full or
+ * Custom grant belongs to one provider's tool semantics, so neither crosses
+ * engines: the person granted it, through the desktop's own confirmation, for
+ * the engine the bot ran on. fork: upstream (cb00428a6, Oct 12) lets Full
+ * carry silently to any engine; this fork keeps the reset to Ask, and Full
+ * comes back only through the packaged desktop's private channel. Other
+ * levels carry across only when the destination implements them (Auto-accept
+ * edits stops at an engine without it). Adapted from tahodev's
+ * provider-switch guard (#1120). */
 export function modelSwitchNeedsAsk(
   mode: ApprovalMode,
   fromDriver: string | undefined,
   toDriver: string | undefined,
 ): boolean {
-  return !supportsApprovalMode(toDriver, mode) || (mode === "custom" && fromDriver !== toDriver);
+  return !supportsApprovalMode(toDriver, mode) ||
+    ((mode === "full" || mode === "custom") && fromDriver !== toDriver);
 }
 
 export function hasNativeAutoReview(driverKind: string | undefined): boolean {
@@ -50,22 +55,29 @@ export function isApprovalMode(value: unknown): value is ApprovalMode {
   return typeof value === "string" && (APPROVAL_MODES as readonly string[]).includes(value);
 }
 
-/** The level a bot or conversation runs at until a person picks one: Full
- * access, as in t3code (its DEFAULT_RUNTIME_MODE). Each provider maps it to
- * its own most permissive mode; a real question or a missing credential
- * still reaches a person. */
-export const DEFAULT_APPROVAL_MODE: ApprovalMode = "full";
+/** The level a bot or conversation runs at until a person picks one.
+ *
+ * fork: Ask até a pessoa escolher. Upstream 593fd1c5a (v0.1.109) moved this
+ * to Full access, as in t3code; this fork keeps Ask. A bot or conversation
+ * with no saved level never runs at Full: Full is only ever a stored level,
+ * reached through the desktop's own confirmation. So records with no level
+ * (the legacy Auto bit off included), Chief-created teammates, team-backup
+ * and package imports, presets and organization library items keep asking. */
+export const DEFAULT_APPROVAL_MODE: ApprovalMode = "ask";
 
 let defaultApprovalMode: ApprovalMode = DEFAULT_APPROVAL_MODE;
 
-/** On a shared company workspace Full access comes only from the operator's
- * own policy, so its server makes Ask the default once, at startup. */
+/** Upstream's startup switch for the no-level default (a shared company
+ * workspace sets Ask). fork: it can never make that default Full or Custom,
+ * so no flag or policy turns "no level saved" into an elevated level. */
 export function setDefaultApprovalMode(mode: ApprovalMode): void {
-  defaultApprovalMode = mode;
+  defaultApprovalMode = mode === "full" || mode === "custom" ? "ask" : mode;
 }
 
-/** An unset level runs at the default, the pre-approvalMode Auto bit reads as
- * safe Auto, and an unknown persisted value fails closed to Ask. */
+/** Resolve the durable mode. A bot or conversation nobody has set a level on
+ * runs at the default, Ask in this fork. The legacy Auto bit, written before
+ * approvalMode existed, stays safe Auto, and an unknown persisted value fails
+ * closed to Ask. */
 export function approvalModeFor(bot: {
   approvalMode?: unknown;
   autoApprove?: unknown;

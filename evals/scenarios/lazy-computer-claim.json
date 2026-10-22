@@ -70,7 +70,7 @@
     {
       "kind": "waitForActivity",
       "bot": "auto",
-      "namePrefix": "Waiting for its turn on this computer",
+      "namePrefix": "Aguardando a vez neste computador",
       "timeoutMs": 20000
     },
     {
@@ -86,7 +86,7 @@
     {
       "kind": "waitForActivity",
       "bot": "auto",
-      "namePrefix": "Computer free",
+      "namePrefix": "Computador livre",
       "timeoutMs": 20000
     },
     {
@@ -120,12 +120,12 @@
     {
       "kind": "activitySeen",
       "bot": "auto",
-      "namePrefix": "Waiting for its turn on this computer"
+      "namePrefix": "Aguardando a vez neste computador"
     },
     {
       "kind": "activitySeen",
       "bot": "auto",
-      "namePrefix": "Computer free"
+      "namePrefix": "Computador livre"
     },
     {
       "kind": "toolCalls",

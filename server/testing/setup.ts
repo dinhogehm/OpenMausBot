@@ -16,6 +16,10 @@ delete process.env.OMB_DATA_DIR;
 delete process.env.HERMES_HOME;
 // Named explicitly although homedir() already covers it: the device tests delete this directory wholesale.
 process.env.OMB_COMPANION_DIR = join(home, ".openmausbot-companion");
+// Fake engines answer without a RESULTADO line: the result contract
+// (server/result-contract.ts) has its own tests, and the e2e that turns it on
+// sets OMB_RESULT_CONTRACT=1 for its server.
+process.env.OMB_RESULT_CONTRACT ??= "0";
 
 // Product code follows navigator.language; pin it so English assertions do not depend on the host locale.
 Object.defineProperty(globalThis.navigator, "language", { value: "en", configurable: true });

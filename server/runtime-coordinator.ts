@@ -2,11 +2,12 @@ import { join } from "node:path";
 
 import type { BeginTurnRequest, Coordinator, CoordinatorHost, CoordinatorOptions, HandoffOptions, HandoffView, HostTurnResult, LiveHandoffEdge, RoomAddress } from "./coordinator.ts";
 import type { WorkOrigin } from "./peer-provenance.ts";
-import { composeEnvelope, composeReport, composeResume, composeRootTurn, continuationLine, envelopeNote } from "./runtime/envelope.ts";
+import { isResultLine, settleHandoffNode } from "./result-contract.ts";
+import { composeEnvelope, composeReport, composeResume, composeRootTurn, continuationLine, envelopeNote, withResultContract } from "./runtime/envelope.ts";
 import { Runtime } from "./runtime/runtime.ts";
 import { importLegacyDelegations, importLegacyHandoffs, type LegacyThreadResolver } from "./runtime/import-legacy.ts";
 import { openRuntimeStore, type RuntimeStore } from "./runtime/store.ts";
-import { childrenSince, clip, isTerminal, path } from "./runtime/tree.ts";
+import { awaited, childrenSince, clip, isTerminal, path } from "./runtime/tree.ts";
 import type { Assignment, EndResult, Origin, Owner, Reply, Requester, RunInput, RunResult, StatusView, TurnRunner } from "./runtime/types.ts";
 
 const NOT_RUNNING = "The originating room task is no longer running";
@@ -21,10 +22,22 @@ const NO_TURN = "The requesting turn has no root (no turn)";
 const BRIEF_MAX = 12_000;
 const RUNTIME_DEPTH = /^Assignment depth limit reached/;
 const NEEDS_INPUT = /^needs input:/i;
+/** A NEEDS INPUT line that says there is nothing to ask ("nenhum", "none",
+ * "n/a", a dash), with or without markup, brackets or a full stop. */
+const NO_QUESTION = /^[\s*_`([]*(?:none|nothing(?:\s+to\s+ask)?|no|n\/a|na|nenhum[ao]?|nada(?:\s+a\s+perguntar)?|n[ãa]o|sem\s+pergunta|nenhuma\s+pergunta|-+|—|–)[\s*_`)\].!]*$/i;
 
 /** Per-turn stalls belong to the host's watchdog: this only keeps the runtime's window out of its way. */
 const TURN_STALL_MS = 24 * 60 * 60_000;
 
+/** How long a teammate parked on its NEEDS INPUT question waits for the
+ * person before it expires (the runtime's own default is 30 minutes): the
+ * person answers in the "Precisa de você" queue, often hours later, and an
+ * answer that lands after the wait ran out would start nothing. */
+const INPUT_WAIT_MS = 24 * 60 * 60_000;
+
+/** What one root may hand out, and run, before anything settles: enough for
+ * a Chief to brief a room of 25 visitors (Launch Room) and have each take a
+ * turn, with room for their own hand-offs. Any settlement renews both. */
 const REQUESTS_PER_ROOT = 64;
 const EXECUTIONS_PER_ROOT = 96;
 
@@ -58,15 +71,23 @@ function runtimeOrigin(origin: WorkOrigin | undefined, source: RoomAddress): Ori
     : { kind: "outside", source: "chat", ref: source.threadId };
 }
 
+/** The question a turn ended on, when its last non-empty line opens with
+ * `NEEDS INPUT:`; undefined otherwise, when nothing follows the marker, or
+ * when what follows says there is no question ("NEEDS INPUT: nenhum",
+ * "none", "n/a"): a teammate that finished and filled the slot in is not
+ * parked for a day on a question it never asked. A RESULTADO line after the
+ * question (the result contract asks for it right before:
+ * server/result-contract.ts) is stepped over, so a teammate that put the two
+ * in the other order still parks on its question. */
 export function needsInputQuestion(text: string): string | undefined {
   const lines = text.split(/\r?\n/);
   let last = lines.length - 1;
-  while (last >= 0 && lines[last]!.trim() === "") last -= 1;
+  while (last >= 0 && (lines[last]!.trim() === "" || isResultLine(lines[last]!))) last -= 1;
   if (last < 0) return undefined;
   const line = lines[last]!.trim();
   if (!NEEDS_INPUT.test(line)) return undefined;
-  const question = [line.slice("NEEDS INPUT:".length), ...lines.slice(last + 1)].join("\n").trim();
-  return question || undefined;
+  const question = line.slice("NEEDS INPUT:".length).trim();
+  return question && !NO_QUESTION.test(question) ? question : undefined;
 }
 
 export function view(a: Assignment, parent?: Assignment): HandoffView {
@@ -103,6 +124,8 @@ export class RuntimeCoordinator implements Coordinator {
   private readonly legacyThreads: LegacyThreadResolver | undefined;
   private readonly now: () => number;
   private readonly log: (line: string) => void;
+  /** CoordinatorOptions.resultContract. */
+  private readonly resultContract: boolean;
   private opened = false;
   private prunedAt: number | undefined;
 
@@ -113,10 +136,12 @@ export class RuntimeCoordinator implements Coordinator {
     this.legacyThreads = options.legacyThreads;
     this.now = options.now ?? Date.now;
     this.log = options.log ?? ((line) => console.error("coordinator:", line));
+    this.resultContract = options.resultContract === true;
     this.store = openRuntimeStore(options.dataDir === ":memory:" ? ":memory:" : join(options.dataDir, "runtime.db"));
     this.runtime = new Runtime(this.store, this.runner(), {
       clock: { now: () => this.now(), monotonic: () => performance.now() },
-      limits: { depth: 4, requests: REQUESTS_PER_ROOT, executions: EXECUTIONS_PER_ROOT, turnStallMs: TURN_STALL_MS, ...options.runtimeLimits },
+      limits: { depth: 4, requests: REQUESTS_PER_ROOT, executions: EXECUTIONS_PER_ROOT, turnStallMs: TURN_STALL_MS, inputWaitMs: INPUT_WAIT_MS,
+        ...options.runtimeLimits },
       ...(options.log ? { log: options.log } : {}),
     });
   }
@@ -474,13 +499,23 @@ export class RuntimeCoordinator implements Coordinator {
     const resumed = input.turn === "resume";
     const settled = input.settled ?? [];
     const root = a.parentId === undefined;
-    const body = resumed
+    // A root is the person's own conversation: its later executions carry
+    // what the harness knows (a restart, the person's act, a continuation),
+    // never an assignment envelope. A resume carries its reports either way.
+    // A child that continues after a cap opens with why and where its steps
+    // so far are, then its assignment again, as a restart note would.
+    const composed = resumed
       ? composeResume(a, this.host.names(node, parent && this.project(parent)),
         settled.map(child => composeReport(this.readable(child, a, node), this.host.names(view(child, a), node))))
       : root
         ? composeRootTurn(a, { turn: input.turn === "resume" ? "first" : input.turn, restartNote: "", ...(input.answer !== undefined ? { answer: input.answer } : {}),
           ...(input.continuation ? { continuation: input.continuation } : {}) })
         : input.continuation ? `${continuationLine(input.continuation)}\n${input.envelope}` : input.envelope;
+    // A judged teammate's turn ends with the result contract, its resume
+    // too (envelope.ts withResultContract); a root's never does here: a
+    // routine run's root gets the routine's own contract from the host.
+    const body = this.resultContract && !root ? withResultContract(composed, a) : composed;
+    // A room whose transcript already carries the brief gets the note alone.
     const note = resumed || root ? body : envelopeNote(body);
     const evidence = (result: HostTurnResult) => result.evidence ? { evidence: result.evidence } : {};
     const result = await this.host.run(node, resumed, signal,
@@ -491,7 +526,43 @@ export class RuntimeCoordinator implements Coordinator {
     if (!result.ok) return { kind: "failed", outcome: "provider_error", text: result.text, ...evidence(result) };
     const question = root ? undefined : needsInputQuestion(result.text);
     if (question !== undefined) return { kind: "needs_input", question, ...evidence(result) };
-    return { kind: "completed", text: result.text, ...evidence(result) };
+    // Only after the question: a teammate that needs the person parks on
+    // it whatever its RESULTADO line says, and is judged on the turn that
+    // ends without one.
+    const verdict = this.settleResult(a, node, result.text);
+    // "Não feito" fails the request on the runtime's own failure outcome
+    // (no outcome of its own), with "Resultado não feito: …" as the
+    // result's first line: what the requester's chip and report show. It is
+    // the turn's declared result, so a shutdown that began meanwhile does
+    // not drop it as a cut turn to run again at the next start (`declared`).
+    if (verdict.failed) return { kind: "failed", outcome: "provider_error", text: verdict.text, declared: true, ...evidence(result) };
+    return { kind: "completed", text: verdict.text, ...evidence(result) };
+  }
+
+  /** A judged teammate's turn that ended without error settles by its
+   * RESULTADO line (server/result-contract.ts), read in the whole answer
+   * before the runtime keeps its first 12 000 characters: "não feito" fails
+   * the request with the reason first; anything else completes it, with a
+   * "[Servidor: …]" note in front when the line is partial, in progress or
+   * not proved. Not judged: a root (it answers the person), a room member,
+   * a one-way notice, and a turn that handed out work still owed to it
+   * (that is not its final answer: the node waits, and its resume is the
+   * turn judged). A reader that throws completes the turn as it is. */
+  private settleResult(a: Assignment, node: HandoffView, text: string): { failed: boolean; text: string } {
+    if (!this.resultContract || a.parentId === undefined || this.owesWork(a)) return { failed: false, text };
+    try {
+      return settleHandoffNode(text, node);
+    } catch (error) {
+      this.log(`result contract of ${a.id} not read: ${String(error)}`);
+      return { failed: false, text };
+    }
+  }
+
+  /** The node waits on work it handed out when its turn ends (the
+   * runtime's own rule in finishTurn): an awaited child still open, or one
+   * this turn handed out, settled or not. */
+  private owesWork(a: Assignment): boolean {
+    return awaited(this.store.children(a.id)).some(c => !isTerminal(c)) || awaited(childrenSince(this.store, a)).length > 0;
   }
 
   private live(): Assignment[] {

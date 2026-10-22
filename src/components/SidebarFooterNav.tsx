@@ -1,4 +1,4 @@
-import { AlertTriangle, BarChart3, FolderOpen, Network, Puzzle, Zap } from "lucide-react";
+import { AlertTriangle, BarChart3, FolderOpen, Network, Puzzle, Workflow, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { useAppTriggers } from "@/lib/app-triggers";
@@ -7,8 +7,8 @@ import { useCloudFilesReady } from "@/lib/cloud-files";
 import { t } from "@/lib/i18n";
 import { useAdvancedMode } from "@/lib/interface-mode";
 import { isRoutineProblemRun } from "@/lib/routines";
-import { ccAlertState } from "@/lib/thread-signals";
 import { useSidebarToolsLayout, type SidebarDensity } from "@/lib/sidebar-preferences";
+import { ccAlertState } from "@/lib/thread-signals";
 import { useStore } from "@/state/store";
 
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
@@ -115,6 +115,7 @@ export function SidebarFooterNav({
     icon={(active) => <Zap size={iconSize} className={tone(active)} />}
     onClick={() => dispatch({ type: "showRoutines", view: "list" })}
   />;
+  const ccAlerts = (state.bots ?? []).flatMap((bot) => (bot.tasks ?? []).flatMap((task) => (task.ccAlerts ?? []).map((alert) => ({ bot, task, alert }))));
   const filesRow = useCloudFilesReady() && <NavRow
     id="files"
     label={t("sidebar.nav.files")}
@@ -134,8 +135,17 @@ export function SidebarFooterNav({
     icon={(active) => <BarChart3 size={iconSize} className={tone(active)} />}
     onClick={() => dispatch({ type: "showReport" })}
   />;
+  const pipelineRow = <NavRow
+    id="pipeline"
+    label={t("sidebar.nav.pipeline")}
+    iconsOnly={iconsOnly || toolbar}
+    rail={rail}
+    active={state.activeView === "pipeline"}
+    icon={(active) => <Workflow size={iconSize} className={tone(active)} />}
+    onClick={() => dispatch({ type: "showPipeline" })}
+  />;
   // Claude Code sessions that need a look, wherever their conversation is.
-  const ccRows = (state.bots ?? []).flatMap((bot) => (bot.tasks ?? []).flatMap((task) => (task.ccAlerts ?? []).map((alert) => <NavRow
+  const ccRows = ccAlerts.map(({ bot, task, alert }) => <NavRow
     key={`cc-${alert.sessionId}`}
     id={`cc-${alert.sessionId}`}
     label={t("ccAlert.item", { title: alert.title, state: ccAlertState(alert.state) })}
@@ -144,9 +154,8 @@ export function SidebarFooterNav({
     attention={alert.state !== "stalled"}
     icon={() => <AlertTriangle size={iconSize} className="text-warning" />}
     onClick={() => dispatch({ type: "switchTask", botId: bot.id, threadId: task.threadId })}
-  />)));
-  // Simple mode keeps Automations and Files, without the Tools header.
-  if (!advanced && !iconsOnly) return <nav aria-label={t("sidebar.tools")} className="flex flex-col gap-0.5">{automationsRow}{filesRow}{ccRows}</nav>;
+  />);
+  if (!advanced && !iconsOnly) return <nav aria-label={t("sidebar.tools")} className="flex flex-col gap-0.5">{automationsRow}{reportRow}{pipelineRow}{filesRow}{ccRows}</nav>;
 
   const rows = (
     <>
@@ -172,7 +181,8 @@ export function SidebarFooterNav({
           onClick={() => dispatch({ type: "showTeamMap" })}
         />
       )}
-      {!toolbar && reportRow}
+      {reportRow}
+      {pipelineRow}
       {filesRow}
       {ccRows}
     </>
@@ -181,12 +191,15 @@ export function SidebarFooterNav({
   if (iconsOnly) {
     return <nav data-tour="tools" aria-label={t("sidebar.tools")} className={cn("flex flex-col items-center", rail ? "gap-0.5" : "gap-1")}>{rows}</nav>;
   }
+  // The label stays visible when the rows fold away, so the header says what is inside.
+  // local/patches: a Claude Code session that needs a look also lights the
+  // folded header, so folding Tools never hides it.
   return (
     <div data-tour="tools">
       <SidebarSectionHeader
         name={t("sidebar.tools")}
         collapsed={collapsed}
-        alert={collapsed && automationsNeedYou}
+        alert={collapsed && (automationsNeedYou || ccAlerts.some(({ alert }) => alert.state !== "stalled"))}
         onToggle={onToggleCollapsed}
         reorderable={false}
         dragging={false}
